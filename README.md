@@ -244,9 +244,15 @@ routines at LS 0x3FEC0. Offline-compiled variants check all 320 actual bytes and
 resident ownership on every call, including cache hits; unknown bytes stop.
 The shared preparation also compiles call-return entries for resumed SPU tasks.
 The eight-channel audio port starts with verified stereo mixing and real host
-consumption. SCREAM initializes and startup reads/decompresses data, then requests
-the system confirmation-button preference. Pass `run ... --enter-button cross`
-or `circle` explicitly; no preference is invented. No interpreter is used.
+consumption. SCREAM initializes and startup reads/decompresses data. Controller
+queries report measured host connections/capabilities, without an implicit pad
+or fabricated pressure/sensor support. Startup now stops at the old
+`_cellGcmSetFlipCommand` protocol: its original RSX initialization, semaphore
+synchronization and FIFO subroutine still need integration. The original
+`libgcm_sys` has 262 PPU functions generated and 102 exports prepared offline;
+it is neither compiled into this runner nor bound/executed. Pass
+`run ... --enter-button cross` or `circle` explicitly; no preference is inferred
+from language/region. No interpreter is used.
 No game frame, selector transition or gameplay is verified. Original and derived
 proprietary files remain outside Git.
 Kernel mutex creation/destruction, uncontended locks, recursion and try-lock

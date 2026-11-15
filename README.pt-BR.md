@@ -249,9 +249,14 @@ As variantes compiladas offline conferem os 320 bytes reais e o vínculo ao dono
 residente a cada chamada, inclusive com cache ativo; bytes desconhecidos param.
 A preparação compartilhada também compila entradas de retorno de chamadas para
 retomar tarefas SPU. A porta de oito canais inicia com mistura estéreo verificada
-e consumo real no host. SCREAM inicializa e o boot lê/descomprime dados, depois
-consulta o botão de confirmação do sistema. Use `run ... --enter-button cross`
-ou `circle` explicitamente; nenhuma preferência é inventada. Não há interpretação.
+e consumo real no host. SCREAM inicializa e o boot lê/descomprime dados. A consulta
+de controles informa conexões e recursos medidos no host, sem porta implícita
+nem suporte inventado a pressão/sensores. O boot agora para no protocolo antigo
+de `_cellGcmSetFlipCommand`: a inicialização original do RSX, a sincronização por
+semáforos e a subrotina FIFO ainda precisam de integração. A `libgcm_sys` original
+tem 262 funções PPU geradas e 102 exports preparados offline; ela não foi
+compilada neste runner nem vinculada/executada. Use `run ... --enter-button cross`
+ou `circle` explicitamente; idioma/região não inferem a preferência. Não há interpretação.
 Nenhum frame, transição para o seletor ou gameplay foi verificado.
 Originais e derivados proprietários permanecem fora do Git.
 Criação/destruição de mutexes do kernel, locks sem disputa, recursão e erros de

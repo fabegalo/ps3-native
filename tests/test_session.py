@@ -31,12 +31,13 @@ class SessionTests(unittest.TestCase):
                     run(root, {**original, 'id': 'different-input'}, build)
                 launch.return_value.poll.return_value = 0
                 launch.return_value.wait.return_value = 0
-                with patch.dict('os.environ', {'PS3_ENTER_BUTTON': 'invalid', 'SPU_FALLBACK': '1'}):
+                with patch.dict('os.environ', {'PS3_ENTER_BUTTON': 'invalid', 'SPU_FALLBACK': '1', 'PAD_SCRIPT': 'own-untrusted-input'}):
                     for button in (None, 'cross', 'circle'):
                         run(root, original, build, enter_button=button)
                         env = launch.call_args.kwargs['env']
                         self.assertEqual(env.get('PS3_ENTER_BUTTON'), button)
                         self.assertNotIn('SPU_FALLBACK', env)
+                        self.assertNotIn('PAD_SCRIPT', env)
                 launch.reset_mock()
                 with self.assertRaisesRegex(ValueError, 'cross or circle'):
                     run(root, original, build, enter_button='invalid')

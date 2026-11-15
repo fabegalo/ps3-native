@@ -3179,7 +3179,37 @@
          if (opd) {
              gwrite32(opd + 0x0, GCM_FIFO_CALLBACK_SENTINEL_EA);  /* func EA */
              gwrite32(opd + 0x4, 0);                              /* toc (unused) */
-@@ -990,8 +1011,12 @@
+@@ -766,7 +787,7 @@
+ #ifdef _WIN32
+     __declspec(dllimport) void __stdcall Sleep(unsigned long);
+ #endif  /* elsewhere: runtime/platform/win32_compat.h */
+-    for (int i = 0; i < 64 && s_flip_status == CELL_GCM_FLIP_STATUS_WAITING; i++)
++    for (int i = 0; i < 64 && cellGcmGetFlipStatus() == CELL_GCM_FLIP_STATUS_WAITING; i++)
+         Sleep(1);
+     /* A flip still WAITING after the bound is left to the tick. Forcing DONE
+      * here skipped its completion: the tick only completes WAITING flips, so
+@@ -796,6 +817,9 @@
+ /* NID: 0xE315A0B2 */
+ u32 cellGcmGetFlipStatus(void)
+ {
++    FLIP_LOCK();
++    const u32 status = s_flip_status;
++    FLIP_UNLOCK();
+     /* Avoid host-calling the guest OPDs directly (they're not valid host
+      * function pointers). Use cellGcmTickVBlank() / TickFlip() instead,
+      * which dispatch via g_ps3_guest_caller — see below. */
+@@ -807,8 +831,8 @@
+       static int fd = -1; if (fd < 0) fd = getenv("FLIP_DBG") ? 1 : 0;
+       if (fd && PS3_LOG_FIRST(n, 24))
+           fprintf(stderr, "[FLIP] GetFlipStatus -> %u (0=DONE 1=WAITING)%c",
+-                  s_flip_status, 10); }
+-    return s_flip_status;
++                  status, 10); }
++    return status;
+ }
+ 
+ /* Host-side ticks. The game's host driver (e.g. flow main.cpp) calls
+@@ -990,8 +1014,12 @@
           * the flip handler, and hung with get == put on exactly that. Leave
           * the newer flip WAITING for the next tick. */
          FLIP_LOCK();
@@ -3193,7 +3223,7 @@
          FLIP_UNLOCK();
          if (s_flip_handler_opd && g_ps3_guest_caller) {
              ydkj_restore_handler_opd(s_flip_handler_opd, s_flip_handler_code);
-@@ -1669,6 +1694,14 @@
+@@ -1669,6 +1697,14 @@
   * and halved the frame rate). Call AFTER draining. */
  int cellGcm_take_flip_pending_synced(void)
  {
@@ -3208,7 +3238,7 @@
      if (!s_flip_pending) return 0;
      u32 put = vm_read32(GCM_CONTROL_GUEST_ADDR + 0);
      u32 get = vm_read32(GCM_CONTROL_GUEST_ADDR + 4);
-@@ -2230,6 +2263,40 @@
+@@ -2230,6 +2266,40 @@
  static void gcm_3d_method(rsx_state* st, u32 m, u32 v, int legacy_state_live)
  {
      extern u32 g_rsx_last_reference;
@@ -3249,7 +3279,7 @@
      /* #466: rsx_state feeds only the legacy vtable backend. With the draw
       * engine up and no vtable registered, the state it builds is never read,
       * so only the methods with effects outside it are worth handing over.
-@@ -2248,6 +2315,7 @@
+@@ -2248,6 +2318,7 @@
       * tells the title every queried object is occluded. */
      if (m == 0x1A8) s_report_dma = v;
      if (m == 0x1800) {
@@ -3257,7 +3287,7 @@
          const u32 off = v & 0xFFFFFFu, idx = off / 16u;
          const u32 val = (v >> 24) == 1u ? 0xFFFFu : 0u;
          const u64 ts = gcm_report_timestamp();
-@@ -2266,6 +2334,7 @@
+@@ -2266,6 +2337,7 @@
              s_report_data[idx].timestamp = ts;
              s_report_data[idx].value = val;
          }
@@ -3265,7 +3295,7 @@
      }
  }
  
-@@ -2315,6 +2384,10 @@
+@@ -2315,6 +2387,10 @@
   * RSX-thread profiles, so each is read once and cached, like the other knobs. */
  static void gcm_rsx_process_fifo_unlocked(void)
  {
@@ -3276,7 +3306,7 @@
      { static unsigned _n = 0; static unsigned long long _t0 = 0;
        extern unsigned long long ps3_ms_now(void);
        _n++;
-@@ -2547,7 +2620,32 @@
+@@ -2547,7 +2623,32 @@
          if (park_off && (s_fifo_getoff != park_off || !is_jump || jump_tgt != park_off))
              park_off = 0;
  
@@ -3309,7 +3339,7 @@
              /* lv1 driver flip: statically-linked libgcm cellGcmSetFlip writes
               * this word into the FIFO instead of calling any import. Fire the
               * flip (status/count/handler) and STOP this drain so the ticker's
-@@ -2596,6 +2694,9 @@
+@@ -2596,6 +2697,9 @@
               * 3 MB ring at boot, wraps, and a walker stopping at every flip
               * then crawled ~1 KB a tick while the title wrote over the
               * commands ahead of it. */
@@ -3319,7 +3349,7 @@
              if (gcm_fifo_backlog(put, s_fifo_getoff) < GCM_FIFO_CATCHUP_BYTES)
                  { why = "flip"; break; }
              continue;
-@@ -3550,29 +3651,53 @@
+@@ -3550,29 +3654,53 @@
  /* NID: 0xA2478CA3 */
  s32 cellGcmSetPrepareFlip(void* ctx, u32 bufferId)
  {
@@ -3396,7 +3426,7 @@
  }
  
  /* NID: 0x1BFAB6EE */
-@@ -3717,6 +3842,9 @@
+@@ -3717,6 +3845,9 @@
          return CELL_OK;
      }
  
@@ -3406,7 +3436,7 @@
      /* Auto-map unmapped main memory. On real hardware PSL1GHT pre-maps its
       * whole RSX heap in gcmInitBody, so its libraries never call MapMainMemory
       * before handing an EA to the RSX (Tiny3D's command ring lives in an
-@@ -4114,12 +4242,16 @@
+@@ -4114,12 +4245,16 @@
      if (index >= CELL_GCM_MAX_REPORT_COUNT)
          return 0;
  
@@ -3423,7 +3453,7 @@
  }
  
  /* ---------------------------------------------------------------------------
-@@ -4127,11 +4259,13 @@
+@@ -4127,11 +4262,13 @@
   * -----------------------------------------------------------------------*/
  
  /* NID: 0x0B4B62D5 */
@@ -3441,7 +3471,7 @@
  
      if (ps3_log_verbose())
          printf("[cellGcmSys] SetTile(index=%u, loc=%u, offset=0x%X, size=0x%X, pitch=%u)\n",
-@@ -4145,7 +4279,7 @@
+@@ -4145,7 +4282,7 @@
      s_tiles[index].bank   = bank;
      /* SetTile binds too (as it does on RPCS3), so a
       * title that never calls BindTile still has its tiles in force. */
@@ -3450,7 +3480,7 @@
  
      /* Build tile register value (simplified) */
      s_tiles[index].tile  = (location << 0) | (pitch << 8);
-@@ -4153,6 +4287,10 @@
+@@ -4153,6 +4290,10 @@
      gcm_tile_publish(index);
  
      return CELL_OK;
@@ -3461,7 +3491,7 @@
  }
  
  /* NID: 0x06EDEA25 */
-@@ -4311,7 +4449,7 @@
+@@ -4311,7 +4452,7 @@
                         u32 pitch, u8 comp, u16 base, u8 bank)
  {
      /* Delegates to existing SetTile */
@@ -3470,7 +3500,7 @@
  }
  
  /* Default FIFO size — configures command buffer size before init */
-@@ -4591,7 +4729,20 @@
+@@ -4591,7 +4732,20 @@
  s32 cellGcmSetFlipImmediate(u32 bufferId)
  {
      printf("[cellGcmSys] SetFlipImmediate(bufferId=%u)\n", bufferId);
@@ -6467,7 +6497,116 @@
  
  /* PAD_CLOCK=flips: PAD_SCRIPT and PAD_STICK times count guest flips instead of
   * wall-clock seconds. A loaded machine runs a title at a third of its usual
-@@ -726,7 +729,15 @@
+@@ -73,6 +76,7 @@
+ 
+ typedef struct {
+     int  connected;
++    u32  capabilities;
+     u16  buttons;           /* CELL_PAD_CTRL_* bitmask */
+     u8   analog_lx;         /* 0-255, center=128 */
+     u8   analog_ly;
+@@ -148,7 +152,11 @@
+ static void pad_track_assign(void)
+ {
+     for (int i = 0; i < PAD_MAX_HOST_PORTS; i++) {
+-        const int on = s_host_state[i].connected || i == 0;   /* port 0: the virtual pad */
++        const int on = s_host_state[i].connected
++#ifndef PS3_NATIVE_STRICT
++            || i == 0
++#endif
++            ;
+         if (on != s_port_reported[i]) { s_port_reported[i] = on; s_port_changed[i] = 1; }
+     }
+ }
+@@ -365,8 +373,10 @@
+  * points, means every slot reads as unplugged. */
+ typedef DWORD (WINAPI *pad_xi_get_state_fn)(DWORD, XINPUT_STATE*);
+ typedef DWORD (WINAPI *pad_xi_set_state_fn)(DWORD, XINPUT_VIBRATION*);
++typedef DWORD (WINAPI *pad_xi_get_caps_fn)(DWORD, DWORD, XINPUT_CAPABILITIES*);
+ static pad_xi_get_state_fn p_xi_get_state;
+ static pad_xi_set_state_fn p_xi_set_state;
++static pad_xi_get_caps_fn p_xi_get_caps;
+ static int s_xi_tried;
+ 
+ static int pad_xinput_load(void)
+@@ -375,18 +385,28 @@
+     if (s_xi_tried) return p_xi_get_state != NULL;
+     s_xi_tried = 1;
+     for (size_t k = 0; k < sizeof(names) / sizeof(names[0]); k++) {
++#ifdef PS3_NATIVE_STRICT
++        /* XInput 9.1.0 fabricates a fixed capability set for every device. */
++        if (k == 2) break;
++#endif
+         HMODULE m = LoadLibraryExW(names[k], NULL, LOAD_LIBRARY_SEARCH_SYSTEM32);
+         pad_xi_get_state_fn g;
+         pad_xi_set_state_fn st;
+         if (!m) continue;
+         g  = (pad_xi_get_state_fn)(void (*)(void))GetProcAddress(m, "XInputGetState");
+         st = (pad_xi_set_state_fn)(void (*)(void))GetProcAddress(m, "XInputSetState");
+-        if (!g || !st) { FreeLibrary(m); continue; }
++        pad_xi_get_caps_fn caps = (pad_xi_get_caps_fn)(void (*)(void))GetProcAddress(m, "XInputGetCapabilities");
++        if (!g || !st || !caps) { FreeLibrary(m); continue; }
+         p_xi_get_state = g;
+         p_xi_set_state = st;
++        p_xi_get_caps = caps;
+         printf("[cellPad] XInput from %ls\n", names[k]);
+         return 1;
+     }
++#ifdef PS3_NATIVE_STRICT
++    fprintf(stderr, "[native-blocked] a capability-reporting XInput backend is unavailable\n");
++    fflush(stderr); ps3_native_stop();
++#endif
+     printf("[cellPad] no XInput DLL (XInput1_4, XInput1_3, XInput9_1_0): no XInput pads\n");
+     return 0;
+ }
+@@ -437,6 +457,25 @@
+             continue;
+         }
+         s_pad_empty_until[i] = 0;
++
++        XINPUT_CAPABILITIES caps;
++        memset(&caps, 0, sizeof caps);
++        result = p_xi_get_caps ? p_xi_get_caps((DWORD)i, 0, &caps) : ERROR_DEVICE_NOT_CONNECTED;
++        if (result != ERROR_SUCCESS) {
++            pad_host_release(&s_host_state[i]);
++#ifdef PS3_NATIVE_STRICT
++            if (result != ERROR_DEVICE_NOT_CONNECTED) {
++                fprintf(stderr, "[native-blocked] XInput capability query failed\n");
++                fflush(stderr); ps3_native_stop();
++            }
++#endif
++            continue;
++        }
++        s_host_state[i].capabilities = CELL_PAD_CAPABILITY_PS3_CONFORMITY;
++        if (caps.Gamepad.sThumbLX && caps.Gamepad.sThumbLY && caps.Gamepad.sThumbRX && caps.Gamepad.sThumbRY)
++            s_host_state[i].capabilities |= CELL_PAD_CAPABILITY_HP_ANALOG_STICK;
++        if (caps.Vibration.wLeftMotorSpeed && caps.Vibration.wRightMotorSpeed)
++            s_host_state[i].capabilities |= CELL_PAD_CAPABILITY_ACTUATOR;
+ 
+         s_host_state[i].connected = 1;
+         XINPUT_GAMEPAD* gp = &state.Gamepad;
+@@ -659,6 +698,20 @@
+         s_host_state[i].connected = 1;
+ 
+         /* Keep a rumble the title set going (see PAD_RUMBLE_HOLD_MS). */
++        s_host_state[i].capabilities = CELL_PAD_CAPABILITY_PS3_CONFORMITY;
++#if SDL_VERSION_ATLEAST(2, 0, 14)
++        if (SDL_GameControllerHasAxis(gc, SDL_CONTROLLER_AXIS_LEFTX) &&
++            SDL_GameControllerHasAxis(gc, SDL_CONTROLLER_AXIS_LEFTY) &&
++            SDL_GameControllerHasAxis(gc, SDL_CONTROLLER_AXIS_RIGHTX) &&
++            SDL_GameControllerHasAxis(gc, SDL_CONTROLLER_AXIS_RIGHTY))
++            s_host_state[i].capabilities |= CELL_PAD_CAPABILITY_HP_ANALOG_STICK;
++#elif defined(PS3_NATIVE_STRICT)
++        fprintf(stderr, "[native-blocked] SDL controller capability query requires SDL 2.0.14\n");
++        fflush(stderr); ps3_native_stop();
++#endif
++#if SDL_VERSION_ATLEAST(2, 0, 18)
++        if (SDL_GameControllerHasRumble(gc)) s_host_state[i].capabilities |= CELL_PAD_CAPABILITY_ACTUATOR;
++#endif
+         if (s_rumble[i].sent_ms && pad_now_ms() - s_rumble[i].sent_ms >= PAD_RUMBLE_RENEW_MS)
+             pad_sdl_rumble_send(i);
+ 
+@@ -726,7 +779,15 @@
               * cared. SDL_JOYSTICK_ALLOW_BACKGROUND_EVENTS=0 in the
               * environment still wins over this. */
              SDL_SetHint(SDL_HINT_JOYSTICK_ALLOW_BACKGROUND_EVENTS, "1");
@@ -6484,6 +6623,73 @@
          }
          s_sdl_inited = 1;
      }
+@@ -793,7 +854,9 @@
+ #elif PAD_BACKEND_SDL2
+     pad_poll_sdl2();
+ #endif
++#ifndef PS3_NATIVE_STRICT
+     if (!s_host_state[0].connected) pad_poll_keyboard();
++#endif
+     pad_track_assign();
+     pad_unlock();
+ }
+@@ -831,7 +894,11 @@
+     /* What is there at start is the baseline; only later changes are
+      * flagged CELL_PAD_STATUS_ASSIGN_CHANGES. */
+     for (int i = 0; i < PAD_MAX_HOST_PORTS; i++) {
+-        s_port_reported[i] = s_host_state[i].connected || i == 0;
++        s_port_reported[i] = s_host_state[i].connected
++#ifndef PS3_NATIVE_STRICT
++            || i == 0
++#endif
++            ;
+         s_port_changed[i] = 0;
+     }
+ 
+@@ -1268,6 +1335,7 @@
+ 
+     /* Poll to get latest connection state */
+     pad_poll_backend();
++    pad_lock();
+ 
+     /* Build in a local host struct, then copy to guest memory big-endian. */
+     CellPadInfo2 _in; CellPadInfo2* info = &_in;
+@@ -1276,17 +1344,23 @@
+ 
+     u32 connected = 0;
+     for (u32 i = 0; i < s_max_connect && i < PAD_MAX_HOST_PORTS; i++) {
+-        /* Always present a virtual pad on port 0 (standard emulator behavior) so
+-         * boot flows that block until a controller is connected can proceed even
+-         * with no physical device attached. */
+-        if (s_host_state[i].connected || i == 0) {
++        /* Native execution reports the measured host state; the unverified
++         * legacy path retains its implicit virtual port. */
++        if (s_host_state[i].connected
++#ifndef PS3_NATIVE_STRICT
++            || i == 0
++#endif
++            ) {
+             info->port_status[i]       = CELL_PAD_STATUS_CONNECTED | pad_status_take(i);
+             info->port_setting[i]      = s_port_setting[i];
++            info->device_capability[i] = s_host_state[i].capabilities;
++#ifndef PS3_NATIVE_STRICT
+             info->device_capability[i] = CELL_PAD_CAPABILITY_PS3_CONFORMITY
+                                        | CELL_PAD_CAPABILITY_PRESS_MODE
+                                        | CELL_PAD_CAPABILITY_SENSOR_MODE
+                                        | CELL_PAD_CAPABILITY_HP_ANALOG_STICK
+                                        | CELL_PAD_CAPABILITY_ACTUATOR;
++#endif
+             info->device_type[i]       = CELL_PAD_DEV_TYPE_STANDARD;
+             connected++;
+         } else {
+@@ -1294,6 +1368,7 @@
+         }
+     }
+     info->now_connect = connected;
++    pad_unlock();
+ 
+     /* copy to guest big-endian (CellPadInfo2 is all u32 fields) */
+     {
 --- a/runtime/spu/spu_dispatch_mt.c
 +++ b/runtime/spu/spu_dispatch_mt.c
 @@ -23,6 +23,9 @@

@@ -138,6 +138,7 @@ extern "C" void ps3_native_hle_gate(uint32_t nid, ppu_context* ctx) {
                                     "cellSysutilGetSystemParamInt",
                                     "cellRtcGetCurrentTick", "cellRtcGetCurrentClockLocalTime", "cellRtcGetDayOfWeek",
                                     "cellPadInit", "cellPadEnd",
+                                    "cellPadGetInfo2",
                                     "sceNpInit", "sceNpTerm", "sceNpManagerGetStatus",
                                     "sceNpTrophyInit", "sceNpTrophyTerm",
                                     "cellAudioPortOpen", "cellAudioGetPortConfig",
@@ -159,6 +160,8 @@ extern "C" void ps3_native_hle_gate(uint32_t nid, ppu_context* ctx) {
                                     "cellAudioOutConfigure",
                                     "cellAudioInit",
                                     "cellGcmGetTiledPitchSize", "cellGcmSetFlipMode", "cellGcmSetVBlankHandler",
+                                    "cellGcmSetDebugOutputLevel",
+                                    "cellGcmResetFlipStatus", "cellGcmGetFlipStatus",
                                     "cellGcmSetFlipHandler", "cellGcmSetUserHandler", "cellGcmSetGraphicsHandler",
                                     "cellVideoOutGetResolutionAvailability", "cellVideoOutConfigure", "cellVideoOutGetConfiguration",
                                     "cellFsOpen", "cellFsRead", "cellFsWrite", "cellFsClose", "cellFsStat", "cellFsFstat", "cellFsFsync", "cellFsLseek"};

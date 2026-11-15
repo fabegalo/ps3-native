@@ -13,6 +13,7 @@
 #include <thread>
 #include <chrono>
 #include "../network/sceNp.h"
+#include "../input/cellPad.h"
 #include "cellSpurs.h"
 #include "native_lle.h"
 #include "native_storage.h"
@@ -78,6 +79,12 @@ void audio_configure(ppu_context* ctx) {
         (void*)(uintptr_t)ctx->gpr[5], (u32)ctx->gpr[6]);
 }
 void audio_initialize(ppu_context* ctx) { ctx->gpr[3] = (u64)(s64)cellAudioInit(); }
+void pad_info2(ppu_context* ctx) {
+    if (ctx->gpr[3] > UINT32_MAX || !ps3_native_guest_range_backed((u32)ctx->gpr[3], sizeof(CellPadInfo2))) {
+        ctx->gpr[3] = (u64)(s64)(s32)CELL_PAD_ERROR_INVALID_PARAMETER; return;
+    }
+    ctx->gpr[3] = (u64)(s64)cellPadGetInfo2((CellPadInfo2*)(uintptr_t)(u32)ctx->gpr[3]);
+}
 void audio_port_start(ppu_context* ctx) { ctx->gpr[3] = (u64)(s64)cellAudioPortStart((u32)ctx->gpr[3]); }
 void audio_port_stop(ppu_context* ctx) { ctx->gpr[3] = (u64)(s64)cellAudioPortStop((u32)ctx->gpr[3]); }
 void audio_port_close(ppu_context* ctx) { ctx->gpr[3] = (u64)(s64)cellAudioPortClose((u32)ctx->gpr[3]); }
@@ -299,6 +306,15 @@ void gcm_config(ppu_context* ctx) {
 void gcm_control(ppu_context* ctx) { ctx->gpr[3] = (uintptr_t)cellGcmGetControlRegister(); }
 void gcm_pitch(ppu_context* ctx) { ctx->gpr[3] = cellGcmGetTiledPitchSize((u32)ctx->gpr[3]); }
 void gcm_flip_mode(ppu_context* ctx) { cellGcmSetFlipMode((u32)ctx->gpr[3]); }
+void gcm_reset_flip(ppu_context*) { cellGcmResetFlipStatus(); }
+void gcm_flip_status(ppu_context* ctx) { ctx->gpr[3] = cellGcmGetFlipStatus(); }
+void gcm_debug_level(ppu_context* ctx) {
+    if ((u32)ctx->gpr[3] > CELL_GCM_DEBUG_LEVEL2) {
+        std::fprintf(stderr, "[native-blocked] unsupported GCM debug output level\n");
+        std::fflush(stderr); ps3_native_stop();
+    }
+    cellGcmSetDebugOutputLevel((u32)ctx->gpr[3]);
+}
 void gcm_vblank_handler(ppu_context* ctx) { cellGcmSetVBlankHandler((CellGcmVBlankHandler)(uintptr_t)(u32)ctx->gpr[3]); }
 void gcm_flip_handler(ppu_context* ctx) { cellGcmSetFlipHandler((CellGcmFlipHandler)(uintptr_t)(u32)ctx->gpr[3]); }
 void gcm_user_handler(ppu_context* ctx) { cellGcmSetUserHandler((CellGcmUserHandler)(uintptr_t)(u32)ctx->gpr[3]); }
@@ -393,6 +409,7 @@ struct RegisterAdapters {
         ps3_hle_register_ctx(ps3_compute_nid("cellAudioInit"), "cellAudioInit", audio_initialize);
         ps3_hle_register_ctx(ps3_compute_nid("sceNpTrophyInit"), "sceNpTrophyInit", trophy_initialize);
         ps3_hle_register_ctx(ps3_compute_nid("cellAudioPortOpen"), "cellAudioPortOpen", audio_port_open);
+        ps3_hle_register_ctx(ps3_compute_nid("cellPadGetInfo2"), "cellPadGetInfo2", pad_info2);
         ps3_hle_register_ctx(ps3_compute_nid("cellAudioGetPortConfig"), "cellAudioGetPortConfig", audio_port_config);
         ps3_hle_register_ctx(ps3_compute_nid("cellAudioPortStart"), "cellAudioPortStart", audio_port_start);
         ps3_hle_register_ctx(ps3_compute_nid("cellAudioPortStop"), "cellAudioPortStop", audio_port_stop);
@@ -437,6 +454,9 @@ struct RegisterAdapters {
         ps3_hle_register_ctx(ps3_compute_nid("cellGcmGetControlRegister"), "cellGcmGetControlRegister", gcm_control);
         ps3_hle_register_ctx(ps3_compute_nid("cellGcmGetTiledPitchSize"), "cellGcmGetTiledPitchSize", gcm_pitch);
         ps3_hle_register_ctx(ps3_compute_nid("cellGcmSetFlipMode"), "cellGcmSetFlipMode", gcm_flip_mode);
+        ps3_hle_register_ctx(ps3_compute_nid("cellGcmResetFlipStatus"), "cellGcmResetFlipStatus", gcm_reset_flip);
+        ps3_hle_register_ctx(ps3_compute_nid("cellGcmGetFlipStatus"), "cellGcmGetFlipStatus", gcm_flip_status);
+        ps3_hle_register_ctx(ps3_compute_nid("cellGcmSetDebugOutputLevel"), "cellGcmSetDebugOutputLevel", gcm_debug_level);
         ps3_hle_register_ctx(ps3_compute_nid("cellGcmSetVBlankHandler"), "cellGcmSetVBlankHandler", gcm_vblank_handler);
         ps3_hle_register_ctx(ps3_compute_nid("cellGcmSetFlipHandler"), "cellGcmSetFlipHandler", gcm_flip_handler);
         ps3_hle_register_ctx(ps3_compute_nid("cellGcmSetUserHandler"), "cellGcmSetUserHandler", gcm_user_handler);

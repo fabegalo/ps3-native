@@ -510,6 +510,7 @@ int main(int argc, char** argv) {
         if (!strcmp(argv[1], "sysutil_no_dispatcher")) call(ctx, "cellSysutilCheckCallback", 0);
         if (!strcmp(argv[1], "provider_not_registered")) call(ctx, "cellSysmoduleLoadModule", 0x18);
         if (!strcmp(argv[1], "gcm_unaudited")) call(ctx, "cellGcmSetZcull", 0);
+        if (!strcmp(argv[1], "gcm_debug_level")) call(ctx, "cellGcmSetDebugOutputLevel", 3);
         if (!strcmp(argv[1], "gcm_timestamp_index")) call(ctx, "cellGcmGetTimeStamp", 2048);
         if (!strcmp(argv[1], "tile_compressed")) { ctx.gpr[8] = 10; call(ctx, "cellGcmSetTileInfo", 0); }
         if (!strcmp(argv[1], "io_unbacked")) {
@@ -1211,12 +1212,33 @@ int main(int argc, char** argv) {
     ps3_hle_register(ps3_compute_nid("cellPadEnd"), "cellPadEnd", (void*)cellPadEnd);
     call(ctx, "cellPadEnd", 0);
     if ((u32)ctx.gpr[3] != 0x80121104) return 217;
+    const u32 pad_info = group_attr + 0x200;
+    call(ctx, "cellPadGetInfo2", pad_info);
+    if ((u32)ctx.gpr[3] != (u32)CELL_PAD_ERROR_NOT_OPENED) return 242;
     call(ctx, "cellPadInit", 0);
     if ((u32)ctx.gpr[3] != 0x80121102) return 218;
     call(ctx, "cellPadInit", 128);
     if ((u32)ctx.gpr[3] != 0x80121102) return 219;
     call(ctx, "cellPadInit", 4);
     if (ctx.gpr[3]) return 220;
+    vm_write32(pad_info - 4, 0xA5A5A5A5); vm_write32(pad_info + sizeof(CellPadInfo2), 0xA5A5A5A5);
+    call(ctx, "cellPadGetInfo2", pad_info);
+    if (ctx.gpr[3] || vm_read32(pad_info) != 4 || vm_read32(pad_info + 4) > 4 ||
+        vm_read32(pad_info - 4) != 0xA5A5A5A5 || vm_read32(pad_info + sizeof(CellPadInfo2)) != 0xA5A5A5A5) return 243;
+    u32 connected_pads = 0;
+    for (u32 port = 0; port < 7; ++port) {
+        const u32 status = vm_read32(pad_info + 12 + port * 4), caps = vm_read32(pad_info + 68 + port * 4);
+        if (status & CELL_PAD_STATUS_CONNECTED) {
+            ++connected_pads;
+            if (port >= 4 || !(caps & CELL_PAD_CAPABILITY_PS3_CONFORMITY) ||
+                (caps & (CELL_PAD_CAPABILITY_PRESS_MODE | CELL_PAD_CAPABILITY_SENSOR_MODE))) return 244;
+        } else if (caps) return 245;
+    }
+    if (connected_pads != vm_read32(pad_info + 4)) return 246;
+    for (u64 bad : {0ull, 0xFFFFFFFEull, 0x100000000ull + pad_info}) {
+        call(ctx, "cellPadGetInfo2", bad);
+        if ((u32)ctx.gpr[3] != (u32)CELL_PAD_ERROR_INVALID_PARAMETER) return 247;
+    }
     call(ctx, "cellPadInit", 4);
     if ((u32)ctx.gpr[3] != 0x80121103) return 221;
     call(ctx, "cellPadEnd", 0);
@@ -1492,6 +1514,16 @@ int main(int argc, char** argv) {
     rsx_backend report_backend{}; report_backend.report = synthetic_report; report_backend.submit = synthetic_submit;
     auto* previous_backend = rsx_get_backend(); rsx_set_backend(&report_backend);
     ps3_hle_register(ps3_compute_nid("cellGcmSetFlipImmediate"), "cellGcmSetFlipImmediate", (void*)cellGcmSetFlipImmediate);
+    if (ps3_compute_nid("cellGcmSetDebugOutputLevel") != 0x51C9D62Bu) return 240;
+    for (u32 level = 0; level <= 2; ++level) call(ctx, "cellGcmSetDebugOutputLevel", level);
+    if (ps3_compute_nid("cellGcmGetFlipStatus") != 0x72A577CEu ||
+        ps3_compute_nid("cellGcmResetFlipStatus") != 0xB2E761D4u) return 241;
+    call(ctx, "cellGcmResetFlipStatus", 0);
+    call(ctx, "cellGcmGetFlipStatus", 0);
+    if (ctx.gpr[3] != CELL_GCM_FLIP_STATUS_WAITING) return 248;
+    cellGcmTickFlip();
+    call(ctx, "cellGcmGetFlipStatus", 0);
+    if (ctx.gpr[3] != CELL_GCM_FLIP_STATUS_WAITING || cellGcm_flip_request_count() != previous_flips) return 249;
     call(ctx, "cellGcmSetFlipImmediate", 0);
     if ((u32)ctx.gpr[3] != 0x802100FF || cellGcm_flip_request_count() != previous_flips) return 223;
     call(ctx, "cellGcmSetFlipImmediate", 8);

@@ -4,7 +4,7 @@ import os
 
 for mode in ('hle', 'ppu', 'indirect', 'indirect_null', 'ppu_null_read', 'storage_budget', 'syscall', 'unaudited_syscall', 'audio_probe', 'audio_option', 'mutex_shared', 'mutex_adaptive', 'mutex_contended', 'rw_contended', 'tty_channel', 'language_other', 'spu', 'fs_not_ready',
              'spu_indirect', 'spu_missing', 'spu_missing_async', 'spu_missing_job', 'sysutil_no_dispatcher',
-             'provider_not_registered', 'gcm_unaudited', 'tile_compressed', 'io_unbacked',
+             'provider_not_registered', 'gcm_unaudited', 'gcm_debug_level', 'tile_compressed', 'io_unbacked',
              'callback_missing', 'callback_ct_missing', 'thread_flags', 'thread_exit_unowned', 'raw_spu_unreviewed',
              'audited_not_registered', 'once_invalid', 'spurs_missing_policy', 'spurs_poll',
              'memory_unbacked', 'memory_overlap', 'string_unterminated', 'spu_image_protected', 'sdk_missing', 'gcm_timestamp_index', 'gcm_prepared_multiple', 'gcm_prepared_backend_missing', 'rtc_calendar_invalid'):

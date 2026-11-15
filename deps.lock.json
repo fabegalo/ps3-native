@@ -8,7 +8,7 @@
     "patches": [
       {
         "path": "patches/ps3recomp/0001-strict-aot-execution.patch",
-        "sha256": "d7617dca9789f68f554614e92d657cb2816bc93510818eb18d977361e03084a5",
+        "sha256": "dff4bb68ffa7e4334987d02d40382bc4ff4ad4387c4206740e2ba56bc55dde91",
         "source_hash_normalization": "LF",
         "files": {
           "runtime/ppu/ppu_hle.cpp": {
@@ -73,7 +73,7 @@
           },
           "libs/video/cellGcmSys.c": {
             "before": "35d26e6bcd8e3985887a3b6436406a00d1d69fa30b9b854fb0f0012f692873f8",
-            "after": "9e10fc4c1534cd592633335ad63821df06352c2e7f24c8ddea14623262f82627"
+            "after": "d55f943049c3af801d482bcf8a19a292b9e37f12f1e0f6911c02d90f1886a7d4"
           },
           "libs/system/sysPrxForUser.c": {
             "before": "efd803007b0d2dadb45882d76cf05ed47c83d3f51642aead66c8e50c7dfe48b5",
@@ -189,7 +189,7 @@
           },
           "libs/input/cellPad.c": {
             "before": "33d2e3d3f9c329821cfbb02769a62a29c5ae274f4b6e73bdedc59a80dbd2457c",
-            "after": "a3d78bd22d2e43f257d880f18fdae64dd0ac9956cc898c9b8cd32f26457fcb94"
+            "after": "ea8334364fd81790dd48a8bdbaa8df15bdd2fa3e2f259c3397dc341bcc5d1acc"
           },
           "runtime/spu/spu_dispatch_mt.c": {
             "before": "3567a8186dd12bdf7e3cb168b4ea3a4e1c91dbedc810212691c22b5810a19936",
