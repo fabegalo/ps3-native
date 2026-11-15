@@ -9,8 +9,9 @@ set(scaffold "${PS3RECOMP_DIR}/runtime/ppu/ppu_loader.cpp"
     "${PS3RECOMP_DIR}/runtime/ppu/ppu_fs.cpp"
     "${PS3RECOMP_DIR}/runtime/ppu/ppu_sysprx.cpp")
 set_source_files_properties("${gen}/ppu_recomp.c" PROPERTIES LANGUAGE CXX)
-add_library(fixture_ppu OBJECT ${scaffold} "${gen}/ppu_recomp.c")
-target_include_directories(fixture_ppu PUBLIC "${gen}" "${PS3RECOMP_DIR}/include"
+add_library(fixture_ppu OBJECT ${scaffold} "${gen}/ppu_recomp.c" "${PROJECT_SOURCE_DIR}/src/native_guard.cpp" "${PROJECT_SOURCE_DIR}/src/module_hooks.cpp")
+target_compile_definitions(fixture_ppu PRIVATE PS3_NATIVE_STRICT)
+target_include_directories(fixture_ppu PUBLIC "${gen}" "${PS3RECOMP_DIR}/include" "${PS3RECOMP_DIR}/libs/system"
     "${PS3RECOMP_DIR}/runtime/ppu" "${PS3RECOMP_DIR}/runtime/spu"
     "${PS3RECOMP_DIR}/runtime/memory" "${PS3RECOMP_DIR}/runtime/syscalls"
     "${PS3RECOMP_DIR}/runtime/platform" "${PS3RECOMP_DIR}/libs/video")
@@ -21,7 +22,12 @@ add_executable(ps3-native-spu spu_main.c "${gen}/spu_recomp.c")
 target_link_libraries(ps3-native-spu PRIVATE fixture_ppu)
 set_target_properties(ps3-native-spu PROPERTIES LINKER_LANGUAGE CXX)
 if(CMAKE_CXX_COMPILER_ID MATCHES "Clang|GNU")
-    target_compile_options(fixture_ppu PRIVATE -fwrapv -fno-strict-aliasing -ffp-contract=off)
+    target_compile_options(fixture_ppu PRIVATE -fwrapv -fno-strict-aliasing)
+    if(MSVC)
+        target_compile_options(fixture_ppu PRIVATE /clang:-ffp-contract=off)
+    else()
+        target_compile_options(fixture_ppu PRIVATE -ffp-contract=off)
+    endif()
 endif()
 if(WIN32)
     foreach(target ps3-native-ppu ps3-native-spu)
@@ -45,3 +51,12 @@ add_test(NAME spu.aot.dma.negative COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURR
     $<TARGET_FILE:ps3-native-spu> corrupt-input)
 set_tests_properties(ppu.aot spu.aot.dma PROPERTIES TIMEOUT 30)
 set_tests_properties(ppu.aot.negative spu.aot.dma.negative PROPERTIES TIMEOUT 35)
+add_executable(ps3-native-contracts native_contracts.cpp)
+target_link_libraries(ps3-native-contracts PRIVATE fixture_ppu)
+if(WIN32)
+    target_link_libraries(ps3-native-contracts PRIVATE dbghelp user32 gdi32 winmm shlwapi synchronization psapi)
+endif()
+add_test(NAME runtime.fail_closed COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/check_blocked.py"
+    $<TARGET_FILE:ps3-native-contracts>)
+add_test(NAME runtime.boot_services COMMAND ps3-native-contracts)
+set_tests_properties(runtime.fail_closed runtime.boot_services PROPERTIES TIMEOUT 30)

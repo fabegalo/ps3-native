@@ -1,0 +1,241 @@
+--- a/runtime/ppu/ppu_hle.cpp
++++ b/runtime/ppu/ppu_hle.cpp
+@@ -76,6 +76,8 @@
+     }
+     return s;
+ }
++
++extern "C" int ps3_native_context_ready(uint32_t nid) { return hle_slot(nid)->ctx_i >= 0; }
+ 
+ extern "C" void ps3_hle_register_ctx(uint32_t nid, const char* name, hle_ctx_fn fn)
+ {
+@@ -279,8 +281,14 @@
+     for (int j = 0; j < ht_used; j++) ht_n[j] = 0;
+ }
+ extern "C" uint32_t ppu_prof_resolve_host(void* ra);
++#ifdef PS3_NATIVE_STRICT
++extern "C" void ps3_native_hle_gate(uint32_t nid, ppu_context* ctx);
++#endif
+ extern "C" void ps3_hle_call(uint32_t nid, ppu_context* ctx)
+ {
++#ifdef PS3_NATIVE_STRICT
++    ps3_native_hle_gate(nid, ctx);
++#endif
+     if (const hle_fast_fn f = hle_fast(nid))
+         if (f(ctx)) return;
+ 
+--- a/runtime/ppu/ppu_loader.cpp
++++ b/runtime/ppu/ppu_loader.cpp
+@@ -2889,6 +2889,12 @@
+     }
+ 
+     ppu_fn fn = ppu_lookup_icall(addr);
++#ifdef PS3_NATIVE_STRICT
++    if (!fn) {
++        fprintf(stderr, "[native-blocked] unprepared indirect PPU target=0x%08X lr=0x%08X\n", addr, (uint32_t)ctx->lr);
++        fflush(stderr); exit(86);
++    }
++#endif
+     if (!fn) {
+         /* OPD-swap clobber fixup: a malformed memcpy (game func_0036FA74) writes
+          * some handler/vtable OPDs as {TOC, func} (code & toc SWAPPED), so lifted
+@@ -3202,6 +3208,10 @@
+  * continue (the result is undefined, but it won't crash the link). */
+ extern "C" void ppu_unlifted_stub(uint64_t addr, ppu_context* ctx)
+ {
++#ifdef PS3_NATIVE_STRICT
++    fprintf(stderr, "[native-blocked] unlifted PPU target=0x%08X lr=0x%08X\n", (uint32_t)addr, (uint32_t)ctx->lr);
++    fflush(stderr); exit(86);
++#endif
+     (void)ctx;
+     static int logged = 0;
+     if (logged < 20) {
+@@ -3237,8 +3247,14 @@
+ #define PS3_SC_INFLIGHT_MAX 64
+ extern "C" uint32_t g_sc_inflight[PS3_SC_INFLIGHT_MAX] = { 0 };
+ 
++#ifdef PS3_NATIVE_STRICT
++extern "C" void ps3_native_syscall_gate(ppu_context* ctx);
++#endif
+ extern "C" void lv2_syscall(ppu_context* ctx)
+ {
++#ifdef PS3_NATIVE_STRICT
++    ps3_native_syscall_gate(ctx);
++#endif
+     /* One-shot: PPU_GUARD_EA=<hex> arms the page guard on that address without
+      * waiting for a store watch to fire. Armed here because lv2_syscall runs
+      * early and unconditionally; used to measure how far a guest block clear
+@@ -3312,11 +3328,10 @@
+     switch (num) {
+     case 352: {   /* sys_memory_get_user_memory_size(sys_memory_info_t* info)
+                    * info = { u32 total_user_memory; u32 available_user_memory } */
+-        uint32_t info = (uint32_t)ctx->gpr[3];
+-        if (info) { vm_write32(info + 0, 0x10000000u);   /* 256 MB total */
+-                    vm_write32(info + 4, 0x0C000000u); } /* 192 MB available */
+-        ctx->gpr[3] = 0;
+-        return;
++        /* Use the allocator's live accounting, not a fabricated free size. */
++        if (lv2_try_syscall(ctx)) return;
++        fprintf(stderr, "[native-blocked] memory-size service is unregistered\n");
++        fflush(stderr); exit(86);
+     }
+     case 330: {   /* sys_mmapper_allocate_address(u64 size, u64 flags,
+                    * u64 alignment, u32* alloc_addr) -> reserve guest VA range */
+@@ -3527,6 +3542,10 @@
+                 return;
+             }
+         }
++#ifdef PS3_NATIVE_STRICT
++        fprintf(stderr, "[native-blocked] unimplemented LV2 syscall=%llu lr=0x%08X\n", (unsigned long long)num, (uint32_t)ctx->lr);
++        fflush(stderr); exit(86);
++#endif
+         static int logged = 0;
+         if (logged < 30) {
+             fprintf(stderr, "[ppu] lv2_syscall %llu (stub)\n", (unsigned long long)num);
+--- a/runtime/ppu/ppu_sysprx.cpp
++++ b/runtime/ppu/ppu_sysprx.cpp
+@@ -504,6 +504,17 @@
+ 
+ /* A handful of CRT helpers the early boot tends to hit; accept and continue. */
+ static void crt_ok(ppu_context* ctx) { ctx->gpr[3] = 0; }
++/* The two void registration APIs retain the first callback until process spawn. */
++static volatile long process_spawn_callbacks[2];
++static void register_atexitspawn(ppu_context* ctx) {
++    _InterlockedCompareExchange(&process_spawn_callbacks[0], (long)ctx->gpr[3], 0);
++}
++static void register_at_Exitspawn(ppu_context* ctx) {
++    _InterlockedCompareExchange(&process_spawn_callbacks[1], (long)ctx->gpr[3], 0);
++}
++extern "C" uint32_t ps3_process_spawn_callback(unsigned which) {
++    return which < 2 ? (uint32_t)_InterlockedCompareExchange(&process_spawn_callbacks[which], 0, 0) : 0;
++}
+ static void sys_lwmutex_destroy_counted(ppu_context* ctx)
+ {
+     { static long long _n=0; _n++;
+@@ -962,8 +973,8 @@
+     ps3_hle_register_ctx(ps3_compute_nid("sys_time_get_system_time"), "sys_time_get_system_time", sys_time_get_system_time);
+     ps3_hle_register_ctx(ps3_compute_nid("sys_process_is_stack"),     "sys_process_is_stack",     sys_process_is_stack);
+     /* Atexit registration: nothing to do at boot, just succeed. */
+-    ps3_hle_register_ctx(ps3_compute_nid("_sys_process_atexitspawn"), "_sys_process_atexitspawn", crt_ok);
+-    ps3_hle_register_ctx(ps3_compute_nid("_sys_process_at_Exitspawn"),"_sys_process_at_Exitspawn",crt_ok);
++    ps3_hle_register_ctx(ps3_compute_nid("_sys_process_atexitspawn"), "_sys_process_atexitspawn", register_atexitspawn);
++    ps3_hle_register_ctx(ps3_compute_nid("_sys_process_at_Exitspawn"),"_sys_process_at_Exitspawn",register_at_Exitspawn);
+ 
+     /* Lightweight mutex family (guards global/singleton init in the CRT). */
+     ps3_hle_register_ctx(ps3_compute_nid("sys_lwmutex_create"),  "sys_lwmutex_create",  sys_lwmutex_create);
+--- a/runtime/spu/spu_interp.c
++++ b/runtime/spu/spu_interp.c
+@@ -429,6 +429,10 @@
+ }
+ 
+ uint32_t spu_interp_run_until(spu_context* ctx, uint32_t start_lsa, uint32_t stop_lsa) {
++#ifdef PS3_NATIVE_STRICT
++    fprintf(stderr, "[native-blocked] SPU image=%u requires AOT at LS=0x%05X; interpreter disabled\n", ctx->image_id, start_lsa);
++    fflush(stderr); exit(86);
++#endif
+     if (interp_stats_on()) {
+         /* Credit an entry inside a resident code region to the image that
+          * owns it, so the list names the lift that's missing the entry. */
+--- a/runtime/syscalls/sys_timer.c
++++ b/runtime/syscalls/sys_timer.c
+@@ -358,21 +358,11 @@
+ 
+     uint64_t sec, nsec;
+ 
+-#ifdef _WIN32
+-    ensure_qpc_init();
+-    LARGE_INTEGER now;
+-    QueryPerformanceCounter(&now);
+-
+-    /* Convert QPC to seconds + nanoseconds */
+-    sec  = (uint64_t)(now.QuadPart / s_qpc_freq.QuadPart);
+-    uint64_t remainder = (uint64_t)(now.QuadPart % s_qpc_freq.QuadPart);
+-    nsec = (remainder * 1000000000ULL) / (uint64_t)s_qpc_freq.QuadPart;
+-#else
++    /* Wall time is UTC since the Unix epoch; QPC is only for elapsed time. */
+     struct timespec ts;
+-    clock_gettime(CLOCK_REALTIME, &ts);
+-    sec  = (uint64_t)ts.tv_sec;
++    if (timespec_get(&ts, TIME_UTC) != TIME_UTC) return (int64_t)(int32_t)CELL_EIO;
++    sec = (uint64_t)ts.tv_sec;
+     nsec = (uint64_t)ts.tv_nsec;
+-#endif
+ 
+     if (sec_addr != 0) {
+         write_be64(sec_addr, sec);
+--- a/runtime/syscalls/sys_ppu_thread.c
++++ b/runtime/syscalls/sys_ppu_thread.c
+@@ -1426,6 +1426,7 @@
+ int64_t sys_ppu_thread_get_stack_information(ppu_context* ctx)
+ {
+     uint32_t out_addr = LV2_ARG_PTR(ctx, 0);
++    if (!out_addr || out_addr > UINT32_MAX - 7u) return (int64_t)(int32_t)CELL_EFAULT;
+     uint64_t tid = ctx->thread_id;
+     uint32_t sa, ss;
+ 
+--- a/libs/filesystem/edat.c
++++ b/libs/filesystem/edat.c
+@@ -675,7 +675,13 @@
+         const char* e = getenv("PS3_EDAT");
+         enabled = (e && e[0] == '0') ? 0 : 1;
+     }
+-    if (!enabled || !host_path || !edat_is_npd(host_path)) return host_path;
++    if (!host_path || !edat_is_npd(host_path)) return host_path;
++#ifdef PS3_NATIVE_STRICT
++    /* Never publish decrypted cache files beside a user's original. */
++    fprintf(stderr, "[native-blocked] protected EDAT needs a separately prepared local cache\n");
++    fflush(stderr); exit(86);
++#endif
++    if (!enabled) return host_path;
+ 
+     if ((size_t)snprintf(buf, cap, "%s.dec", host_path) >= cap) return host_path;
+ 
+--- a/runtime/ppu/ppu_fs.cpp
++++ b/runtime/ppu/ppu_fs.cpp
+@@ -454,8 +454,8 @@
+             g_fd_usm[fd] = 0; g_fd_dir[fd] = 0;
+         }
+     }
+-    if (f) fclose(f);
+-    ctx->gpr[3] = CELL_OK;
++    if (!f) { ctx->gpr[3] = (uint64_t)(int64_t)CELL_FS_EBADF; return; }
++    ctx->gpr[3] = fclose(f) == 0 ? (uint64_t)CELL_OK : (uint64_t)(int64_t)CELL_FS_EIO;
+ }
+ 
+ /* Pre-fault a guest range so the kernel can write into it.
+--- a/runtime/spu/spu_channels.c
++++ b/runtime/spu/spu_channels.c
+@@ -2858,6 +2858,13 @@
+     }
+     /* Use the same ownership order as the interpreter's rejoin probe. */
+     spu_fn fn = spu_lifted_lookup(ctx, ctx->pc);
++#ifdef PS3_NATIVE_STRICT
++    if (!fn) {
++        fprintf(stderr, "[native-blocked] unprepared SPU target=0x%05X image=%d\n", ctx->pc, ctx->image_id);
++        fflush(stderr);
++        exit(86);
++    }
++#endif
+     /* The job returned through the link register we planted: it is finished.
+      * Its outermost frame ends in `bi $r0`, and r0 was 0 -- so without this the
+      * return landed on LS 0, which is the job's OWN entry, and it ran a second
+@@ -3406,4 +3413,4 @@
+ 
+ #ifdef __cplusplus
+ }
+-#endif+#endif
+--- a/runtime/spu/spu_workload.c
++++ b/runtime/spu/spu_workload.c
+@@ -356,6 +356,12 @@
+ static void spu_workload_report_miss(const char* path, uint64_t fp, uint32_t size,
+                                      uint32_t owner_ea)
+ {
++#ifdef PS3_NATIVE_STRICT
++    fprintf(stderr, "[native-blocked] unprepared SPU %s fingerprint=0x%016llX size=%u owner=0x%08X\n",
++            path, (unsigned long long)fp, size, owner_ea);
++    fflush(stderr);
++    exit(86);
++#endif
+     static uint64_t seen[64];
+     static unsigned nseen;
+     static volatile LONG lock;

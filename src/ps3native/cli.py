@@ -11,6 +11,7 @@ import tempfile
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from ps3native.catalog import digest, inventory
 from ps3native.preparation import dependency, prepare
+from ps3native.session import bind, build_native, run
 
 ROOT = Path(__file__).resolve().parents[2]
 
@@ -41,6 +42,10 @@ def main(argv=None):
             p.add_argument('--build-dir', type=Path, default=ROOT / 'build')
         if command == 'prepare':
             p.add_argument('--cache', type=Path, default=ROOT / '.local/prepared')
+            p.add_argument('--elf', type=Path)
+            p.add_argument('--aot-dir', type=Path)
+            p.add_argument('--bind-native', action='store_true')
+            p.add_argument('--build-native', action='store_true')
     sub.add_parser('system')
     args = parser.parse_args(argv)
     try:
@@ -79,11 +84,23 @@ def main(argv=None):
         if args.command == 'import':
             atomic_json(args.catalog / (result['id'] + '.json'), result)
         elif args.command == 'prepare':
+            if args.bind_native or args.build_native:
+                if not args.elf or not args.aot_dir:
+                    raise ValueError('--bind-native requires --elf and --aot-dir')
+                operation = build_native if args.build_native else bind
+                result = operation(ROOT, result, args.elf, args.aot_dir, args.build_dir.resolve())
+                print(json.dumps(result, ensure_ascii=True, indent=2))
+                return 0
             result = prepare(ROOT, result, args.cache)
             print(json.dumps(result, ensure_ascii=True, indent=2))
             return 3 if not result['runnable'] else 0
         elif args.command == 'run':
-            result['blocker'] = 'Generic module binding and fail-closed AOT completeness gate are pending. Only explicit synthetic fixtures execute in M0.'
+            receipt_path = args.build_dir / 'module/receipt.json'
+            if receipt_path.is_file() and json.loads(receipt_path.read_text(encoding='utf-8'))['original_id'] == result['id']:
+                result = run(ROOT, result, args.build_dir.resolve())
+                print(json.dumps(result, ensure_ascii=True, indent=2))
+                return result['exit'] if not result['stop'] else 3
+            result['blocker'] = 'No hash-bound native module prepared for this input revision.'
             print(json.dumps(result, ensure_ascii=True, indent=2))
             return 3
         print(json.dumps(result, ensure_ascii=True, indent=2))

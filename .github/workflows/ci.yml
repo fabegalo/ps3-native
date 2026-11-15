@@ -34,5 +34,13 @@ jobs:
       - run: cmake --build build --parallel 3
       - name: CPU and catalog regression
         run: ctest --test-dir build --output-on-failure -E rsx.d3d12.pixels
+      - name: Compile the production runner against our own ELF fixture
+        run: |
+          cmake -S . -B build -DPS3_NATIVE_RECOMP_DIR="${{ github.workspace }}/build/tests/generated"
+          cmake --build build --target ps3-native-module --parallel 3
+      - name: Bind and execute the production runner fixture
+        run: |
+          python src/ps3native/cli.py prepare build/tests/generated/ppu.elf --bind-native --elf build/tests/generated/ppu.elf --aot-dir build/tests/generated
+          python src/ps3native/cli.py run build/tests/generated/ppu.elf
       # Hosted Windows runners have no certified D3D12 adapter. Run the mandatory
       # real-pixel RSX test locally on a GPU host: ctest --test-dir build -R rsx.

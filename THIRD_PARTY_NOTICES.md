@@ -15,6 +15,11 @@
   PUP layout was checked against its public `rpcs3/Loader/PUP.h` and `PUP.cpp`:
   https://github.com/RPCS3/rpcs3 . No RPCS3 implementation or keys were copied.
   SHA-256 here is content identity, not PUP HMAC/signature verification.
+  The public `Emu/Cell/Modules/sysPrxForUser.cpp` was also consulted for the
+  two void process-spawn callback registration contracts. The independently
+  written patch retains the first callback atomically. The optional official
+  portable RPCS3 decrypt tool is local tooling, not a linked/execution dependency;
+  no RPCS3 binary, keys, retail ELF or generated retail source is committed.
 - Architecture and maintainer-policy references:
   https://github.com/fabegalo/x360-native ,
   https://github.com/fabegalo/ps2-native ,

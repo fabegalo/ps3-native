@@ -38,8 +38,10 @@ authorize using them to claim production support. No silent fallback.
 ## Implementation and validation
 
 Use only Ponytail **full** for coding tasks. Inspect affected callers and actual
-upstream code first; reuse functioning components. Keep upstream pristine at
-`deps.lock.json` and the submodule gitlink. Prefer upstream fixes/pin updates;
+upstream code first; reuse functioning components. Preserve the upstream base at
+`deps.lock.json` and the submodule gitlink; only exact hash-verified locked
+patches may modify it. `dependency.py` applies/verifies them at configuration.
+Prefer upstream fixes/pin updates;
 necessary generic adaptations require versioned patches with patch, before and
 after hashes in the lock, never unrecorded submodule edits or another fork.
 

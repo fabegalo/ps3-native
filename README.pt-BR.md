@@ -15,7 +15,7 @@
 
 </div>
 
-> **Pesquisa experimental, ainda não é um launcher de PS3 com jogos funcionais.** O banner é uma arte conceitual. O M0 valida fixtures sintéticas PPU/SPU AOT e um teste de pixels RSX D3D12 do upstream. Nenhum jogo comercial ou VSH/XMB original executa atualmente pelo caminho genérico deste launcher.
+> **Pesquisa experimental, ainda sem jogos funcionais.** O banner é uma arte conceitual. Os testes sintéticos PPU/SPU e RSX passam. O launcher agora entra no código PPU original de inicialização de um jogo retail em uma sessão AOT diagnóstica e limitada. Menu, gameplay e boot da VSH/XMB original não foram verificados.
 
 Baseado no [ps3recomp](https://github.com/sp00nznet/ps3recomp), de **Ned Heller / sp00nznet**, e na arquitetura compartilhada de [x360-native](https://github.com/fabegalo/x360-native), [ps2-native](https://github.com/fabegalo/ps2-native) e [xone-native](https://github.com/fabegalo/xone-native). A meta é preservar o ciclo autêntico **sistema → jogo → sistema**; o gerenciador não imita a XMB.
 
@@ -89,8 +89,30 @@ continuar em outro disco; importe o caminho existente sem movê-los ou duplicá-
 | `prepare CAMINHO [--cache CAMINHO]` | Um ELF64 PPU ET_EXEC big-endian legível: parsing, OPD/TOC/imports e geração AOT C pelo upstream. Recibos verificam hashes da entrada, adaptador, upstream e saídas. Retorna **3**, pois a compilação e certificação genérica de dependências continuam bloqueadas. |
 | `prepare --fixture ppu\|spu [--build-dir CAMINHO]` | Gera, compila e vincula a fixture explicitamente sintética ao runtime existente. CMake/Ninja controlam invalidação incremental por compilador, headers, ferramentas e entradas. |
 | `run --fixture ppu\|spu` | Confere upstream e hashes da fixture, executa o binário sintético e devolve seu resultado real. |
-| `run CAMINHO` | Inventaria a revisão atual e retorna **3**, explicando o bloqueio de execução. |
+| `run CAMINHO` | Inicia o módulo nativo diagnóstico vinculado por hashes àquela revisão, ou retorna **3** se não houver módulo preparado. Suporte ausente interrompe com **86**. |
 | `system` | Retorna **3**: boot VSH/XMB original e ciclo sistema/jogo ainda não implementados. |
+
+### Diagnóstico de inicialização nativa
+
+Forneça um ELF legível obtido localmente do seu original. A ferramenta portátil
+oficial `RPCS3 --decrypt` pode obtê-lo; RPCS3 não é o backend de execução.
+Não coloque ELF, chaves ou código gerado no Git. Gere AOT com `prepare EBOOT.elf`;
+o JSON informa o cache mesmo retornando 3, pois a compilação ainda está pendente.
+Depois:
+
+```sh
+python src/ps3native/cli.py prepare /original/PS3_GAME --build-native --elf /local/EBOOT.elf --aot-dir /local/cache-aot
+python src/ps3native/cli.py run /original/PS3_GAME
+```
+
+A fatia offline inclui a entrada, pequenas tabelas OPD e destinos diretos.
+Quando uma execução parar por destino PPU ausente, repita a preparação para
+ampliá-la e recompilar incrementalmente. Não há compilação durante execução
+guest, intérprete ou fallback JIT. HLE exige implementação auditada;
+instruções/chamadas sem suporte interrompem com 86. A sessão confere hashes dos
+originais, ELF, código gerado, binário, runtime e configuração, separa o HDD
+gravável e para após 20 segundos ou quando os logs ultrapassam 1 MiB.
+Início diagnóstico não comprova gameplay.
 
 Códigos: **0** operação concluída; **2** entrada inválida/ausente, erro de I/O
 ou ferramenta; **3** etapa de preparação/execução indisponível. Preparação e
@@ -115,7 +137,11 @@ Responsabilidades atuais e validação de novas decisões estão em [AGENTS.md](
 
 O submódulo preservado e `deps.lock.json` fixam o ps3recomp em
 **`de4f090328ea08bef6b2f15caec0b85e343a7ece`**, HEAD consultado em 14/11/2026.
-Não há patches upstream nem runtime duplicado. Registradores, VMX, endianness,
+Um patch genérico com hashes fixos bloqueia destinos PPU diretos/indiretos
+ausentes, LV2 sem implementação e interpretação SPU; restringe HLE a serviços
+auditados e preserva callbacks registrados de saída/spawn; usa contabilidade
+real de memória e horário UTC correto no Windows. Não há runtime
+duplicado. Registradores, VMX, endianness,
 OPD/TOC e memória PPU, local store, DMA e canais SPU vêm do upstream. As fixtures
 não certificam toda a ISA, exceções, SPURS, sincronização ou ponto flutuante.
 O upstream contém intérprete e caminhos específicos por título; sua existência
@@ -148,20 +174,33 @@ Windows x64 Release local, Clang 22.1.8, CMake 3.31.6 e Python 3.14.8:
 - Catálogo/preparação: limites SFO/PUP, Unicode, idempotência, originais,
   revisões, alteração real do código gerado, cache e adulteração, comandos indisponíveis.
   O caso de symlink é pulado explicitamente quando o host não permite criar links.
+- Runtime: chamadas ausentes/não auditadas e interpretação SPU interrompem;
+  exclusão mútua real, callbacks, alocação/liberação e relógios são conferidos
+  com contextos sintéticos.
 
-Nenhum jogo comercial, firmware ou SDK Sony foi usado. A compilação validada
+As regressões públicas usam fixtures próprias. Um jogo retail fornecido pelo
+usuário também foi testado localmente até o código original de inicialização
+do CRT; código e resultados derivados permanecem ignorados pelo Git.
+Nenhum SDK Sony foi usado. A compilação validada
 localmente é Windows x64; Linux/macOS dependem da execução CI do commit exato.
 Windows/Linux ARM64, variantes Intel/Apple Silicon e Steam Deck exigem evidência
 própria; uma matriz de runners não comprova todas as arquiteturas ou execução.
 
-**Próxima tarefa:** implementar uma barreira genérica de completude e binding
-que rejeite módulos incompletos antes da compilação: chamadas/NIDs não resolvidos,
-instruções sem tradução, relocação/dependências PRX e registro de imagens SPU
-precisam gerar diagnósticos. Não podem virar sucesso fictício, tarefa omitida
-ou execução interpretada. Vincular módulos compilados a recibos de entrada,
-toolchain, runtime e backend; provar o loader genérico com fixtures próprias
-de múltiplos módulos. Auditar os hooks upstream específicos por título antes
-de expor execução genérica.
+A sessão local de **EL CHAVO KART (BLUS31198, 01.00)** chega ao CRT/construtores
+PPU originais e à ativação do filesystem HLE, depois para explicitamente em
+`CELL_SYSMODULE_SPURS` (0x000A). Nenhum frame, menu ou gameplay foi verificado.
+A descoberta offline encontrou 47 imagens SPU embutidas: 45 geradas sem
+instruções pendentes reportadas; duas rejeitadas porque faixas executáveis incluem
+dados decodificados como instruções. O registro incompleto permanece desativado.
+Semântica dos parâmetros SPURS, cobertura de imagens e ABI ainda precisam de
+implementação e validação.
+
+**Próxima tarefa:** concluir CRT/construtores originais através das paradas
+diagnósticas, ampliar destinos indiretos preparados e auditar serviços alcançados
+com regressões reais. Concluir binding PRX e registro AOT SPU antes de habilitar
+seus chamadores. A lista HLE auditada e as barreiras param onde o suporte termina;
+completude de produção e ABI ampla continuam sem comprovação. Hooks upstream
+por título não provam compatibilidade genérica.
 
 Imagens/overlays SPU dinâmicos precisam de fingerprint, endereço/faixa LS,
 revisão de runtime/lifter e identidade de relocação, preparação AOT fora da

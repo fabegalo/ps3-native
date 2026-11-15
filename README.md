@@ -15,7 +15,7 @@
 
 </div>
 
-> **Experimental research, not a playable PS3 launcher.** The banner is concept art. The M0 milestone validates synthetic PPU/SPU AOT fixtures and an upstream RSX D3D12 pixel test. No commercial games or original VSH/XMB execute through this launcher's general path yet.
+> **Experimental research, not a playable PS3 launcher.** The banner is concept art. Synthetic PPU/SPU and RSX tests pass. The launcher can now enter original retail PPU startup code in a bounded AOT diagnostic session. No game menu, gameplay or original VSH/XMB boot is verified.
 
 Built on [ps3recomp](https://github.com/sp00nznet/ps3recomp) by **Ned Heller / sp00nznet**, following the shared architecture of [x360-native](https://github.com/fabegalo/x360-native), [ps2-native](https://github.com/fabegalo/ps2-native) and [xone-native](https://github.com/fabegalo/xone-native). The goal is an authentic **system → game → system** lifecycle; the management launcher does not imitate the XMB.
 
@@ -27,7 +27,7 @@ Built on [ps3recomp](https://github.com/sp00nznet/ps3recomp) by **Ned Heller / s
 | --- | --- | --- |
 | PPU / SPU AOT | Project-owned synthetic programs compiled and executed; SPU DMA verified | Generic commercial game execution |
 | RSX graphics | Upstream D3D12 pixel/depth regression validated on a local GPU | Playable titles or broad RSX coverage |
-| Import / preparation | Read-only game and PUP inventory; bounded PPU ELF code generation | Complete generic module binding and native title launch |
+| Import / preparation | Read-only inventory, PPU AOT, hash-bound diagnostic native startup | Complete generic module loading and playable title launch |
 | Original firmware | PUP identity inspection; upstream firmware LLE research | Original VSH/XMB boot, Guide-like system navigation, or game return |
 | Platforms | Windows x64 locally validated; Windows, Linux and macOS CI configured | Runtime certification across all planned targets |
 
@@ -89,8 +89,30 @@ drive; pass their existing paths to `import` without moving or duplicating them.
 | `prepare PATH [--cache PATH]` | Single readable big-endian PPU ELF64 ET_EXEC: upstream parsing, OPD/TOC/import analysis and actual PPU AOT C generation. Receipts hash input, adapter, upstream and outputs. Returns **3** because general native build/dependency certification remains blocked. |
 | `prepare --fixture ppu\|spu [--build-dir PATH]` | CMake generates, compiles and links the explicitly synthetic fixture with the existing upstream runtime. Incremental compiler/header/tool dependencies are tracked by CMake/Ninja. |
 | `run --fixture ppu\|spu` | Checks locked upstream and fixture hashes, executes the compiled synthetic fixture and returns its real result. |
-| `run PATH` | Inventories current bytes and returns **3**, with a concrete unsupported-execution diagnostic. |
+| `run PATH` | Starts a hash-bound native diagnostic module for that exact input revision, or returns **3** when none is prepared. Missing runtime support stops with **86**. |
 | `system` | Returns **3**: original VSH/XMB boot and system/game lifecycle are not implemented. |
+
+### Native startup diagnostics
+
+Supply a readable ELF derived locally from your own original. RPCS3's official
+portable `--decrypt` tool can provide it; RPCS3 is not the execution backend.
+Never put the ELF, keys or generated code in Git. Generate AOT first with
+`prepare EBOOT.elf`; its JSON returns the cache directory even when returning
+3 to indicate the native build is still pending. Then:
+
+```sh
+python src/ps3native/cli.py prepare /original/PS3_GAME --build-native --elf /local/EBOOT.elf --aot-dir /local/aot-cache
+python src/ps3native/cli.py run /original/PS3_GAME
+```
+
+The offline startup slice includes the entry, small OPD pointer tables and
+reachable direct targets. After a stopped run reports a missing PPU target,
+repeat preparation to extend the slice and incrementally rebuild. There is no
+compilation during guest execution, interpreter or JIT fallback. HLE calls need
+an audited implementation; unsupported instructions/calls stop with 86.
+Sessions verify original, ELF, generated-code, binary, runtime and configuration
+hashes, separate writable HDD state, and stop after 20 seconds or when logs
+cross 1 MiB. A diagnostic start is not gameplay.
 
 Exit codes: **0** completed operation; **2** invalid/missing input, I/O or tool
 failure; **3** unavailable execution/preparation stage. Fixture preparation/run
@@ -112,9 +134,13 @@ management launcher; content/catalog; preparation/native execution; compatibilit
 runtime/HLE; Original GPU/Native GPU; original system/games; session supervisor/
 host adapters. Their current ownership and approval rules are in [AGENTS.md](AGENTS.md).
 
-The pristine submodule and `deps.lock.json` fix ps3recomp to
+The submodule base and `deps.lock.json` fix ps3recomp to
 **`de4f090328ea08bef6b2f15caec0b85e343a7ece`** (upstream HEAD inspected on
-2026-11-14). No upstream patches or copied runtime are introduced. PPU register,
+2026-11-14). A hash-locked generic patch adds strict stops for missing direct/
+indirect PPU targets, unhandled LV2 and SPU interpretation, gates HLE dispatch
+to audited services, retains registered process-spawn callbacks, uses live
+memory accounting and correct UTC wall time on Windows. No runtime
+is copied. PPU register,
 VMX, endian, OPD/TOC and memory behavior, and SPU local store, DMA and channels
 come from upstream. These tiny fixtures do not certify complete ISA, exceptions,
 SPURS, synchronization or floating-point fidelity. Upstream has interpreter and
@@ -146,19 +172,31 @@ Local Windows x64 Release, Clang 22.1.8, CMake 3.31.6, Python 3.14.8:
 - Catalog/preparation: SFO/PUP bounds, Unicode paths, idempotency, originals,
   revisions, actual generated-code changes, cache reuse/tampering and unavailable
   commands. A symlink case is explicitly skipped if the host lacks link permission.
+- Runtime: missing/unaudited HLE, LV2, PPU and SPU interpretation stop; real
+  mutex contention, callback retention, allocation/free accounting and clock
+  results are checked with synthetic contexts.
 
-No commercial game, firmware or Sony SDK was used. Windows x64 is the local
+Own fixtures remain the public regression inputs. A user-provided retail game
+was also tested locally through original CRT startup; its code and derived
+outputs stay ignored. No Sony SDK was used. Windows x64 is the local
 validated build; Linux/macOS evidence belongs to the CI run for the actual commit.
 Windows/Linux ARM64, macOS Intel/Apple Silicon coverage and Steam Deck runtime
 must be reported separately from the CI runner's particular architecture.
 
-**Next task:** implement a fail-closed generic module completeness/binding gate
-before building a user module: unresolved calls/NIDs, unsupported instructions,
-PRX relocation/dependencies and SPU image registration must produce diagnostics,
-not upstream placeholder success, omitted work or interpreted execution. Bind
-verified compiled modules to input/toolchain/runtime/backend receipts; then prove
-the generic loader path with own multi-module fixtures. Existing title-specific
-upstream hooks need an audit before general execution is exposed.
+The local **EL CHAVO KART (BLUS31198, 01.00)** session reaches the original
+PPU CRT/static constructors and filesystem HLE activation, then stops explicitly
+at `CELL_SYSMODULE_SPURS` (0x000A). No game frame, menu or gameplay is verified.
+Offline discovery found 47 embedded SPU images: 45 generated without reported
+unsupported instructions; two failed because executable ranges include data
+decoded as instructions. The incomplete registry is not enabled. SPURS argument
+semantics, image coverage and ABI still require implementation and validation.
+
+**Next task:** finish original CRT/static initialization through strict stops,
+expand prepared indirect targets and audit reached services with real regressions.
+Complete PRX binding and SPU AOT image registration before enabling their callers.
+The HLE allowlist and runtime guards stop where coverage ends; production
+completeness and broad ABI coverage remain unproven. Existing title-specific
+upstream hooks are not generic compatibility.
 
 Dynamic SPU images/overlays need content fingerprints, LS load address/span,
 runtime/lifter revision and relocation identity, AOT preparation outside active
