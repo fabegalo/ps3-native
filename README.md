@@ -1,15 +1,35 @@
+<div align="center">
+
+<img src="docs/assets/ps3-native-banner.svg" alt="ps3-native concept artwork depicting CELL, SPUs, RSX and native PC execution; not a gameplay screenshot" width="100%" />
+
 # ps3-native
 
-[Português brasileiro](README.pt-BR.md)
+**An open research project for native ahead-of-time recompilation of PlayStation 3 software, targeting original games and the authentic VSH/XMB.**
 
-Generic PlayStation 3 static AOT recompilation and native execution research,
-built on [ps3recomp](https://github.com/sp00nznet/ps3recomp), by Ned Heller /
-sp00nznet. The goal is original games and the **original VSH/XMB**, including
-system → game → system transitions. The management CLI is not an imitation XMB.
+[![CI](https://img.shields.io/github/actions/workflow/status/fabegalo/ps3-native/ci.yml?branch=main&label=CI)](https://github.com/fabegalo/ps3-native/actions/workflows/ci.yml)
+[![Milestone](https://img.shields.io/badge/milestone-M0%20%7C%20bootstrap-555)](#current-status)
+[![Experimental](https://img.shields.io/badge/status-experimental-orange)](#current-status)
+[![License](https://img.shields.io/badge/license-BSD--3--Clause-blue)](LICENSE)
 
-**M0 bootstrap:** own PPU and SPU fixtures run natively, and an upstream RSX
-test verifies pixels on D3D12. Commercial games and original XMB do not run
-through this project's launcher yet. No compatibility claims follow from a build.
+[English](README.md) · [Português (Brasil)](README.pt-BR.md) · [Build](#build-and-check) · [Commands](#command-contracts)
+
+</div>
+
+> **Experimental research, not a playable PS3 launcher.** The banner is concept art. The M0 milestone validates synthetic PPU/SPU AOT fixtures and an upstream RSX D3D12 pixel test. No commercial games or original VSH/XMB execute through this launcher's general path yet.
+
+Built on [ps3recomp](https://github.com/sp00nznet/ps3recomp) by **Ned Heller / sp00nznet**, following the shared architecture of [x360-native](https://github.com/fabegalo/x360-native), [ps2-native](https://github.com/fabegalo/ps2-native) and [xone-native](https://github.com/fabegalo/xone-native). The goal is an authentic **system → game → system** lifecycle; the management launcher does not imitate the XMB.
+
+<a id="current-status"></a>
+
+## Current status
+
+| Area | Demonstrated | Not yet demonstrated |
+| --- | --- | --- |
+| PPU / SPU AOT | Project-owned synthetic programs compiled and executed; SPU DMA verified | Generic commercial game execution |
+| RSX graphics | Upstream D3D12 pixel/depth regression validated on a local GPU | Playable titles or broad RSX coverage |
+| Import / preparation | Read-only game and PUP inventory; bounded PPU ELF code generation | Complete generic module binding and native title launch |
+| Original firmware | PUP identity inspection; upstream firmware LLE research | Original VSH/XMB boot, Guide-like system navigation, or game return |
+| Platforms | Windows x64 locally validated; Windows, Linux and macOS CI configured | Runtime certification across all planned targets |
 
 ## Build and check
 
