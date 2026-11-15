@@ -4,6 +4,7 @@
 #include <atomic>
 #include <cstdio>
 #include <cstring>
+#include <array>
 
 extern "C" int ppu_register_image_region(uint32_t, uint32_t);
 extern "C" void ppu_register_function(uint64_t, void (*)(ppu_context*));
@@ -13,7 +14,10 @@ extern "C" PPU_THREAD_LOCAL ppu_context* g_active_ctx;
 extern "C" PPU_THREAD_LOCAL void (*g_trampoline_fn)(void*);
 extern "C" int ps3_native_guest_range_backed(uint32_t, uint32_t);
 
-static std::atomic<const NativeLleModule*> loaded;
+struct Resident { const NativeLleModule* module = nullptr; std::atomic<int> started{0}; };
+// shortcut: 64 resident prepared modules; expand on measured firmware requirements.
+static std::array<Resident, 64> loaded;
+static std::atomic<size_t> loaded_count{0};
 static uint32_t be32(const uint8_t* p) {
     return (uint32_t)p[0] << 24 | (uint32_t)p[1] << 16 | (uint32_t)p[2] << 8 | p[3];
 }
@@ -28,7 +32,9 @@ static const NativeLleExport* find_export(const NativeLleModule* m, uint32_t nid
     return lo < m->export_count && m->exports[lo].nid == nid ? m->exports + lo : nullptr;
 }
 extern "C" int ps3_native_lle_load(const NativeLleModule* m) {
-    if (const auto* current = loaded.load(std::memory_order_acquire)) return current == m;
+    const size_t count = loaded_count.load(std::memory_order_acquire);
+    for (size_t i = 0; i < count; ++i) if (loaded[i].module == m) return 1;
+    if (count == loaded.size()) return 0;
     if (!m || !m->name || !m->library || !m->image || !m->functions || !m->exports ||
         !m->base || m->size < 8 || (uint64_t)m->base + m->size > 0x100000000ull ||
         !m->function_count || m->function_count > 65536 || !m->export_count || m->export_count > 4096) return 0;
@@ -46,30 +52,92 @@ extern "C" int ps3_native_lle_load(const NativeLleModule* m) {
         bool prepared = false;
         for (size_t j = 0; j < m->function_count; ++j) prepared |= m->functions[j].address == code;
         if (!prepared) return 0;
+        for (size_t j = 0; j < count; ++j) if (find_export(loaded[j].module, e.nid)) return 0;
+    }
+    for (size_t i = 0; i < count; ++i)
+        if (!std::strcmp(m->library, loaded[i].module->library) || !std::strncmp(m->name, loaded[i].module->name, 28)) return 0;
+    if (m->start_opd) {
+        if (m->start_opd < m->base || (uint64_t)m->start_opd + 8 > end || (m->start_opd & 3)) return 0;
+        const auto code = be32(m->image + m->start_opd - m->base);
+        bool prepared = false;
+        for (size_t i = 0; i < m->function_count; ++i) prepared |= m->functions[i].address == code;
+        if (!prepared) return 0;
     }
     if (!ppu_register_image_region(m->base, m->size)) return 0;
     std::memcpy(vm_base + m->base, m->image, m->size);
     for (size_t i = 0; i < m->function_count; ++i)
         ppu_register_function(m->functions[i].address, m->functions[i].entry);
-    loaded.store(m, std::memory_order_release);
+    loaded[count].module = m;
+    loaded[count].started.store(m->start_opd ? 0 : 2, std::memory_order_relaxed);
+    loaded_count.store(count + 1, std::memory_order_release);
     std::fprintf(stderr, "[native-lle] loaded %s library=%s base=0x%08X bytes=%u exports=%zu\n",
         m->name, m->library, m->base, m->size, m->export_count);
     return 1;
 }
 extern "C" int ps3_native_lle_owns(uint32_t nid) {
-    return find_export(loaded.load(std::memory_order_acquire), nid) != nullptr;
+    for (size_t i = 0; i < loaded_count.load(std::memory_order_acquire); ++i)
+        if (find_export(loaded[i].module, nid)) return 1;
+    return 0;
 }
 extern "C" int ps3_native_lle_library(const char* library) {
-    const auto* m = loaded.load(std::memory_order_acquire);
-    return m && library && !std::strcmp(m->library, library);
+    for (size_t i = 0; library && i < loaded_count.load(std::memory_order_acquire); ++i)
+        if (!std::strcmp(loaded[i].module->library, library)) return 1;
+    return 0;
 }
 extern "C" int ps3_native_lle_named(const char* name) {
-    const auto* m = loaded.load(std::memory_order_acquire);
-    return m && name && !std::strncmp(m->name, name, 28);
+    for (size_t i = 0; name && i < loaded_count.load(std::memory_order_acquire); ++i)
+        if (!std::strncmp(loaded[i].module->name, name, 28)) return 1;
+    return 0;
+}
+extern "C" int ps3_native_lle_start(const char* library, ppu_context* ctx) {
+    for (size_t i = 0; library && ctx && i < loaded_count.load(std::memory_order_acquire); ++i) {
+        auto& entry = loaded[i]; const auto* m = entry.module;
+        if (std::strcmp(library, m->library)) continue;
+        if (entry.started.load(std::memory_order_acquire) == 2) return 1;
+        int idle = 0;
+        if (!entry.started.compare_exchange_strong(idle, 1)) return 0;
+        const auto* original = m->image + m->start_opd - m->base;
+        if (vm_read32(m->start_opd) != be32(original) || vm_read32(m->start_opd + 4) != be32(original + 4)) {
+            std::fprintf(stderr, "[native-blocked] original PRX start descriptor changed\n");
+            std::fflush(stderr); ps3_native_stop();
+        }
+        const ppu_context saved = *ctx;
+        ctx->gpr[3] = ctx->gpr[4] = 0;
+        ps3_native_call_opd(ctx, m->start_opd);
+        if (ctx->gpr[1] != saved.gpr[1] || ctx->gpr[13] != saved.gpr[13] || ctx->thread_id != saved.thread_id ||
+            std::memcmp(ctx->gpr + 14, saved.gpr + 14, 18 * sizeof(uint64_t)) ||
+            std::memcmp(ctx->fpr + 14, saved.fpr + 14, 18 * sizeof(double)) ||
+            std::memcmp(ctx->vr + 20, saved.vr + 20, 12 * sizeof(ctx->vr[0])) || ((ctx->cr ^ saved.cr) & 0x00FFF000u)) {
+            std::fprintf(stderr, "[native-blocked] original PRX start violated PPU ABI\n");
+            std::fflush(stderr); ps3_native_stop();
+        }
+        const auto result = ctx->gpr[3], reserve_addr = ctx->reserve_addr, reserve_value = ctx->reserve_value;
+        const auto reserve_valid = ctx->reserve_valid;
+        const auto fpscr = ctx->fpscr, vscr = ctx->vscr;
+        *ctx = saved;
+        ctx->fpscr = fpscr; ctx->vscr = vscr;
+        ctx->reserve_addr = reserve_addr; ctx->reserve_value = reserve_value; ctx->reserve_valid = reserve_valid;
+        if (result != 0) {
+            std::fprintf(stderr, "[native-blocked] PRX start requires lifecycle handling result=0x%llX\n", (unsigned long long)result);
+            std::fflush(stderr); ps3_native_stop();
+        }
+        entry.started.store(2, std::memory_order_release);
+        std::fprintf(stderr, "[native-lle] started library=%s opd=0x%08X\n", m->library, m->start_opd);
+        return 1;
+    }
+    return 0;
 }
 extern "C" int ps3_native_lle_dispatch(uint32_t nid, ppu_context* ctx) {
-    const auto* m = loaded.load(std::memory_order_acquire);
-    const auto* e = find_export(m, nid);
+    const NativeLleModule* m = nullptr; const NativeLleExport* e = nullptr;
+    for (size_t i = 0; i < loaded_count.load(std::memory_order_acquire); ++i) {
+        if (const auto* found = find_export(loaded[i].module, nid)) {
+            if (loaded[i].started.load(std::memory_order_acquire) != 2) {
+                std::fprintf(stderr, "[native-blocked] PRX export called before module start completed\n");
+                std::fflush(stderr); ps3_native_stop();
+            }
+            m = loaded[i].module; e = found; break;
+        }
+    }
     if (!e) return 0;
     const auto code = vm_read32(e->opd), toc = vm_read32(e->opd + 4);
     const auto* original = m->image + e->opd - m->base;
@@ -79,6 +147,13 @@ extern "C" int ps3_native_lle_dispatch(uint32_t nid, ppu_context* ctx) {
     }
     ps3_native_call_opd(ctx, e->opd);
     return 1;
+}
+extern "C" void ps3_native_lle_start_all(ppu_context* ctx) {
+    for (size_t i = 0; i < loaded_count.load(std::memory_order_acquire); ++i)
+        if (!ps3_native_lle_start(loaded[i].module->library, ctx)) {
+            std::fprintf(stderr, "[native-blocked] prepared PRX startup failed\n");
+            std::fflush(stderr); ps3_native_stop();
+        }
 }
 extern "C" void ps3_native_call_opd(ppu_context* ctx, uint32_t opd) {
     if (!ctx || (opd & 3) || !ps3_native_guest_range_backed(opd, 8)) {

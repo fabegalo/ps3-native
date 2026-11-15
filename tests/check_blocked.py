@@ -2,7 +2,7 @@ import subprocess
 import sys
 import os
 
-for mode in ('hle', 'ppu', 'indirect', 'syscall', 'unaudited_syscall', 'mutex_shared', 'mutex_adaptive', 'mutex_contended', 'tty_channel', 'language_other', 'spu', 'fs_not_ready',
+for mode in ('hle', 'ppu', 'indirect', 'indirect_null', 'ppu_null_read', 'storage_budget', 'syscall', 'unaudited_syscall', 'audio_probe', 'audio_option', 'mutex_shared', 'mutex_adaptive', 'mutex_contended', 'rw_contended', 'tty_channel', 'language_other', 'spu', 'fs_not_ready',
              'spu_indirect', 'spu_missing', 'spu_missing_async', 'spu_missing_job', 'sysutil_no_dispatcher',
              'provider_not_registered', 'gcm_unaudited', 'tile_compressed', 'io_unbacked',
              'callback_missing', 'callback_ct_missing', 'thread_flags', 'thread_exit_unowned', 'raw_spu_unreviewed',
@@ -46,6 +46,13 @@ if result.returncode != 86 or b'[native-blocked] SPU halt without owned executio
 result = subprocess.run([sys.argv[3], sys.argv[4], 'changed_export'], capture_output=True, timeout=15)
 if result.returncode != 86 or b'[native-blocked] original PRX export descriptor changed' not in result.stderr:
     raise AssertionError(('PRX export mutation', result.returncode, result.stderr[-2000:]))
+result = subprocess.run([sys.argv[3], sys.argv[4], 'not_started'], capture_output=True, timeout=15)
+if result.returncode != 86 or b'export called before module start' not in result.stderr:
+    raise AssertionError(('PRX module-start order', result.returncode, result.stderr[-2000:]))
+for mode, expected in (('changed_start', b'start descriptor changed'), ('bad_start_abi', b'start violated PPU ABI')):
+    result = subprocess.run([sys.argv[3], sys.argv[4], mode], capture_output=True, timeout=15)
+    if result.returncode != 86 or expected not in result.stderr:
+        raise AssertionError((mode, result.returncode, result.stderr[-2000:]))
 result = subprocess.run([sys.argv[3], sys.argv[4], 'missing_export'], capture_output=True, timeout=15)
 if result.returncode != 86 or b'[native-blocked] original cellSpurs owner has no prepared export' not in result.stderr:
     raise AssertionError(('PRX ownership fallback', result.returncode, result.stderr[-2000:]))

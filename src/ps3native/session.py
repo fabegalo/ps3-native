@@ -26,6 +26,10 @@ def bind(root, original, elf, generation, build):
     spu_files = spu_artifacts(root, Path(spu[1]), elf) if spu else {}
     firmware = re.search(r'^PS3_NATIVE_FIRMWARE_DIR:PATH=(.+)$', cache, re.M)
     firmware_files = firmware_artifacts(root, Path(firmware[1])) if firmware else {}
+    extra_firmware = re.search(r'^PS3_NATIVE_EXTRA_FIRMWARE_DIRS:STRING=(.+)$', cache, re.M)
+    if extra_firmware:
+        for directory in extra_firmware[1].split(';'):
+            firmware_files.update(firmware_artifacts(root, Path(directory)))
     receipt = {'schema': 2, 'diagnostic_only': True, 'original_id': original['id'],
                'original_source': original['source'], 'elf': str(elf.resolve()), 'elf_sha256': digest(elf),
                'binary': str(exe.resolve()), 'binary_sha256': digest(exe),
@@ -33,7 +37,7 @@ def bind(root, original, elf, generation, build):
                'generation': {**{str(p.resolve()): digest(p) for p in generation.glob('ppu_recomp*.*')}, **spu_files, **firmware_files},
                'guard_sha256': digest(root / 'src/native_guard.cpp'),
                'own_sources': {str(p): digest(root / p) for p in
-                               ('src/module_hooks.cpp', 'src/native_stop.cpp', 'src/native_lle.cpp', 'src/native_lle.h', 'src/ps3native/firmware.py', 'cmake/NativeModule.cmake', 'CMakeLists.txt', 'src/ps3native/codegen.py')}}
+                               ('src/module_hooks.cpp', 'src/native_stop.cpp', 'src/native_storage.cpp', 'src/native_storage.h', 'src/native_lle.cpp', 'src/native_lle.h', 'src/ps3native/firmware.py', 'cmake/NativeModule.cmake', 'CMakeLists.txt', 'src/ps3native/codegen.py')}}
     target = build / 'module/receipt.json'
     target.parent.mkdir(parents=True, exist_ok=True)
     temporary = target.with_suffix('.pending')
@@ -64,6 +68,7 @@ def run(root, original, build, seconds=20):
     source = Path(original['source'])
     vfs = source.parent if source.name == 'PS3_GAME' or source.is_file() else source
     env.update(PS3_VFS_ROOT=str(vfs), PS3_HDD0_ROOT=str(state / 'dev_hdd0'),
+               PS3_NATIVE_CONTENT_ID=original['id'],
                PS3_HDD1_ROOT=str(state / 'dev_hdd1'), PS3_STDIO_UNBUFFERED='1')
     metadata = original.get('metadata', {}).get('PARAM.SFO', {})
     if isinstance(metadata.get('TITLE'), str): env['PS3_TITLE'] = metadata['TITLE']

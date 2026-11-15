@@ -12,6 +12,15 @@ from lle_fixture import own_prx
 
 
 class FirmwareTests(unittest.TestCase):
+    def test_explicit_original_module_start_preparation(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp); source = base / 'start.prx'
+            source.write_bytes(own_prx(module_start=True))
+            with self.assertRaisesRegex(ValueError, 'module-start'):
+                prepare_prx(ROOT, source, base / 'cache', 0x09000000, 'ownSynthetic')
+            output = prepare_prx(ROOT, source, base / 'cache', 0x09000000, 'ownSynthetic', module_start=True)
+            self.assertTrue(json.loads((output / 'receipt.json').read_text())['key']['module_start'])
+            self.assertIn('0x09000198u', (output / 'bundle.cpp').read_text())
     def test_prx_bounds_and_relocations_reject_malformed_inputs(self):
         with tempfile.TemporaryDirectory() as tmp:
             source = Path(tmp) / 'own.prx'

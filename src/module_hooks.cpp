@@ -15,6 +15,7 @@
 #include "../network/sceNp.h"
 #include "cellSpurs.h"
 #include "native_lle.h"
+#include "native_storage.h"
 extern "C" s32 _cellSpursAttributeInitialize(CellSpursAttribute*, u32, u32, s32, s32, s32, u8);
 extern "C" void ps3_hle_register_ctx(uint32_t, const char*, void (*)(ppu_context*));
 extern "C" [[noreturn]] void ps3_native_stop(void);
@@ -23,12 +24,22 @@ extern "C" int ps3_native_guest_range_backed(uint32_t, uint32_t);
 extern "C" void ppu_write_coherent(u32, const void*, u32);
 extern "C" int ps3_sysprx_heap_range_backed(uint32_t, uint32_t);
 extern "C" __attribute__((weak)) const NativeLleModule* ps3_native_firmware_definition(void) { return nullptr; }
+extern "C" __attribute__((weak)) const NativeLleModule* ps3_native_firmware_extra(size_t) { return nullptr; }
 extern "C" s32 sys_ppu_thread_once(u32, u32);
+extern "C" s32 sys_process_is_stack(u32);
+extern "C" int cellGameReleaseCheck(void);
 extern "C" s32 _sys_spu_printf_initialize(u32, u32, u32, u32);
 extern "C" s32 _sys_spu_printf_finalize(void);
 extern "C" u32 ps3_spu_printf_callback(u32);
 extern "C" void* _sys_memset(void*, s32, u32);
 extern "C" void* _sys_memcpy(void*, const void*, u32);
+extern "C" int cellAudioOutputProbe(void);
+extern "C" s32 cellAudioInit(void);
+extern "C" s32 sceNpTrophyInit(void*, u32, u32, u64);
+extern "C" s32 sceNpTrophyTerm(void);
+extern "C" s32 cellAudioOutGetSoundAvailability(u32, u32, u32, u32);
+extern "C" s32 cellAudioOutConfigure(u32, void*, void*, u32);
+extern "C" __attribute__((weak)) int ps3_native_audio_stereo_probe(void) { return cellAudioOutputProbe(); }
 // Standalone CPU harnesses have no presentation backend.
 extern "C" __attribute__((weak)) int ppu_host_video_state(void) { return 0; }
 namespace {
@@ -54,6 +65,18 @@ void memory_set(ppu_context* ctx) {
     ctx->gpr[3] = (u32)(uintptr_t)_sys_memset((void*)(uintptr_t)(u32)ctx->gpr[3], (s32)ctx->gpr[4], (u32)ctx->gpr[5]);
 }
 void gcm_timestamp(ppu_context* ctx) { ctx->gpr[3] = cellGcmGetTimeStamp((u32)ctx->gpr[3]); }
+void audio_availability(ppu_context* ctx) {
+    ctx->gpr[3] = (u64)(s64)cellAudioOutGetSoundAvailability((u32)ctx->gpr[3], (u32)ctx->gpr[4], (u32)ctx->gpr[5], (u32)ctx->gpr[6]);
+}
+void audio_configure(ppu_context* ctx) {
+    ctx->gpr[3] = (u64)(s64)cellAudioOutConfigure((u32)ctx->gpr[3], (void*)(uintptr_t)ctx->gpr[4],
+        (void*)(uintptr_t)ctx->gpr[5], (u32)ctx->gpr[6]);
+}
+void audio_initialize(ppu_context* ctx) { ctx->gpr[3] = (u64)(s64)cellAudioInit(); }
+void trophy_initialize(ppu_context* ctx) {
+    ctx->gpr[3] = (u64)(s64)sceNpTrophyInit((void*)(uintptr_t)ctx->gpr[3], (u32)ctx->gpr[4], (u32)ctx->gpr[5], ctx->gpr[6]);
+}
+void trophy_terminate(ppu_context* ctx) { ctx->gpr[3] = (u64)(s64)sceNpTrophyTerm(); }
 void memory_copy(ppu_context* ctx) {
     ctx->gpr[3] = (u32)(uintptr_t)_sys_memcpy((void*)(uintptr_t)(u32)ctx->gpr[3],
         (const void*)(uintptr_t)(u32)ctx->gpr[4], (u32)ctx->gpr[5]);
@@ -103,8 +126,26 @@ void thread_once(ppu_context* ctx) {
         std::fflush(stderr); ps3_native_stop();
     }
 }
-void load_module(ppu_context* ctx) { ctx->gpr[3] = (uint64_t)(int64_t)cellSysmoduleLoadModule((uint16_t)ctx->gpr[3]); }
+void load_module(ppu_context* ctx) {
+    if ((uint16_t)ctx->gpr[3] == CELL_SYSMODULE_NET && ps3_native_lle_library("sys_net") && !ps3_native_lle_start("sys_net", ctx)) {
+        std::fprintf(stderr, "[native-blocked] original network module start is unavailable or concurrent\n");
+        std::fflush(stderr); ps3_native_stop();
+    }
+    ctx->gpr[3] = (uint64_t)(int64_t)cellSysmoduleLoadModule((uint16_t)ctx->gpr[3]);
+}
 void module_loaded(ppu_context* ctx) { ctx->gpr[3] = (uint64_t)(int64_t)cellSysmoduleIsLoaded((uint16_t)ctx->gpr[3]); }
+void unload_module(ppu_context* ctx) {
+    const auto id = (uint16_t)ctx->gpr[3];
+    if (id != CELL_SYSMODULE_SYSUTIL_GAME) {
+        std::fprintf(stderr, "[native-blocked] module unload lifecycle requires audit id=0x%04X\n", id);
+        std::fflush(stderr); ps3_native_stop();
+    }
+    if (cellSysmoduleIsLoaded(id) == CELL_OK && !cellGameReleaseCheck()) {
+        std::fprintf(stderr, "[native-blocked] game module unload has an active storage transaction\n");
+        std::fflush(stderr); ps3_native_stop();
+    }
+    ctx->gpr[3] = (u64)(s64)cellSysmoduleUnloadModule(id);
+}
 void sysutil_register(ppu_context* ctx) {
     auto rc = cellSysutilRegisterCallback((s32)ctx->gpr[3],
         (CellSysutilCallback)(uintptr_t)(uint32_t)ctx->gpr[4], (void*)(uintptr_t)(uint32_t)ctx->gpr[5]);
@@ -161,13 +202,30 @@ void system_param(ppu_context* ctx) {
     if (ctx->gpr[4] > UINT32_MAX) { ctx->gpr[3] = (u64)(s64)CELL_SYSUTIL_ERROR_VALUE; return; }
     ctx->gpr[3] = (u64)(s64)cellSysutilGetSystemParamInt((s32)ctx->gpr[3], (u32)ctx->gpr[4]);
 }
+void process_is_stack(ppu_context* ctx) { ctx->gpr[3] = sys_process_is_stack((u32)ctx->gpr[3]); }
 void game_permit(ppu_context* ctx) {
+    if (ctx->gpr[3] > UINT32_MAX || ctx->gpr[4] > UINT32_MAX ||
+        !ps3_native_guest_range_backed((u32)ctx->gpr[3], 128) ||
+        !ps3_native_guest_range_backed((u32)ctx->gpr[4], 128)) {
+        ctx->gpr[3] = (u64)(s64)CELL_GAME_ERROR_PARAM; return;
+    }
     if (cellGame_get_hdd_title_id()) {
         std::fprintf(stderr, "[native-blocked] HDD content permission needs an audited writable mount\n");
         std::fflush(stderr); ps3_native_stop();
     }
     ctx->gpr[3] = (uint64_t)(int64_t)cellGameContentPermit((char*)(uintptr_t)(u32)ctx->gpr[3],
         (char*)(uintptr_t)(u32)ctx->gpr[4]);
+}
+void game_create(ppu_context* ctx) {
+    if (ctx->gpr[3] > UINT32_MAX || !ps3_native_guest_range_backed((u32)ctx->gpr[3], sizeof(CellGameSetInitParams))) {
+        ctx->gpr[3] = (u64)(s64)CELL_GAME_ERROR_PARAM; return;
+    }
+    for (unsigned i : {4u, 5u}) if (ctx->gpr[i] > UINT32_MAX ||
+        (ctx->gpr[i] && !ps3_native_guest_range_backed((u32)ctx->gpr[i], 128))) {
+        ctx->gpr[3] = (u64)(s64)CELL_GAME_ERROR_PARAM; return;
+    }
+    ctx->gpr[3] = (u64)(s64)cellGameCreateGameData((CellGameSetInitParams*)(uintptr_t)(u32)ctx->gpr[3],
+        (char*)(uintptr_t)(u32)ctx->gpr[4], (char*)(uintptr_t)(u32)ctx->gpr[5]);
 }
 void game_data(ppu_context* ctx) {
     const auto type = (u32)ctx->gpr[3];
@@ -188,34 +246,25 @@ void game_data(ppu_context* ctx) {
     }
     if (name.empty() || name.size() >= CELL_GAME_DIRNAME_SIZE || name == "." || name == ".." ||
         name.find_first_of("/\\:") != std::string::npos) { invalid(); return; }
-    namespace fs = std::filesystem;
-    fs::path hdd;
-#ifdef _WIN32
-    if (const auto* configured = _wgetenv(L"PS3_HDD0_ROOT")) hdd = configured;
-#else
-    if (const auto* configured = std::getenv("PS3_HDD0_ROOT")) hdd = fs::u8path(configured);
-#endif
-    if (hdd.empty()) {
-        std::fprintf(stderr, "[native-blocked] content check requires an explicit HDD mount\n");
-        std::fflush(stderr); ps3_native_stop();
-    }
-    std::error_code ec;
-    auto root = fs::weakly_canonical(hdd, ec);
-    if (ec) { ctx->gpr[3] = (u64)(s64)CELL_GAME_ERROR_INTERNAL; return; }
-    fs::path target;
-    try { target = fs::weakly_canonical(root / "game" / fs::u8path(name) / "PARAM.SFO", ec); }
-    catch (const fs::filesystem_error&) { invalid(); return; }
-    if (ec) { ctx->gpr[3] = (u64)(s64)CELL_GAME_ERROR_INTERNAL; return; }
-    auto component = target.begin();
-    for (const auto& part : root) {
-        if (component == target.end() || *component++ != part) { invalid(); return; }
-    }
+    if (!ps3_native_install_validate(name.c_str())) { invalid(); return; }
     ctx->gpr[3] = (u64)(s64)cellGameDataCheck(type, (const char*)(uintptr_t)(u32)ctx->gpr[4],
                                          (CellGameContentSize*)(uintptr_t)(u32)ctx->gpr[5]);
 }
 void game_string(ppu_context* ctx) {
     ctx->gpr[3] = (uint64_t)(int64_t)cellGameGetParamString((s32)ctx->gpr[3],
         (char*)(uintptr_t)(u32)ctx->gpr[4], (u32)ctx->gpr[5]);
+}
+void game_set_string(ppu_context* ctx) {
+    if (ctx->gpr[4] > UINT32_MAX) { ctx->gpr[3] = (u64)(s64)CELL_GAME_ERROR_PARAM; return; }
+    for (u32 i = 0; i < 128; ++i) {
+        const u64 a = ctx->gpr[4] + i;
+        if (a > UINT32_MAX || !ps3_native_guest_range_backed((u32)a, 1)) break;
+        if (!vm_read8(a)) {
+            ctx->gpr[3] = (u64)(s64)cellGameSetParamString((s32)ctx->gpr[3], (const char*)(uintptr_t)(u32)ctx->gpr[4]);
+            return;
+        }
+    }
+    ctx->gpr[3] = (u64)(s64)CELL_GAME_ERROR_PARAM;
 }
 void gcm_config(ppu_context* ctx) {
     ctx->gpr[3] = (uint64_t)(int64_t)cellGcmGetConfiguration((CellGcmConfig*)(uintptr_t)(u32)ctx->gpr[3]);
@@ -312,6 +361,11 @@ void spurs_group_type(ppu_context* ctx) {
 struct RegisterAdapters {
     RegisterAdapters() {
         ps3_hle_register_ctx(ps3_compute_nid("cellGcmGetTimeStamp"), "cellGcmGetTimeStamp", gcm_timestamp);
+        ps3_hle_register_ctx(ps3_compute_nid("cellAudioOutGetSoundAvailability"), "cellAudioOutGetSoundAvailability", audio_availability);
+        ps3_hle_register_ctx(ps3_compute_nid("cellAudioOutConfigure"), "cellAudioOutConfigure", audio_configure);
+        ps3_hle_register_ctx(ps3_compute_nid("cellAudioInit"), "cellAudioInit", audio_initialize);
+        ps3_hle_register_ctx(ps3_compute_nid("sceNpTrophyInit"), "sceNpTrophyInit", trophy_initialize);
+        ps3_hle_register_ctx(ps3_compute_nid("sceNpTrophyTerm"), "sceNpTrophyTerm", trophy_terminate);
         ps3_hle_register_ctx(ps3_compute_nid("sys_prx_get_module_id_by_name"), "sys_prx_get_module_id_by_name", module_by_name);
         ps3_hle_register_ctx(ps3_compute_nid("_sys_memset"), "_sys_memset", memory_set);
         ps3_hle_register_ctx(ps3_compute_nid("_sys_memcpy"), "_sys_memcpy", memory_copy);
@@ -327,6 +381,7 @@ struct RegisterAdapters {
         ps3_hle_register_ctx(ps3_compute_nid("_sys_spu_printf_detach_thread"), "_sys_spu_printf_detach_thread", spu_printf_dispatch<3>);
         ps3_hle_register_ctx(ps3_compute_nid("sys_ppu_thread_once"), "sys_ppu_thread_once", thread_once);
         ps3_hle_register_ctx(ps3_compute_nid("cellSysmoduleLoadModule"), "cellSysmoduleLoadModule", load_module);
+        ps3_hle_register_ctx(ps3_compute_nid("cellSysmoduleUnloadModule"), "cellSysmoduleUnloadModule", unload_module);
         ps3_hle_register_ctx(ps3_compute_nid("cellSysmoduleInitialize"), "cellSysmoduleInitialize", sysmodule_initialize);
         ps3_hle_register_ctx(ps3_compute_nid("cellSysmoduleIsLoaded"), "cellSysmoduleIsLoaded", module_loaded);
         ps3_hle_register_ctx(ps3_compute_nid("cellSysutilRegisterCallback"), "cellSysutilRegisterCallback", sysutil_register);
@@ -340,9 +395,12 @@ struct RegisterAdapters {
         ps3_hle_register_ctx(ps3_compute_nid("sceNpManagerGetStatus"), "sceNpManagerGetStatus", np_status);
         ps3_hle_register_ctx(ps3_compute_nid("cellGameBootCheck"), "cellGameBootCheck", game_boot);
         ps3_hle_register_ctx(ps3_compute_nid("cellSysutilGetSystemParamInt"), "cellSysutilGetSystemParamInt", system_param);
+        ps3_hle_register_ctx(ps3_compute_nid("sys_process_is_stack"), "sys_process_is_stack", process_is_stack);
         ps3_hle_register_ctx(ps3_compute_nid("cellGameContentPermit"), "cellGameContentPermit", game_permit);
         ps3_hle_register_ctx(ps3_compute_nid("cellGameDataCheck"), "cellGameDataCheck", game_data);
+        ps3_hle_register_ctx(ps3_compute_nid("cellGameCreateGameData"), "cellGameCreateGameData", game_create);
         ps3_hle_register_ctx(ps3_compute_nid("cellGameGetParamString"), "cellGameGetParamString", game_string);
+        ps3_hle_register_ctx(ps3_compute_nid("cellGameSetParamString"), "cellGameSetParamString", game_set_string);
         ps3_hle_register_ctx(ps3_compute_nid("cellGcmGetConfiguration"), "cellGcmGetConfiguration", gcm_config);
         ps3_hle_register_ctx(ps3_compute_nid("cellGcmGetControlRegister"), "cellGcmGetControlRegister", gcm_control);
         ps3_hle_register_ctx(ps3_compute_nid("cellGcmGetTiledPitchSize"), "cellGcmGetTiledPitchSize", gcm_pitch);
@@ -389,4 +447,9 @@ extern "C" void ps3_load_prx_modules(void) {
     } else {
         std::fprintf(stderr, "[native] no original PRX modules prepared; unaudited firmware calls will stop\n");
     }
+    for (size_t i = 0; const auto* module = ps3_native_firmware_extra(i); ++i)
+        if (!ps3_native_lle_load(module)) {
+            std::fprintf(stderr, "[native-blocked] extra original PRX ownership, image or AOT bindings invalid\n");
+            std::fflush(stderr); ps3_native_stop();
+        }
 }

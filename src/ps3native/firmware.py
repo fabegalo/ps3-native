@@ -92,7 +92,7 @@ def firmware_artifacts(root, directory):
     return artifacts
 
 
-def prepare_prx(root, source, cache, base, library, firmware=None):
+def prepare_prx(root, source, cache, base, library, firmware=None, module_start=False):
     source, cache = source.resolve(), cache.resolve()
     if source.is_relative_to(cache):
         raise ValueError('Original PRX must remain outside its preparation cache')
@@ -105,6 +105,7 @@ def prepare_prx(root, source, cache, base, library, firmware=None):
     if firmware is not None:
         inputs[str(firmware.resolve())] = digest(firmware)
     key = {'source_sha256': inputs[str(source)], 'base': base, 'library': library,
+           'module_start': bool(module_start),
            'firmware_sha256': digest(firmware) if firmware is not None else None,
            'upstream_commit': lock['commit'], 'adapter_sha256': digest(Path(__file__)),
            'guards_sha256': digest(Path(__file__).with_name('codegen.py')),
@@ -128,8 +129,14 @@ def prepare_prx(root, source, cache, base, library, firmware=None):
         stem = source.stem
         exports = json.loads((relocated / f'{stem}_exports.json').read_text())
         imports = json.loads((relocated / f'{stem}_imports.json').read_text())
-        if library not in exports['exports'] or '!syslib' in exports['exports']:
+        if library not in exports['exports'] or ('!syslib' in exports['exports'] and not module_start):
             raise ValueError('Selected PRX library is missing or requires an unimplemented module-start contract')
+        start_opd = 0
+        if '!syslib' in exports['exports']:
+            start = exports['exports']['!syslib'].get('0xBC9A0086')
+            if not start:
+                raise ValueError('PRX lifecycle metadata has no supported module-start entry')
+            start_opd = int(start, 16)
         image = (relocated / f'{stem}_image.bin').read_bytes()
         selected = sorted((int(nid, 16), int(opd, 16)) for nid, opd in exports['exports'][library].items())
         import_nids = {int(nid, 16) for entries in imports.values() for nid in entries}
@@ -141,7 +148,7 @@ def prepare_prx(root, source, cache, base, library, firmware=None):
                 stub = int(address, 16)
                 if stub & 3 or not base + text_va <= stub <= base + text_va + text_size - 16:
                     raise ValueError('PRX import stub exceeds executable code')
-        for nid, opd in selected:
+        for nid, opd in selected + ([(0xBC9A0086, start_opd)] if start_opd else []):
             offset = opd - base
             if not 0 <= offset <= len(image) - 8:
                 raise ValueError('PRX export descriptor exceeds its image')
@@ -179,7 +186,7 @@ def prepare_prx(root, source, cache, base, library, firmware=None):
         bundle.extend(f'{{0x{nid:08X}u, 0x{opd:08X}u}},' for nid, opd in selected)
         bundle += ['};', 'static const NativeLleModule original_module = {',
                    f'{json.dumps(exports["module"])}, {json.dumps(library)}, 0x{base:08X}u, sizeof(image), image,',
-                   'functions, sizeof(functions)/sizeof(functions[0]), exports, sizeof(exports)/sizeof(exports[0])', '};',
+                   f'functions, sizeof(functions)/sizeof(functions[0]), exports, sizeof(exports)/sizeof(exports[0]), 0x{start_opd:08X}u', '};',
                    'extern "C" const NativeLleModule* ps3_native_firmware_definition(void) { return &original_module; }', '']
         (stage / 'bundle.cpp').write_text('\n'.join(bundle), encoding='utf-8', newline='\n')
         if any(digest(Path(name)) != expected for name, expected in inputs.items()):
@@ -202,6 +209,7 @@ if __name__ == '__main__':
     parser.add_argument('--cache', required=True, type=Path)
     parser.add_argument('--base', required=True, type=lambda value: int(value, 0))
     parser.add_argument('--library', required=True)
+    parser.add_argument('--module-start', action='store_true')
     parser.add_argument('--firmware', type=Path)
     args = parser.parse_args()
-    print(prepare_prx(Path(__file__).resolve().parents[2], args.source, args.cache, args.base, args.library, args.firmware))
+    print(prepare_prx(Path(__file__).resolve().parents[2], args.source, args.cache, args.base, args.library, args.firmware, args.module_start))

@@ -2,7 +2,7 @@
 import struct
 
 
-def own_prx():
+def own_prx(module_start=False):
     data = bytearray(0x390)
     data[:16] = b'\x7fELF\x02\x02\x01' + bytes(9)
     struct.pack_into('>HHIQQQIHHHHHH', data, 16, 0xFFA4, 21, 1, 0, 64, 0, 0, 64, 56, 3, 64, 0, 0)
@@ -21,6 +21,17 @@ def own_prx():
     struct.pack_into('>Q', data, 0x280, 1)
     relocations = [(0x10, 1, 0x40), (0x14, 1, 0x60), (0x18, 1, 0x64),
                    (0x64, 1, 0x70), (0x70, 0, 0x80), (0x74, 0, 0x8180)]
+    if module_start:
+        data.extend(bytes(120))
+        struct.pack_into('>Q', data, 208, 264)
+        struct.pack_into('>I', data, 0x148, 0x138)
+        data[0x21C] = 0x1C
+        struct.pack_into('>H', data, 0x222, 1)
+        struct.pack_into('>II', data, 0x230, 0x190, 0x194)
+        struct.pack_into('>IIII', data, 0x290, 0xBC9A0086, 0x198, 0x90, 0x8180)
+        struct.pack_into('>5I', data, 0x190, 0x80A2800C, 0x38A50001, 0x90A2800C, 0x38600000, 0x4E800020)
+        relocations.extend([(0x30, 1, 0x90), (0x34, 1, 0x94), (0x94, 1, 0x98),
+                            (0x98, 0, 0x90), (0x9C, 0, 0x8180)])
     for i, (offset, value_segment, addend) in enumerate(relocations):
         struct.pack_into('>QHBBIQ', data, 0x300 + i * 24, offset, 0, value_segment, 1, 1, addend)
     return bytes(data)

@@ -1,6 +1,7 @@
 #include "ppu_recomp.h"
 #include "ps3emu/nid.h"
 #include "ps3emu/error_codes.h"
+#include "native_storage.h"
 #include "vm.h"
 #include "spu_interp.h"
 #include "spu_workload.h"
@@ -25,6 +26,7 @@ extern "C" {
 #include <string>
 #include <cstdlib>
 #include <ctime>
+#include <filesystem>
 #ifdef _WIN32
 #include <process.h>
 #else
@@ -36,10 +38,13 @@ void ppu_unlifted_stub(uint64_t, ppu_context*);
 void ps3_hle_call(uint32_t, ppu_context*);
 void ps3_hle_register(uint32_t, const char*, void*);
 int32_t sys_net_initialize_network_ex(void*);
+int32_t cellAudioInit(void);
+int32_t cellAudioQuit(void);
 void ps3_indirect_call(ppu_context*);
 void lv2_syscall(ppu_context*);
 void ppu_sysprx_register(void);
 void lv2_init_syscalls(void);
+void sys_memory_set_image_query(uint64_t (*)(uint64_t, uint64_t));
 uint32_t ps3_process_spawn_callback(unsigned);
 extern uint32_t g_ppu_main_stack_addr, g_ppu_main_stack_size;
 extern const char* ppu_vfs_root;
@@ -71,9 +76,17 @@ int ppu_stwcx32(uint64_t, uint32_t, uint32_t);
 void ppu_write_coherent(uint32_t, const void*, uint32_t);
 }
 static unsigned callbacks;
+static int own_audio_output = 1;
+extern "C" int ps3_native_audio_stereo_probe(void) { return own_audio_output; }
 static unsigned gcm_callbacks;
 static uint64_t callback_tls, callback_tid, callback_toc;
 static std::atomic<bool> continued_after_exit{false};
+static std::atomic<unsigned> thread_atexit_calls{0};
+static void native_thread_atexit(ppu_context* ctx) {
+    if (!ctx->thread_id || ctx->gpr[2] != 0xABCD0000) std::abort();
+    ++thread_atexit_calls;
+    ctx->gpr[3] = 0xBAD; // The exit status must survive callbacks.
+}
 static std::atomic<bool> once_entered{false}, once_release{false};
 static unsigned once_calls;
 static u32 synthetic_report_target;
@@ -124,11 +137,24 @@ static void callback(uint32_t opd, uint64_t a0, uint64_t a1, uint64_t a2,
     if (opd == 0x37000 && a0) gcm_callbacks++;
 }
 static void call(ppu_context& ctx, const char* name, uint64_t a0) {
+    if (!vm_base && vm_init()) std::abort();
     ctx.gpr[3] = a0;
     ps3_hle_call(ps3_compute_nid(name), &ctx);
 }
 int main(int argc, char** argv) {
+    if (argc == 2 && !std::strcmp(argv[1], "audio_host")) {
+        if (vm_init()) return 1;
+        for (unsigned cycle = 0; cycle < 2; ++cycle) {
+            if (cellAudioInit() || (u32)cellAudioInit() != (u32)CELL_AUDIO_ERROR_ALREADY_INIT) return 2;
+            std::this_thread::sleep_for(std::chrono::milliseconds(20));
+            if (cellAudioQuit() || (u32)cellAudioQuit() != (u32)CELL_AUDIO_ERROR_NOT_INIT) return 3;
+        }
+        vm_shutdown();
+        std::puts("Verified real host audio start/stop twice; no game PCM supplied");
+        return 0;
+    }
     ppu_context ctx{};
+    ctx.gpr[1] = 0xD00FFFF0;
     if (argc == 2 && (!strcmp(argv[1], "language") || !strcmp(argv[1], "language_other"))) {
         if (vm_init()) return 1;
         g_ppu_main_stack_addr = 0xD0100000; g_ppu_main_stack_size = 0x20000;
@@ -175,6 +201,8 @@ int main(int argc, char** argv) {
             return 1;
         }
         if (argc != 3 || vm_init() != 0) return 1;
+        lv2_init_syscalls();
+        g_ppu_main_stack_addr = 0x30000; g_ppu_main_stack_size = 0x10000;
         ctx.gpr[1] = 0xD00FFFF0;
         ppu_vfs_root = argv[2];
         ppu_fs_register();
@@ -202,7 +230,84 @@ int main(int argc, char** argv) {
             }
             if (!strcmp(argv[1], "fs_data_permit")) {
                 ctx.gpr[4] = 0x30600; call(ctx, "cellGameContentPermit", 0x30500);
-                return 4;
+                return ctx.gpr[3] || vm_read8(0x30500) || vm_read8(0x30600) ? 4 : 0;
+            }
+            if (!strncmp(argv[1], "fs_data_install", 15)) {
+                std::memset(vm_base + 0x30700, 0, 212);
+                std::strcpy((char*)vm_base + 0x30700, "Own instalação");
+                std::strcpy((char*)vm_base + 0x30780, "TEST00001");
+                std::strcpy((char*)vm_base + 0x3078C, "01.23");
+                ctx.gpr[4] = 0x30500; ctx.gpr[5] = 0x30600;
+                call(ctx, "cellGameCreateGameData", 0x30700);
+                if (ctx.gpr[3] || std::strncmp((char*)vm_base + 0x30500, "/dev_hdd0/.native-install/", 25)) return 5;
+                if (!strcmp(argv[1], "fs_data_install_unload")) {
+                    call(ctx, "cellSysmoduleLoadModule", 0x3E);
+                    call(ctx, "cellSysmoduleUnloadModule", 0x3E);
+                    return 9;
+                }
+                if (!strcmp(argv[1], "fs_data_install_stage")) return 0;
+                call(ctx, "cellSysmoduleLoadModule", 0xE);
+                const std::string filename = std::string((char*)vm_base + 0x30600) +
+                    (!strcmp(argv[1], "fs_data_install_escape") ? "/escape.bin" : "/ação.bin");
+                std::strcpy((char*)vm_base + 0x30A00, filename.c_str());
+                ctx.gpr[4] = 0x202; ctx.gpr[5] = 0x100030900ull; ctx.gpr[6] = ctx.gpr[7] = 0;
+                call(ctx, "cellFsOpen", 0x30A00);
+                if ((u32)ctx.gpr[3] != (u32)CELL_EFAULT) return 10;
+                ctx.gpr[4] = !strcmp(argv[1], "fs_data_install_escape") ? 0x202 : 0xC2;
+                ctx.gpr[5] = 0x30900; call(ctx, "cellFsOpen", 0x30A00);
+                if (ctx.gpr[3]) return 11;
+                const u32 data_fd = vm_read32(0x30900);
+                uint8_t payload[20]; for (unsigned i = 0; i < 20; ++i) payload[i] = (uint8_t)i;
+                std::memcpy(vm_base + 0x30B00, payload, 20);
+                ctx.gpr[4] = 0x30B00; ctx.gpr[5] = 20; ctx.gpr[6] = 0x30B00;
+                call(ctx, "cellFsWrite", data_fd);
+                if (ctx.gpr[3] || vm_read64(0x30B00) != 20) return 12;
+                call(ctx, "cellFsFsync", data_fd); if (ctx.gpr[3]) return 25;
+                ctx.gpr[4] = 0x30C00; call(ctx, "cellFsFstat", data_fd);
+                if (ctx.gpr[3] || vm_read64(0x30C24) != 20 || vm_read64(0x30C2C) != 4096) return 13;
+                ctx.gpr[4] = 0; ctx.gpr[5] = 0; ctx.gpr[6] = 0x30910; call(ctx, "cellFsLseek", data_fd);
+                if (ctx.gpr[3] || vm_read64(0x30910)) return 14;
+                ctx.gpr[4] = 0x30B00; ctx.gpr[5] = 20; ctx.gpr[6] = 0x30910; call(ctx, "cellFsRead", data_fd);
+                if (ctx.gpr[3] || vm_read64(0x30910) != 20 || std::memcmp(vm_base + 0x30B00, payload, 20)) return 15;
+                ctx.gpr[4] = 0xC2; ctx.gpr[5] = 0x30920; ctx.gpr[6] = ctx.gpr[7] = 0;
+                call(ctx, "cellFsOpen", 0x30A00);
+                if ((u32)ctx.gpr[3] != (u32)CELL_EEXIST) return 16;
+                call(ctx, "cellFsClose", data_fd); if (ctx.gpr[3]) return 17;
+                ctx.gpr[4] = 0x402; ctx.gpr[5] = 0x30900; ctx.gpr[6] = ctx.gpr[7] = 0;
+                call(ctx, "cellFsOpen", 0x30A00); if (ctx.gpr[3]) return 18;
+                const u32 append_fd = vm_read32(0x30900);
+                vm_write8(0x30B00, 0xEE); ctx.gpr[4] = 0x30B00; ctx.gpr[5] = 1; ctx.gpr[6] = 0x30910;
+                call(ctx, "cellFsWrite", append_fd); if (ctx.gpr[3] || vm_read64(0x30910) != 1) return 19;
+                call(ctx, "cellFsClose", append_fd); if (ctx.gpr[3]) return 20;
+                ctx.gpr[4] = 0; ctx.gpr[5] = 0x30900; ctx.gpr[6] = ctx.gpr[7] = 0;
+                call(ctx, "cellFsOpen", 0x30A00); if (ctx.gpr[3]) return 21;
+                const u32 read_fd = vm_read32(0x30900);
+                call(ctx, "cellFsFsync", read_fd);
+                if ((u32)ctx.gpr[3] != (u32)CELL_EBADF) return 26;
+                ctx.gpr[4] = 0x30B00; ctx.gpr[5] = 21; ctx.gpr[6] = 0x30910;
+                call(ctx, "cellFsRead", read_fd);
+                if (ctx.gpr[3] || vm_read64(0x30910) != 21 || std::memcmp(vm_base + 0x30B00, payload, 20) || vm_read8(0x30B14) != 0xEE) return 22;
+                call(ctx, "cellFsClose", read_fd); if (ctx.gpr[3]) return 23;
+                call(ctx, "cellFsFsync", read_fd);
+                if ((u32)ctx.gpr[3] != (u32)CELL_EBADF) return 27;
+                ctx.gpr[4] = 0x30C00; call(ctx, "cellFsStat", 0x30A00);
+                if (ctx.gpr[3] || vm_read64(0x30C24) != 21) return 24;
+                std::strcpy((char*)vm_base + 0x30800, "Updated title"); ctx.gpr[4] = 0x30800;
+                call(ctx, "cellGameSetParamString", 1); if (ctx.gpr[3]) return 7;
+                std::strcpy((char*)vm_base + 0x30800, "Título local"); ctx.gpr[4] = 0x30800;
+                call(ctx, "cellGameSetParamString", 19); if (ctx.gpr[3]) return 8;
+                if (!strcmp(argv[1], "fs_data_install_race")) {
+                    namespace fs = std::filesystem;
+#ifdef _WIN32
+                    fs::path hdd(_wgetenv(L"PS3_HDD0_ROOT"));
+#else
+                    fs::path hdd(std::getenv("PS3_HDD0_ROOT"));
+#endif
+                    fs::create_directories(hdd / "game/TEST00001");
+                }
+                ctx.gpr[4] = 0x30600; call(ctx, "cellGameContentPermit", 0x30500);
+                if (ctx.gpr[3] || std::strcmp((char*)vm_base + 0x30500, "/dev_hdd0/game/TEST00001") ||
+                    std::strcmp((char*)vm_base + 0x30600, "/dev_hdd0/game/TEST00001/USRDIR")) return 6;
             }
             vm_shutdown(); return 0;
         }
@@ -215,6 +320,15 @@ int main(int argc, char** argv) {
                 std::strcmp((char*)vm_base + 0x30040, "TEST00001") ||
                 vm_read32(0x30024) != UINT32_MAX) return 52;
             std::printf("[boot-space-kb] %u\n", vm_read32(0x30020));
+            call(ctx, "cellSysmoduleLoadModule", 0x3E);
+            call(ctx, "cellSysmoduleUnloadModule", 0x3E);
+            if (ctx.gpr[3]) return 285;
+            call(ctx, "cellSysmoduleIsLoaded", 0x3E);
+            if ((u32)ctx.gpr[3] != 0x80012003u) return 286;
+            call(ctx, "cellSysmoduleLoadModule", 0x3E);
+            ctx.gpr[4] = 0x30010; ctx.gpr[5] = 0x30020; ctx.gpr[6] = 0x30040;
+            call(ctx, "cellGameBootCheck", 0x30000);
+            if (ctx.gpr[3]) return 287;
             ctx.gpr[4] = 0x30300; ctx.gpr[5] = 32;
             call(ctx, "cellGameGetParamString", 100);
             if (ctx.gpr[3] || std::strcmp((char*)vm_base + 0x30300, "TEST00001")) return 54;
@@ -233,24 +347,52 @@ int main(int argc, char** argv) {
         std::string path = !strcmp(argv[1], "fs_traversal") ? "/dev_bdvd/../outside.txt" :
                            !strcmp(argv[1], "fs_edat") ? "/dev_bdvd/PS3_GAME/protected.edat" : "/dev_bdvd/PS3_GAME/own.txt";
         std::memcpy(vm_base + 0x30000, path.c_str(), path.size() + 1);
+        const bool raw_fs = !std::strcmp(argv[1], "fs_syscall");
+        auto file_call = [&](const char* name, u64 argument) {
+            if (!raw_fs) { call(ctx, name, argument); return; }
+            const u32 number = !std::strcmp(name, "cellFsRead") ? 802 :
+                !std::strcmp(name, "cellFsClose") ? 804 : !std::strcmp(name, "cellFsStat") ? 808 :
+                !std::strcmp(name, "cellFsFstat") ? 809 : 818;
+            ctx.gpr[11] = number; ctx.gpr[3] = argument; lv2_syscall(&ctx);
+        };
         ctx.gpr[4] = !strcmp(argv[1], "fs_write") ? 1 : 0;
         ctx.gpr[5] = 0x31000;
-        call(ctx, "cellFsOpen", 0x30000);
-        if (strcmp(argv[1], "fs") != 0) return 1;
+        if (!std::strcmp(argv[1], "fs")) {
+            ctx.gpr[11] = 801; ctx.gpr[3] = 0x30000; ctx.gpr[6] = ctx.gpr[7] = ctx.gpr[8] = 0;
+            lv2_syscall(&ctx);
+        } else call(ctx, "cellFsOpen", 0x30000);
+        if (strcmp(argv[1], "fs") != 0 && !raw_fs) return 1;
         if (ctx.gpr[3]) return 21;
         auto fd = vm_read32(0x31000);
+        std::memset(vm_base + 0x32100, 0xA5, 60);
+        ctx.gpr[4] = 0x32104; file_call("cellFsFstat", fd);
+        if (ctx.gpr[3] || vm_read64(0x32128) != 13 || vm_read64(0x32130) != 2048 ||
+            vm_read32(0x32104) != 0x8124 || vm_read32(0x32108) != UINT32_MAX ||
+            vm_read32(0x3210C) != UINT32_MAX || vm_read32(0x32100) != 0xA5A5A5A5 ||
+            vm_read32(0x32138) != 0xA5A5A5A5) return 27;
+        std::printf("[fstat-mtime] %llu\n", (unsigned long long)vm_read64(0x32118));
+        for (const u64 invalid : {0ull, 0xFFFFFFFEull, 0x100032104ull}) {
+            ctx.gpr[4] = invalid; file_call("cellFsFstat", fd);
+            if ((u32)ctx.gpr[3] != (u32)CELL_EFAULT || vm_read64(0x32128) != 13) return 28;
+        }
         ctx.gpr[4] = 0x32000; ctx.gpr[5] = 64; ctx.gpr[6] = 0x31010;
-        call(ctx, "cellFsRead", fd);
+        file_call("cellFsRead", fd);
         if (ctx.gpr[3] || vm_read64(0x31010) != 13 || std::memcmp(vm_base + 0x32000, "own-fixture\0!", 13)) return 22;
-        call(ctx, "cellFsClose", fd);
+        ctx.gpr[4] = 0x32104; file_call("cellFsFstat", fd);
+        if (ctx.gpr[3]) return 29;
+        ctx.gpr[4] = 0; ctx.gpr[5] = 1; ctx.gpr[6] = 0x31020; file_call("cellFsLseek", fd);
+        if (ctx.gpr[3] || vm_read64(0x31020) != 13) return 30;
+        file_call("cellFsClose", fd);
         if (ctx.gpr[3]) return 23;
-        call(ctx, "cellFsClose", fd);
+        ctx.gpr[4] = 0x32104; file_call("cellFsFstat", fd);
+        if ((u32)ctx.gpr[3] != (u32)CELL_EBADF) return 31;
+        file_call("cellFsClose", fd);
         if ((int64_t)ctx.gpr[3] >= 0) return 24;
         vm_shutdown();
         std::puts("Verified typed HLE FS activation, real reads/counts and closed-handle error");
         return 0;
     }
-    if (argc == 2 && strncmp(argv[1], "mutex_", 6) && std::string(argv[1]) != "gcm_prepared_multiple" && std::string(argv[1]) != "gcm_prepared_backend_missing") {
+    if (argc == 2 && strncmp(argv[1], "mutex_", 6) && strncmp(argv[1], "rw_", 3) && std::string(argv[1]) != "gcm_prepared_multiple" && std::string(argv[1]) != "gcm_prepared_backend_missing") {
         if (!strcmp(argv[1], "callback_missing")) {
             if (vm_init()) return 1;
             vm_write32(0x38000, 0x12380); vm_write32(0x38004, 0);
@@ -260,7 +402,16 @@ int main(int argc, char** argv) {
         if (!strcmp(argv[1], "hle")) ps3_hle_call(0xDEADBEEFu, &ctx);
         if (!strcmp(argv[1], "ppu")) ppu_unlifted_stub(0x12340, &ctx);
         if (!strcmp(argv[1], "syscall")) { ctx.gpr[11] = 0xFFFF; lv2_syscall(&ctx); }
-        if (!strcmp(argv[1], "unaudited_syscall")) { ctx.gpr[11] = 105; lv2_syscall(&ctx); }
+        if (!strcmp(argv[1], "unaudited_syscall")) { ctx.gpr[11] = 110; lv2_syscall(&ctx); }
+        if (!strcmp(argv[1], "indirect_null")) { ctx.ctr = 0; ps3_indirect_call(&ctx); }
+        if (!strcmp(argv[1], "storage_budget")) ps3_native_install_charge(1024ull * 1024 * 1024 + 1);
+        if (!strcmp(argv[1], "ppu_null_read")) { if (vm_init()) return 1; volatile auto value = vm_read32(0); (void)value; }
+        if (!strcmp(argv[1], "audio_probe") || !strcmp(argv[1], "audio_option")) {
+            if (vm_init()) return 1;
+            own_audio_output = -1;
+            ctx.gpr[4] = 0; ctx.gpr[5] = 4; ctx.gpr[6] = !strcmp(argv[1], "audio_option") ? 1 : 0;
+            call(ctx, "cellAudioOutGetSoundAvailability", 0);
+        }
         if (!strcmp(argv[1], "sdk_missing")) {
             if (vm_init()) return 1;
             lv2_init_syscalls();
@@ -476,6 +627,39 @@ int main(int argc, char** argv) {
     if (ctx.gpr[3] || !mutex_id || vm_read32(mutex_out - 4) != 0xA5A5A5A5 ||
         vm_read32(mutex_out + 4) != 0xA5A5A5A5) return 237;
     ctx.thread_id = 17;
+    call(ctx, "sceNpTrophyTerm", 0);
+    if ((u32)ctx.gpr[3] != 0x80022902u) return 295;
+    ctx.gpr[4] = ctx.gpr[5] = 0; ctx.gpr[6] = 1;
+    call(ctx, "sceNpTrophyInit", 0);
+    if ((u32)ctx.gpr[3] != 0x80022903u) return 296;
+    ctx.gpr[6] = 0; call(ctx, "sceNpTrophyInit", 0);
+    if (ctx.gpr[3]) return 297;
+    call(ctx, "sceNpTrophyInit", 0);
+    if ((u32)ctx.gpr[3] != 0x80022901u) return 298;
+    call(ctx, "sceNpTrophyTerm", 0);
+    if (ctx.gpr[3]) return 299;
+    ctx.gpr[4] = 0; ctx.gpr[5] = 4; ctx.gpr[6] = 0;
+    call(ctx, "cellAudioOutGetSoundAvailability", 0);
+    if (ctx.gpr[3] != 2) return 288;
+    own_audio_output = 0;
+    call(ctx, "cellAudioOutGetSoundAvailability", 0);
+    if (ctx.gpr[3]) return 289;
+    own_audio_output = 1;
+    for (u32 coding : {1u, 2u}) {
+        ctx.gpr[4] = coding; call(ctx, "cellAudioOutGetSoundAvailability", 0);
+        if (ctx.gpr[3]) return 290;
+    }
+    ctx.gpr[4] = 0; call(ctx, "cellAudioOutGetSoundAvailability", 1);
+    if (ctx.gpr[3]) return 291;
+    std::memset(vm_base + 0xD0101200, 0, 16); vm_write8(0xD0101200, 2);
+    ctx.gpr[4] = 0xD0101200; ctx.gpr[5] = ctx.gpr[6] = 0;
+    call(ctx, "cellAudioOutConfigure", 0);
+    if (ctx.gpr[3]) return 292;
+    own_audio_output = 0; call(ctx, "cellAudioOutConfigure", 0);
+    if ((u32)ctx.gpr[3] != 0x8002B244u) return 293;
+    own_audio_output = 1;
+    ctx.gpr[4] = 0x1D0101200ull; call(ctx, "cellAudioOutConfigure", 0);
+    if ((u32)ctx.gpr[3] != 0x8002B242u) return 294;
     for (const u32 operation : {102u, 103u}) {
         ctx.gpr[11] = operation; ctx.gpr[3] = mutex_id; ctx.gpr[4] = 0;
         lv2_syscall(&ctx); if (ctx.gpr[3]) return 242;
@@ -507,6 +691,22 @@ int main(int argc, char** argv) {
         if (other.gpr[3]) std::abort();
     });
     mutex_next.join();
+    const u32 cond_attr = mutex_attr + 48, cond_out = mutex_out + 96;
+    std::memset(vm_base + cond_attr, 0, 24); vm_write32(cond_attr, 0x200);
+    auto kernel_cond = [&](u32 number, u64 a, u64 b = 0, u64 c = 0) {
+        ctx.gpr[11] = number; ctx.gpr[3] = a; ctx.gpr[4] = b; ctx.gpr[5] = c;
+        lv2_syscall(&ctx); return (u32)ctx.gpr[3];
+    };
+    vm_write32(cond_out - 4, 0xA5A5A5A5); vm_write32(cond_out + 4, 0xA5A5A5A5);
+    for (u64 invalid : {0ull, 0xFFFFFFFEull, 0x1D0101060ull})
+        if (kernel_cond(105, invalid, mutex_id, cond_attr) != (u32)CELL_EFAULT) return 268;
+    if (kernel_cond(105, cond_out, 0, cond_attr) != (u32)CELL_ESRCH ||
+        kernel_cond(105, cond_out, mutex_id, cond_attr)) return 269;
+    const u32 cond_id = vm_read32(cond_out);
+    if (!cond_id || vm_read32(cond_out - 4) != 0xA5A5A5A5 ||
+        vm_read32(cond_out + 4) != 0xA5A5A5A5 ||
+        kernel_cond(101, mutex_id) != (u32)CELL_EPERM ||
+        kernel_cond(106, cond_id) || kernel_cond(106, cond_id) != (u32)CELL_ESRCH) return 270;
     ctx.gpr[11] = 101; ctx.gpr[3] = mutex_id; lv2_syscall(&ctx);
     if (ctx.gpr[3]) return 238;
     ctx.gpr[3] = mutex_id; lv2_syscall(&ctx);
@@ -534,6 +734,57 @@ int main(int argc, char** argv) {
     if (ctx.gpr[3]) return 251;
     ctx.gpr[11] = 101; ctx.gpr[3] = nonrecursive_id; lv2_syscall(&ctx);
     if (ctx.gpr[3]) return 252;
+    auto create_mutexes = [&](unsigned index) {
+        ppu_context local{}; local.thread_id = 31 + index;
+        const u32 output = 0xD0101300 + index * 128;
+        for (unsigned i = 0; i < 32; ++i) {
+            local.gpr[11] = 100; local.gpr[3] = output; local.gpr[4] = mutex_attr;
+            lv2_syscall(&local);
+            const u32 id = vm_read32(output);
+            if (local.gpr[3] || !id) std::abort();
+            for (const u32 operation : {102u, 104u, 101u}) {
+                local.gpr[11] = operation; local.gpr[3] = id; local.gpr[4] = 0;
+                lv2_syscall(&local); if (local.gpr[3]) std::abort();
+            }
+        }
+    };
+    std::thread creator_first(create_mutexes, 0), creator_second(create_mutexes, 1);
+    creator_first.join(); creator_second.join();
+    auto rw = [&](u32 number, u64 a, u64 b = 0) {
+        ctx.gpr[11] = number; ctx.gpr[3] = a; ctx.gpr[4] = b;
+        lv2_syscall(&ctx); return (u32)ctx.gpr[3];
+    };
+    std::memset(vm_base + mutex_attr, 0, 32);
+    vm_write32(mutex_attr, 2); vm_write32(mutex_attr + 4, 0x200);
+    if (rw(120, 0, mutex_attr) != (u32)CELL_EFAULT ||
+        rw(120, 0x1D0101000ull, mutex_attr) != (u32)CELL_EFAULT) return 253;
+    vm_write32(mutex_attr, 0);
+    if (rw(120, mutex_out, mutex_attr) != (u32)CELL_EINVAL) return 254;
+    vm_write32(mutex_attr, 2);
+    if (rw(120, mutex_out, mutex_attr)) return 255;
+    const u32 rw_id = vm_read32(mutex_out);
+    if (!rw_id || rw(122, rw_id) || rw(123, rw_id) || rw(148, rw_id) != (u32)CELL_EBUSY ||
+        rw(121, rw_id) != (u32)CELL_EBUSY) return 256;
+    std::thread reader_release([&] {
+        ppu_context other{}; other.thread_id = 18;
+        for (unsigned i = 0; i < 2; ++i) {
+            other.gpr[11] = 124; other.gpr[3] = rw_id; lv2_syscall(&other);
+            if (other.gpr[3]) std::abort();
+        }
+    });
+    reader_release.join();
+    if (rw(124, rw_id) != (u32)CELL_EPERM || rw(125, rw_id) ||
+        rw(148, rw_id) != (u32)CELL_EDEADLK || rw(123, rw_id) != (u32)CELL_EBUSY) return 257;
+    std::thread other_writer([&] {
+        ppu_context other{}; other.thread_id = 18;
+        other.gpr[11] = 127; other.gpr[3] = rw_id; lv2_syscall(&other);
+        if ((u32)other.gpr[3] != (u32)CELL_EPERM) std::abort();
+        if (argc > 1 && !strcmp(argv[1], "rw_contended")) {
+            other.gpr[11] = 122; other.gpr[3] = rw_id; lv2_syscall(&other);
+        }
+    });
+    other_writer.join();
+    if (rw(127, rw_id) || rw(121, rw_id) || rw(122, rw_id) != (u32)CELL_ESRCH) return 258;
     ctx.gpr[11] = 49; ctx.gpr[3] = 0x28000; lv2_syscall(&ctx);
     if (ctx.gpr[3] != 0 || vm_read32(0x28000) != 0xD0100000 || vm_read32(0x28004) != 0x20000) return 15;
     ctx.gpr[3] = 0; lv2_syscall(&ctx);
@@ -741,6 +992,10 @@ int main(int argc, char** argv) {
     call(ctx, "_sys_process_at_Exitspawn", 0x23000);
     if (ps3_process_spawn_callback(0) != 0x21000 || ps3_process_spawn_callback(1) != 0x23000) return 2;
     vm_write32(0x21000, 2);
+    // Own synthetic image data, independently of the actual main stack mapping.
+    sys_memory_set_image_query([](uint64_t a, uint64_t end) -> uint64_t {
+        return a < 0x40000 && end > 0x20000 ? 0x40000 : a;
+    });
     vm_write32(0x21004, 0x20);
     ctx.gpr[4] = 0x21000;
     call(ctx, "sys_lwmutex_create", 0x20000);
@@ -758,6 +1013,18 @@ int main(int argc, char** argv) {
     };
     std::thread first(worker, 1), second(worker, 2);
     first.join(); second.join();
+    call(ctx, "sys_lwmutex_lock", 0x20000);
+    call(ctx, "sys_lwmutex_destroy", 0x20000);
+    if ((u32)ctx.gpr[3] != (u32)CELL_EBUSY) return 277;
+    call(ctx, "sys_lwmutex_unlock", 0x20000);
+    call(ctx, "sys_lwmutex_destroy", 0x20000);
+    if (ctx.gpr[3] || vm_read32(0x20000) != 0xFFFFFFFEu) return 278;
+    call(ctx, "sys_lwmutex_lock", 0x20000);
+    if ((u32)ctx.gpr[3] != (u32)CELL_ESRCH) return 279;
+    call(ctx, "sys_lwmutex_destroy", 0x20000);
+    if ((u32)ctx.gpr[3] != (u32)CELL_ESRCH) return 280;
+    ctx.gpr[4] = 0x21000; call(ctx, "sys_lwmutex_create", 0x20000);
+    if (ctx.gpr[3] || vm_read32(0x20000)) return 281;
     call(ctx, "sys_time_get_system_time", 0);
     auto before = ctx.gpr[3];
     call(ctx, "sys_time_get_system_time", 0);
@@ -781,6 +1048,14 @@ int main(int argc, char** argv) {
     vm_write32(0x39100, 0x12400); vm_write32(0x39104, 0);
     std::memcpy(vm_base + 0x39300, "own worker", 11);
     ppu_register_function(0x12400, native_guest_thread);
+    vm_write32(0xD0101120, 0x12420); vm_write32(0xD0101124, 0xABCD0000);
+    ppu_register_function(0x12420, native_thread_atexit);
+    call(ctx, "sys_ppu_thread_register_atexit", 0x139120000ull);
+    if ((u32)ctx.gpr[3] != (u32)CELL_EFAULT) return 271;
+    call(ctx, "sys_ppu_thread_register_atexit", 0xD0101120);
+    if (ctx.gpr[3]) return 272;
+    call(ctx, "sys_ppu_thread_register_atexit", 0xD0101120);
+    if ((u32)ctx.gpr[3] != (u32)CELL_EPERM) return 273;
     ctx.gpr[4] = 0x39100; ctx.gpr[5] = 0x39200; ctx.gpr[6] = 1001;
     ctx.gpr[7] = 0x10000; ctx.gpr[8] = 1; ctx.gpr[9] = 0x39300;
     call(ctx, "sys_ppu_thread_create", 0x39000);
@@ -789,6 +1064,23 @@ int main(int argc, char** argv) {
     ctx.gpr[11] = 44; ctx.gpr[3] = worker_id; ctx.gpr[4] = 0x39010; lv2_syscall(&ctx);
     if (ctx.gpr[3] || vm_read64(0x39010) != 0x1122334455667788ull ||
         vm_read32(0x39200) != 0xC0FFEE || continued_after_exit.load()) return 98;
+    if (thread_atexit_calls.load() != 1) return 274;
+    call(ctx, "sys_ppu_thread_unregister_atexit", 0xD0101120);
+    if (ctx.gpr[3]) return 275;
+    call(ctx, "sys_ppu_thread_unregister_atexit", 0xD0101120);
+    if ((u32)ctx.gpr[3] != (u32)CELL_ESRCH) return 276;
+    for (unsigned i = 0; i < 8; ++i) {
+        vm_write32(0xD0101140 + i * 8, 0x12420);
+        vm_write32(0xD0101144 + i * 8, 0xABCD0000);
+        call(ctx, "sys_ppu_thread_register_atexit", 0xD0101140 + i * 8);
+        if (ctx.gpr[3]) return 282;
+    }
+    call(ctx, "sys_ppu_thread_register_atexit", 0xD0101120);
+    if ((u32)ctx.gpr[3] != (u32)CELL_ENOMEM) return 283;
+    for (unsigned i = 0; i < 8; ++i) {
+        call(ctx, "sys_ppu_thread_unregister_atexit", 0xD0101140 + i * 8);
+        if (ctx.gpr[3]) return 284;
+    }
     ctx.gpr[11] = 169; ctx.gpr[3] = 6; ctx.gpr[4] = 6; lv2_syscall(&ctx);
     if ((int64_t)ctx.gpr[3] >= 0) return 99;
     ctx.gpr[3] = 6; ctx.gpr[4] = 1; lv2_syscall(&ctx);
@@ -823,7 +1115,7 @@ int main(int argc, char** argv) {
     call(ctx, "sys_lwmutex_unlock", condition_mutex); call(ctx, "sys_lwmutex_unlock", condition_mutex);
     std::atomic<bool> condition_entered{false}, condition_finished{false}, condition_failed{false};
     std::thread condition_thread([&] {
-        ppu_context local{}; local.thread_id = 18;
+        ppu_context local{}; local.thread_id = 18; local.gpr[1] = 0xD030FFF0;
         local.gpr[4] = 0; call(local, "sys_lwmutex_lock", condition_mutex);
         condition_entered.store(true);
         local.gpr[4] = 0; call(local, "sys_lwcond_wait", condition);
@@ -939,6 +1231,7 @@ int main(int argc, char** argv) {
     std::atomic<bool> second_started{false}, second_finished{false}, once_bad{false};
     auto once_worker = [&](bool second) {
         ppu_context local{}; local.thread_id = second ? 102 : 101;
+        local.gpr[1] = second ? 0xD032FFF0 : 0xD031FFF0;
         local.gpr[1] = second ? 0xD040FFF0 : 0xD030FFF0;
         g_active_ctx = &local;
         if (second) second_started.store(true);
@@ -1091,7 +1384,7 @@ int main(int argc, char** argv) {
     const auto join_cause = reserved_a + 0x9500, join_status = join_cause + 4;
     vm_write32(join_cause, 0xA5A5A5A5); vm_write32(join_status, 0xA5A5A5A5);
     std::thread group_joiner([&] {
-        ppu_context local{}; local.thread_id = 120;
+        ppu_context local{}; local.thread_id = 120; local.gpr[1] = 0xD033FFF0;
         local.gpr[11] = 178; local.gpr[3] = event_spu_group;
         local.gpr[4] = join_cause; local.gpr[5] = join_status;
         join_entered.store(true); lv2_syscall(&local);

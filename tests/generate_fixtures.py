@@ -78,7 +78,7 @@ sys.path.insert(0, str(root / 'src'))
 from lle_fixture import own_prx
 from ps3native.firmware import prepare_prx
 prx = out / 'own.prx'
-prx.write_bytes(own_prx())
-prepared = prepare_prx(root, prx, out / 'lle-cache', 0x08000000, 'ownSynthetic')
+prx.write_bytes(own_prx(module_start=True))
+prepared = prepare_prx(root, prx, out / 'lle-cache', 0x08000000, 'ownSynthetic', module_start=True)
 (out / 'lle_bridge.cpp').write_text('#include "' + (prepared / 'bundle.cpp').as_posix() + '"\n')
 (out / 'lle_recomp.cpp').write_text('#include "' + (prepared / 'lift/ppu_recomp.c').as_posix() + '"\n')

@@ -14,7 +14,7 @@ class SessionTests(unittest.TestCase):
             root = Path(tmp)
             generation, build = root / 'aot', root / 'build'
             generation.mkdir(); build.mkdir()
-            for name in ('src/native_guard.cpp', 'src/module_hooks.cpp', 'src/native_stop.cpp', 'src/native_lle.cpp', 'src/native_lle.h', 'src/ps3native/firmware.py', 'cmake/NativeModule.cmake', 'CMakeLists.txt', 'src/ps3native/codegen.py'):
+            for name in ('src/native_guard.cpp', 'src/module_hooks.cpp', 'src/native_stop.cpp', 'src/native_storage.cpp', 'src/native_storage.h', 'src/native_lle.cpp', 'src/native_lle.h', 'src/ps3native/firmware.py', 'cmake/NativeModule.cmake', 'CMakeLists.txt', 'src/ps3native/codegen.py'):
                 path = root / name
                 path.parent.mkdir(parents=True, exist_ok=True)
                 path.write_text('own contract input')
@@ -29,6 +29,12 @@ class SessionTests(unittest.TestCase):
                 bind(root, original, elf, generation, build)
                 with self.assertRaisesRegex(ValueError, 'does not match'):
                     run(root, {**original, 'id': 'different-input'}, build)
+                for name in ('src/native_storage.cpp', 'src/native_storage.h'):
+                    source = root / name; before = source.read_bytes()
+                    source.write_bytes(before + b'changed storage contract')
+                    with self.assertRaisesRegex(ValueError, 'artifact changed'):
+                        run(root, original, build)
+                    source.write_bytes(before)
                 exe.write_bytes(b'changed binary')
                 with self.assertRaisesRegex(ValueError, 'artifact changed'):
                     run(root, original, build)

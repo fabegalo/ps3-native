@@ -40,6 +40,10 @@ static int64_t guest_string_prefix(uint32_t address, uint64_t limit) {
     return limit <= 0x100000 ? (int64_t)limit : -1;
 }
 static void filesystem_path(ppu_context* ctx) {
+    if (ctx->gpr[3] > UINT32_MAX || !guest_string_size((u32)ctx->gpr[3])) {
+        std::fprintf(stderr, "[native-blocked] invalid filesystem path pointer\n");
+        std::fflush(stderr); ps3_native_stop();
+    }
     const auto address = (uint32_t)ctx->gpr[3];
     std::string path;
     if (address && address <= UINT32_MAX - 1024) {
@@ -112,7 +116,9 @@ extern "C" void ps3_native_hle_gate(uint32_t nid, ppu_context* ctx) {
     }
     // Expand only after inspecting and testing the upstream implementation.
     static const char* audited[] = {"sys_prx_get_module_id_by_name", "sys_initialize_tls", "sys_lwmutex_create", "sys_lwmutex_lock", "sys_lwmutex_unlock",
+                                    "sys_lwmutex_destroy",
                                     "sys_time_get_system_time", "sys_ppu_thread_get_id",
+                                    "sys_process_is_stack",
                                     "sys_lwcond_create", "sys_lwcond_destroy", "sys_lwcond_signal", "sys_lwcond_signal_all", "sys_lwcond_wait",
                                     "_sys_memset", "_sys_memcpy",
                                     "_sys_spu_printf_attach_group", "_sys_spu_printf_detach_group",
@@ -120,6 +126,7 @@ extern "C" void ps3_native_hle_gate(uint32_t nid, ppu_context* ctx) {
                                     "_sys_spu_printf_initialize", "_sys_spu_printf_finalize",
                                     "_sys_process_atexitspawn", "_sys_process_at_Exitspawn",
                                     "cellSysmoduleLoadModule", "cellSysmoduleIsLoaded", "cellSysmoduleInitialize",
+                                    "cellSysmoduleUnloadModule",
                                     "_cellSpursAttributeInitialize", "cellSpursAttributeSetNamePrefix",
                                     "cellSpursAttributeEnableSpuPrintfIfAvailable",
                                     "cellSpursAttributeSetSpuThreadGroupType",
@@ -128,25 +135,32 @@ extern "C" void ps3_native_hle_gate(uint32_t nid, ppu_context* ctx) {
                                     "cellRtcGetCurrentTick", "cellRtcGetCurrentClockLocalTime", "cellRtcGetDayOfWeek",
                                     "cellPadInit", "cellPadEnd",
                                     "sceNpInit", "sceNpTerm", "sceNpManagerGetStatus",
+                                    "sceNpTrophyInit", "sceNpTrophyTerm",
                                     "cellGameBootCheck", "cellGameContentPermit", "cellGameDataCheck",
+                                    "cellGameCreateGameData",
+                                    "cellGameSetParamString",
                                     "cellGameGetParamString",
                                     "sys_mmapper_allocate_memory", "sys_mmapper_map_memory",
                                     "sys_ppu_thread_create", "sys_ppu_thread_exit", "sys_ppu_thread_once",
+                                    "sys_ppu_thread_register_atexit", "sys_ppu_thread_unregister_atexit",
                                     "_cellGcmInitBody",
                                     "cellGcmGetConfiguration", "cellGcmGetControlRegister", "cellGcmGetLabelAddress", "cellGcmAddressToOffset",
                                     "cellGcmMapMainMemory",
                                     "cellGcmSetTileInfo", "cellGcmBindTile", "cellGcmUnbindTile", "cellGcmSetDisplayBuffer", "cellGcmSetPrepareFlip", "cellGcmSetFlipImmediate",
                                     "cellVideoOutGetNumberOfDevice", "cellVideoOutGetState", "cellVideoOutGetResolution",
                                     "cellVideoOutGetDeviceInfo",
+                                    "cellAudioOutGetSoundAvailability",
+                                    "cellAudioOutConfigure",
+                                    "cellAudioInit",
                                     "cellGcmGetTiledPitchSize", "cellGcmSetFlipMode", "cellGcmSetVBlankHandler",
                                     "cellGcmSetFlipHandler", "cellGcmSetUserHandler", "cellGcmSetGraphicsHandler",
                                     "cellVideoOutGetResolutionAvailability", "cellVideoOutConfigure", "cellVideoOutGetConfiguration",
-                                    "cellFsOpen", "cellFsRead", "cellFsClose", "cellFsStat", "cellFsLseek"};
+                                    "cellFsOpen", "cellFsRead", "cellFsWrite", "cellFsClose", "cellFsStat", "cellFsFstat", "cellFsFsync", "cellFsLseek"};
     if (nid == ps3_compute_nid("cellSysmoduleLoadModule") || nid == ps3_compute_nid("cellSysmoduleIsLoaded")) {
         bool ready = false;
         if ((uint16_t)ctx->gpr[3] == CELL_SYSMODULE_FS) {
             ready = true;
-            for (const char* name : {"cellFsOpen", "cellFsRead", "cellFsClose", "cellFsStat", "cellFsLseek"})
+            for (const char* name : {"cellFsOpen", "cellFsRead", "cellFsWrite", "cellFsClose", "cellFsStat", "cellFsFstat", "cellFsLseek"})
                 ready &= ps3_native_context_ready(ps3_compute_nid(name)) != 0;
         } else if ((uint16_t)ctx->gpr[3] == CELL_SYSMODULE_SPURS) {
             // Activation exposes audited attribute handlers; execution APIs remain gated separately.
@@ -159,6 +173,8 @@ extern "C" void ps3_native_hle_gate(uint32_t nid, ppu_context* ctx) {
                     ps3_native_context_ready(ps3_compute_nid("cellSysutilCheckCallback"));
         } else if ((uint16_t)ctx->gpr[3] == CELL_SYSMODULE_RTC) {
             ready = ps3_native_context_ready(ps3_compute_nid("cellRtcGetCurrentTick"));
+        } else if ((uint16_t)ctx->gpr[3] == CELL_SYSMODULE_NET && ps3_native_lle_library("sys_net")) {
+            ready = ps3_native_lle_owns(ps3_compute_nid("sys_net_initialize_network_ex"));
         } else {
             // Loading a statically linked provider records availability only. Every API call
             // still passes the separate execution allowlist below, including unsupported stubs.
@@ -213,10 +229,6 @@ extern "C" void ps3_native_hle_gate(uint32_t nid, ppu_context* ctx) {
     }
     if (nid == ps3_compute_nid("cellFsOpen")) {
         filesystem_path(ctx);
-        if ((uint32_t)ctx->gpr[4] != 0) {
-            std::fprintf(stderr, "[native-blocked] filesystem startup only supports read-only opens\n");
-            std::fflush(stderr); ps3_native_stop();
-        }
     }
     if (nid == ps3_compute_nid("cellFsStat")) filesystem_path(ctx);
     static std::atomic<unsigned> calls{0};
@@ -242,7 +254,10 @@ extern "C" void ps3_native_syscall_gate(ppu_context* ctx) {
         vm_read32((uint32_t)ctx->gpr[4] + 4) == 0x200) return;
     if (number == 91) return;
     if (number >= 100 && number <= 104) return;
+    if (number == 105 || number == 106) return;
+    if ((number >= 120 && number <= 125) || number == 127 || number == 148) return;
     if (number == 403) return;
+    if (number == 801 || number == 802 || number == 804 || number == 808 || number == 809 || number == 818) return;
     if (number == 130) return;
     if (number == 138) return;
     if (number == 251) return;

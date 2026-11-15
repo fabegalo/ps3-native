@@ -206,14 +206,19 @@ samples, and 256 samples after a partial depth clear. Prepared flips return thei
 original queue indices and wait for GPU submission; the current backend explicitly
 blocks more than one prepared frame in flight until display surfaces are retained
 independently. An open backend window still does not verify a game frame or menu.
-El Chavo now prints `FIOS 1.3.5 initialized`, checks missing installation data
-without writes, and reads Brazilian Portuguese from the host UI language. Its
-latest stop is `cellGameCreateGameData` (`0x42A2E133`): writable installation and
-recovery need an approved persistence contract. Original game frames remain unverified.
+El Chavo prints `FIOS 1.3.5 initialized` and reads Brazilian Portuguese from
+the host UI language. It creates installation data through bounded HLE staging,
+copies and synchronizes the original 96,738-byte icon, and atomically publishes
+the directory with a real SFO. The copied icon matches the original SHA-256.
+The next boot finds this installation and stops at existing-data size metadata:
+the firmware meaning of `sysSizeKB` still requires verification.
+Original game frames remain unverified.
 TTY output preserves binary bytes and real write counts. Read-only game-data
 checks validate paths, SFO category and output ranges; empty directories are not
-installed content. Existing-data size metadata and HDD content permission stay
-blocked. System-language queries use supported configured/host values; other
+installed content. Writes are confined to the active installation; links,
+metadata replacement and diagnostic budget overruns stop explicitly. LV2 and
+HLE file calls share descriptors, counts and coherent guest-memory writes.
+System-language queries use supported configured/host values; other
 system preferences and unmapped languages stop explicitly.
 
 All 47 discovered game SPU ELFs, two embedded firmware ELFs and two verified raw
@@ -225,10 +230,14 @@ control-flow, ISA, frame or gameplay certification.
 The added **God of War Collection (BCUS98229, 02.00)** has a read-only catalog and
 four locally decrypted, structurally validated PPU ELFs. Its initial EBOOT has
 9,951 PPU functions compiled locally and 12 SPU programs registered, including
-the original SPURS firmware. Native startup reaches SPURS handler creation and
-stops at `sys_net_initialize_network_ex` (`0x139A9E9B`): the existing zero-return
-placeholder cannot initialize networking. No game frame, selector transition or
-gameplay is verified. Original and derived proprietary files remain outside Git.
+the original SPURS firmware. The authorized original `libnet.prx` is also bound
+by AOT: 358 PPU functions, 100 exports and its genuine module-start entry.
+Native startup passes its initialization path, reads `defaultSettings.cxml`,
+configures real stereo LPCM output, starts the host mixer and opens the logo's
+sound bank. It then stops on an unmapped low-memory access in the translated
+sound-bank loader; null calls and low-memory accesses are no longer ignored.
+No game frame, selector transition or gameplay is verified. Original and derived
+proprietary files remain outside Git.
 Kernel mutex creation/destruction, uncontended locks, recursion and try-lock
 errors have synthetic regressions; contended blocking explicitly stops until
 guest FIFO/priority waiter ordering is implemented.

@@ -11,6 +11,8 @@ void ps3_hle_call(uint32_t, ppu_context*);
 int ppu_register_image_region(uint32_t, uint32_t);
 extern PPU_THREAD_LOCAL ppu_context* g_active_ctx;
 }
+static void extra_export(ppu_context* ctx) { ctx->gpr[3] += 1; }
+static void broken_start(ppu_context* ctx) { ++ctx->gpr[13]; ctx->gpr[3] = 0; }
 int main(int argc, char** argv) {
     if (argc < 2 || vm_init() || !ppu_load_elf(argv[1])) return 1;
     const auto* module = ps3_native_firmware_definition();
@@ -38,6 +40,19 @@ int main(int argc, char** argv) {
     if (!ps3_native_lle_load(module) || !ps3_native_lle_owns(0xD00DFEED) || ps3_native_lle_owns(0xDEADBEEF) ||
         !ps3_native_lle_library("ownSynthetic") || ps3_native_lle_library("cellSpurs")) return 6;
     if (!ps3_native_lle_named(module->name) || ps3_native_lle_named("own-absent-module") || ps3_native_lle_named(nullptr)) return 12;
+    static const uint8_t extra_image[64] = {9,0,0,32,9,0,128,0,9,0,0,36,9,0,128,0};
+    const NativeLleFunction extra_functions[] = {{0x09000020, extra_export}, {0x09000024, broken_start}};
+    const NativeLleExport extra_exports[] = {{0xD00DFA00, 0x09000000}};
+    const NativeLleModule extra{"ownExtra", "ownExtra", 0x09000000, 64, extra_image,
+                              extra_functions, 2, extra_exports, 1,
+                              argc == 3 && !std::strcmp(argv[2], "bad_start_abi") ? 0x09000008u : 0};
+    auto collision = extra;
+    const NativeLleExport duplicate[] = {{0xD00DFEED, 0x09000000}};
+    collision.exports = duplicate;
+    if (ps3_native_lle_load(&collision)) return 15;
+    collision = extra; collision.library = "ownSynthetic";
+    if (ps3_native_lle_load(&collision) || !ps3_native_lle_load(&extra) ||
+        !ps3_native_lle_owns(0xD00DFA00) || !ps3_native_lle_library("ownExtra")) return 16;
     vm_write64(module->base + 0x180, 2);
     if (!ps3_native_lle_load(module) || vm_read64(module->base + 0x180) != 2) return 7;
     vm_write64(module->base + 0x180, 1);
@@ -47,6 +62,14 @@ int main(int argc, char** argv) {
     ctx.gpr[13] = 0x87654321; ctx.lr = 0x10000;
     vm_write64(ctx.gpr[1] + 0x70, 41);
     g_active_ctx = &ctx;
+    if (argc == 3 && !std::strcmp(argv[2], "bad_start_abi")) { ps3_native_lle_start("ownExtra", &ctx); return 18; }
+    if (argc == 3 && !std::strcmp(argv[2], "changed_start")) vm_write32(module->start_opd, module->base + 0x80);
+    ctx.gpr[3] = 41; ps3_hle_call(0xD00DFA00, &ctx);
+    if (ctx.gpr[3] != 42 || ctx.gpr[2] != 0x12345678 || g_active_ctx != &ctx) return 17;
+    if (argc == 3 && !std::strcmp(argv[2], "not_started")) { ps3_hle_call(0xD00DFEED, &ctx); return 14; }
+    if (!ps3_native_lle_start("ownSynthetic", &ctx) || vm_read32(module->base + 0x18C) != 1 ||
+        !ps3_native_lle_start("ownSynthetic", &ctx) || vm_read32(module->base + 0x18C) != 1 ||
+        ps3_native_lle_start("absent", &ctx)) return 13;
     ps3_hle_call(0xD00DFEED, &ctx);
     if (ctx.gpr[3] != 42 || ctx.gpr[1] != 0xD00FFE00 || ctx.gpr[2] != 0x12345678 ||
         ctx.gpr[13] != 0x87654321 || ctx.thread_id != 17 || ctx.lr != 0x10000 || g_active_ctx != &ctx) return 8;

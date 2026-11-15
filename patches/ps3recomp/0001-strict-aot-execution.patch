@@ -115,7 +115,34 @@
  static inline void ppu_resv_break(uint64_t addr)   /* MUST hold g_resv_lock */
  {
      uint64_t a = (uint32_t)addr;   /* match the inline guard: reserve_addr holds (uint32_t)ea */
-@@ -2889,6 +2940,12 @@
+@@ -1380,6 +1431,13 @@
+  * compare; POSIX keeps the real range check. */
+ static inline int vm_oob(uint32_t a, uint32_t n)
+ {
++#ifdef PS3_NATIVE_STRICT
++    if (a < 0x10000u || (uint64_t)a + n > 0x100000000ull) {
++        fprintf(stderr, "[native-blocked] unmapped low or wrapping PPU access ea=0x%08X bytes=%u lr=0x%08X\n",
++            a, n, g_active_ctx ? (uint32_t)g_active_ctx->lr : 0);
++        fflush(stderr); ps3_native_stop();
++    }
++#endif
+     if (__builtin_expect(ppu_vm_size == 0, 1)) return 0;
+     if (__builtin_expect((uint64_t)a + n <= ppu_vm_size, 1)) return 0;
+     return vm_oob_report(a, n);
+@@ -2610,6 +2668,12 @@
+ 
+ extern "C" void ps3_indirect_call(ppu_context* ctx)
+ {
++#ifdef PS3_NATIVE_STRICT
++    if (!(uint32_t)ctx->ctr) {
++        fprintf(stderr, "[native-blocked] null indirect PPU call lr=0x%08X\n", (uint32_t)ctx->lr);
++        fflush(stderr); ps3_native_stop();
++    }
++#endif
+     static int on = -1;
+     if (on < 0) on = getenv("PPU_CSCHECK") ? 1 : 0;
+     { static int hg = -1; if (hg < 0) hg = getenv("PS3_ICALL_GATE") ? 1 : 0;
+@@ -2889,6 +2953,12 @@
      }
  
      ppu_fn fn = ppu_lookup_icall(addr);
@@ -128,7 +155,7 @@
      if (!fn) {
          /* OPD-swap clobber fixup: a malformed memcpy (game func_0036FA74) writes
           * some handler/vtable OPDs as {TOC, func} (code & toc SWAPPED), so lifted
-@@ -3202,6 +3259,10 @@
+@@ -3202,6 +3272,10 @@
   * continue (the result is undefined, but it won't crash the link). */
  extern "C" void ppu_unlifted_stub(uint64_t addr, ppu_context* ctx)
  {
@@ -139,12 +166,13 @@
      (void)ctx;
      static int logged = 0;
      if (logged < 20) {
-@@ -3237,8 +3298,14 @@
+@@ -3237,8 +3311,15 @@
  #define PS3_SC_INFLIGHT_MAX 64
  extern "C" uint32_t g_sc_inflight[PS3_SC_INFLIGHT_MAX] = { 0 };
  
 +#ifdef PS3_NATIVE_STRICT
 +extern "C" void ps3_native_syscall_gate(ppu_context* ctx);
++extern "C" void ps3_native_lle_start_all(ppu_context* ctx);
 +#endif
  extern "C" void lv2_syscall(ppu_context* ctx)
  {
@@ -154,7 +182,7 @@
      /* One-shot: PPU_GUARD_EA=<hex> arms the page guard on that address without
       * waiting for a store watch to fire. Armed here because lv2_syscall runs
       * early and unconditionally; used to measure how far a guest block clear
-@@ -3312,11 +3379,10 @@
+@@ -3312,11 +3393,10 @@
      switch (num) {
      case 352: {   /* sys_memory_get_user_memory_size(sys_memory_info_t* info)
                     * info = { u32 total_user_memory; u32 available_user_memory } */
@@ -170,7 +198,7 @@
      }
      case 330: {   /* sys_mmapper_allocate_address(u64 size, u64 flags,
                     * u64 alignment, u32* alloc_addr) -> reserve guest VA range */
-@@ -3349,6 +3415,11 @@
+@@ -3349,6 +3429,11 @@
      case 988:     /* sys_tty_write — canonical LV2 number (psdevwiki); some CRTs
                     * use this instead of 403. Same ABI. */
      case 403: {   /* sys_tty_write(s32 ch, cptr buf, u32 len, ptr pwritelen) */
@@ -182,7 +210,7 @@
          uint32_t ch   = (uint32_t)ctx->gpr[3];
          uint32_t buf  = (uint32_t)ctx->gpr[4];
          uint32_t len  = (uint32_t)ctx->gpr[5];
-@@ -3527,6 +3598,10 @@
+@@ -3527,6 +3612,10 @@
                  return;
              }
          }
@@ -193,7 +221,7 @@
          static int logged = 0;
          if (logged < 30) {
              fprintf(stderr, "[ppu] lv2_syscall %llu (stub)\n", (unsigned long long)num);
-@@ -3558,6 +3633,17 @@
+@@ -3558,6 +3647,17 @@
   * allocations. BSS is owned too, even though it has no file-backed bytes. */
  struct ppu_image_range { uint64_t begin, end; };
  static std::vector<ppu_image_range> g_ppu_image_ranges;
@@ -211,16 +239,20 @@
  extern "C" void sys_memory_set_image_query(uint64_t (*query)(uint64_t, uint64_t));
  
  static uint64_t ppu_image_overlap_end(uint64_t addr, uint64_t end)
-@@ -3569,10 +3655,16 @@
+@@ -3569,10 +3669,20 @@
  }
  /* Default used by the PS3 executable entry path when PROC_PARAM is absent. */
  static int32_t g_ppu_primary_priority = 1001;
++static uint32_t g_ppu_primary_stack_size = VM_PPU_STACK_SIZE;
++extern "C" uint32_t ppu_primary_stack_size(void) { return g_ppu_primary_stack_size; }
++extern "C" uint32_t g_ppu_main_stack_addr, g_ppu_main_stack_size;
 +extern "C" uint32_t g_ps3_sdk_version;
 +extern "C" int g_ps3_sdk_version_valid = 0;
  
  extern "C" uint32_t ppu_load_elf(const char* path)
  {
      g_ppu_primary_priority = 1001;
++    g_ppu_primary_stack_size = VM_PPU_STACK_SIZE;
 +    g_ps3_sdk_version_valid = 0;
 +#ifdef PS3_NATIVE_STRICT
 +    g_ps3_sdk_version = 0;
@@ -228,10 +260,12 @@
      FILE* f = fopen(path, "rb");
      if (!f) { fprintf(stderr, "[ppu] cannot open %s\n", path); return 0; }
      fseek(f, 0, SEEK_END);
-@@ -3612,7 +3704,10 @@
+@@ -3612,7 +3722,12 @@
                      be32(param + 4) == 0x13BCC5F6u &&
                      priority >= 0 && priority <= 3071) {
                      g_ppu_primary_priority = priority;
++                    g_ppu_primary_stack_size = be32(param + 0x14);
++                    if (!g_ppu_primary_stack_size) g_ppu_primary_stack_size = VM_PPU_STACK_SIZE;
 +                    g_ps3_sdk_version = be32(param + 0xC);
 +                    g_ps3_sdk_version_valid = 1;
                      fprintf(stderr, "[ppu] primary thread priority %d\n", priority);
@@ -239,7 +273,7 @@
                  }
              }
              continue;
-@@ -3817,6 +3912,9 @@
+@@ -3817,6 +3932,9 @@
      uint32_t off  = __atomic_fetch_add(&s_bump, total, __ATOMIC_RELAXED);
      uint32_t base = PPU_TLS_IMG + total + off;  /* main block occupies the first */
      if (base + total > lim) {                   /* out of room: share, as before */
@@ -249,7 +283,7 @@
          static int s_warned = 0;
          if (!__atomic_exchange_n(&s_warned, 1, __ATOMIC_RELAXED))
              fprintf(stderr, "[ppu] TLS window full after %u thread blocks: later "
-@@ -3840,6 +3938,9 @@
+@@ -3840,6 +3958,9 @@
      if (!fn) {
          fprintf(stderr, "[ppu] thread entry 0x%08X (cia=0x%08X) not registered\n",
                  code, (uint32_t)ctx->cia);
@@ -259,7 +293,7 @@
          return;
      }
      g_active_ctx = ctx;
-@@ -3936,11 +4037,17 @@
+@@ -3936,11 +4057,17 @@
              s_hi = s_lo + VM_CB_STACK_SIZE;
          } else {
              /* Out of slots: share the last one, and say so. */
@@ -277,7 +311,7 @@
      }
      if (active) {
          uint32_t sp = (uint32_t)active->gpr[1];
-@@ -3959,6 +4066,12 @@
+@@ -3959,6 +4086,12 @@
      uint32_t code = 0, toc = 0;
      ppu_opd_resolve(opd_addr, &code, &toc);
      ppu_fn fn = ppu_lookup(code);
@@ -290,7 +324,7 @@
      if (!fn) {  /* OPD code clobbered? fall back to a captured fixup */
          for (int i = 0; i < s_opd_fixup_n; i++)
              if (s_opd_fixups[i].opd == opd_addr) {
-@@ -3981,7 +4094,13 @@
+@@ -3981,7 +4114,13 @@
      ctx.gpr[2]  = toc;
      ctx.gpr[3]  = a0; ctx.gpr[4] = a1; ctx.gpr[5] = a2; ctx.gpr[6] = a3;
      ctx.gpr[7]  = a4; ctx.gpr[8] = a5; ctx.gpr[9] = a6; ctx.gpr[10] = a7;
@@ -305,7 +339,7 @@
      ctx.cia     = code;
      /* Save/restore g_active_ctx: this scratch ctx lives on the stack, so leaving
       * g_active_ctx pointing at it after we return leaves a DANGLING pointer once the
-@@ -4027,7 +4146,12 @@
+@@ -4027,7 +4166,12 @@
      *result = 0;
      if (!code) return 0;
      ppu_fn fn = ppu_lookup(code);
@@ -319,7 +353,7 @@
  
      ppu_context ctx;
      memset(&ctx, 0, sizeof(ctx));
-@@ -4035,7 +4159,12 @@
+@@ -4035,7 +4179,12 @@
      ctx.gpr[2]  = toc;
      ctx.gpr[3]  = a0; ctx.gpr[4] = a1; ctx.gpr[5] = a2; ctx.gpr[6] = a3;
      ctx.gpr[7]  = a4; ctx.gpr[8] = a5; ctx.gpr[9] = a6; ctx.gpr[10] = a7;
@@ -333,6 +367,26 @@
      ctx.cia     = code;
      /* Save/restore g_active_ctx (see ppu_guest_call): the scratch ctx is stack-local,
       * so a dangling g_active_ctx after return corrupts the crash handler / diagnostics. */
+@@ -4110,7 +4259,8 @@
+      * get_stack_information(49) would report a {0,0} stack for the main
+      * thread. Backfill the real region now that the harness chose it. */
+     { extern void ppu_thread_set_main_stack(uint32_t, uint32_t);
+-      ppu_thread_set_main_stack(stack_top - VM_PPU_STACK_SIZE, VM_PPU_STACK_SIZE); }
++      ppu_thread_set_main_stack(g_ppu_main_stack_size ? g_ppu_main_stack_addr : stack_top - VM_PPU_STACK_SIZE,
++                               g_ppu_main_stack_size ? g_ppu_main_stack_size : VM_PPU_STACK_SIZE); }
+     /* For samplers on other threads (a port's periodic stack dump): the main
+      * thread's context lives on this frame, not in the thread table. */
+     g_ppu_main_ctx = &ctx;
+@@ -4245,6 +4395,9 @@
+     fprintf(stderr, "[ppu] run: code 0x%08X, toc 0x%08X, sp 0x%08X\n", code, toc, (uint32_t)ctx.gpr[1]);
+     g_active_ctx = &ctx;
+     ppu_resv_register(&ctx);   /* main/entry thread: join the reservation set too */
++#ifdef PS3_NATIVE_STRICT
++    ps3_native_lle_start_all(&ctx);
++#endif
+     fn(&ctx);
+     while (g_trampoline_fn) { void (*tf)(void*) = g_trampoline_fn; g_trampoline_fn = 0; tf(&ctx); }
+     return 0;
 --- a/runtime/ppu/ppu_sysprx.cpp
 +++ b/runtime/ppu/ppu_sysprx.cpp
 @@ -17,6 +17,10 @@
@@ -346,7 +400,154 @@
  /* win32_compat.h is <windows.h> on Windows (CRITICAL_SECTION for the real
   * lwmutex exclusion) and the POSIX shims elsewhere -- Sleep, DWORD, QPC. */
  #include "../platform/win32_compat.h"
-@@ -396,6 +400,123 @@
+@@ -120,6 +124,10 @@
+ static void lwm_release(struct LwmSlot* sl);
+ static void sys_lwmutex_create(ppu_context* ctx)
+ {
++#ifdef PS3_NATIVE_STRICT
++    extern void native_lwm_create(ppu_context*);
++    native_lwm_create(ctx); return;
++#endif
+     uint32_t lwm  = (uint32_t)ctx->gpr[3];
+     uint32_t attr = (uint32_t)ctx->gpr[4];
+     { static long long _n=0; _n++;
+@@ -161,6 +169,7 @@
+  * race-free). Keyed by guest address in an open-addressed table. */
+ #define LWM_HASH 65536u
+ static struct LwmSlot { volatile long addr; HANDLE sem; volatile long state;
++    bool active; unsigned references, conditions;
+     volatile long holder; volatile long long acq_us; volatile long long acq_fences;
+     volatile unsigned long long acq_cpu_us; } g_lwm[LWM_HASH];
+ extern "C" { extern volatile long long g_gcm_ref_pub_count;    /* cellGcmSys.c */
+@@ -205,6 +214,7 @@
+                 g_lwm[idx].sem = CreateSemaphoreA(NULL, 0, 1, NULL);   /* wake channel, empty */
+                 g_lwm[idx].state = 0;                                   /* free */
+                 g_lwm[idx].addr = (long)addr;   /* publish AFTER init (x86 TSO: readers see init) */
++                g_lwm[idx].active = true;
+                 r = &g_lwm[idx];
+             } else if ((uint32_t)g_lwm[idx].addr == addr) {
+                 r = &g_lwm[idx];
+@@ -216,6 +226,49 @@
+     }
+     return nullptr;   /* table full (raise LWM_HASH) */
+ }
++#ifdef PS3_NATIVE_STRICT
++extern "C" int ps3_native_guest_range_backed(uint32_t, uint32_t);
++extern "C" void ps3_native_stop(void);
++static std::mutex lwm_lifecycle;
++struct NativeLwmUse {
++    LwmSlot* slot = nullptr;
++    explicit NativeLwmUse(uint64_t address) {
++        std::lock_guard<std::mutex> lock(lwm_lifecycle);
++        if (address > UINT32_MAX || (address & 7) ||
++            !ps3_native_guest_range_backed((uint32_t)address, 24)) return;
++        auto* found = lwm_find((uint32_t)address);
++        if (found && found->active) { slot = found; ++slot->references; }
++    }
++    ~NativeLwmUse() { if (slot) { std::lock_guard<std::mutex> lock(lwm_lifecycle); --slot->references; } }
++};
++void native_lwm_create(ppu_context* ctx) {
++    const auto address = ctx->gpr[3], attr = ctx->gpr[4];
++    if (address > UINT32_MAX || attr > UINT32_MAX || (address & 7) ||
++        !ps3_native_guest_range_backed((uint32_t)address, 24) ||
++        !ps3_native_guest_range_backed((uint32_t)attr, 16)) {
++        ctx->gpr[3] = (int64_t)(int32_t)CELL_EFAULT; return;
++    }
++    const auto protocol = vm_read32(attr), recursive = vm_read32(attr + 4);
++    if ((protocol != 1 && protocol != 2) || (recursive != 0x10 && recursive != 0x20)) {
++        fprintf(stderr, "[native-blocked] lightweight mutex attributes require audit\n");
++        fflush(stderr); ps3_native_stop();
++    }
++    std::lock_guard<std::mutex> lock(lwm_lifecycle);
++    auto* old = lwm_find((uint32_t)address);
++    if (old && old->active) { ctx->gpr[3] = (int64_t)(int32_t)CELL_EBUSY; return; }
++    auto* slot = old ? old : lwm_slot((uint32_t)address);
++    if (!slot) { ctx->gpr[3] = (int64_t)(int32_t)CELL_EAGAIN; return; }
++    if (!slot->sem) {
++        slot->active = false;
++        ctx->gpr[3] = (int64_t)(int32_t)CELL_EAGAIN; return;
++    }
++    slot->active = true;
++    vm_write32(address, 0); vm_write32(address + 4, 0);
++    vm_write32(address + LWM_ATTR, protocol | recursive);
++    vm_write32(address + LWM_RECUR, 0); vm_write32(address + 16, 0); vm_write32(address + 20, 0);
++    ctx->gpr[3] = CELL_OK;
++}
++#endif
+ /* The lock itself is the slot's state word: 0 free, 1 held, 2 held with a
+  * thread waiting (or that was). Taking a free lock and releasing one nobody
+  * waits for are one atomic operation each; the semaphore only wakes a waiter,
+@@ -257,6 +310,10 @@
+ extern "C" void ppu_thread_note_block(uint64_t tid);
+ static void sys_lwmutex_lock(ppu_context* ctx)
+ {
++#ifdef PS3_NATIVE_STRICT
++    NativeLwmUse use(ctx->gpr[3]);
++    if (!use.slot) { ctx->gpr[3] = (int64_t)(int32_t)CELL_ESRCH; return; }
++#endif
+     uint32_t lwm = (uint32_t)ctx->gpr[3];
+     uint32_t self = LWM_SELF(ctx);
+     /* lv2 ABI: r4 = timeout in microseconds, 0 = infinite. The real kernel
+@@ -270,6 +327,10 @@
+         /* Recursive re-lock by the current holder: bump the count, no wait.
+          * Only the holder ever stamps owner=self, so this check is race-free. */
+         if (vm_read32(lwm + LWM_OWNER) == self && vm_read32(lwm + LWM_RECUR) > 0) {
++#ifdef PS3_NATIVE_STRICT
++            if (!(vm_read32(lwm + LWM_ATTR) & 0x10)) { ctx->gpr[3] = (int64_t)(int32_t)CELL_EDEADLK; return; }
++            if (vm_read32(lwm + LWM_RECUR) == UINT32_MAX) { ctx->gpr[3] = (int64_t)(int32_t)CELL_EKRESOURCE; return; }
++#endif
+             vm_write32(lwm + LWM_RECUR, vm_read32(lwm + LWM_RECUR) + 1);
+             ctx->gpr[3] = 0;
+             return;
+@@ -309,6 +370,9 @@
+  * call while PS3_LWMUTEX_TRACE is on, take the full handler. */
+ static int sys_lwmutex_lock_fast(ppu_context* ctx)
+ {
++#ifdef PS3_NATIVE_STRICT
++    return 0; // Lifecycle references span the full handler, including parked waiters.
++#endif
+     const uint32_t lwm = (uint32_t)ctx->gpr[3];
+     struct LwmSlot* sl = lwm_slot(lwm);
+     if (!sl || lwm_trace()) return 0;
+@@ -332,11 +396,19 @@
+ }
+ static void sys_lwmutex_trylock(ppu_context* ctx)
+ {
++#ifdef PS3_NATIVE_STRICT
++    NativeLwmUse use(ctx->gpr[3]);
++    if (!use.slot) { ctx->gpr[3] = (int64_t)(int32_t)CELL_ESRCH; return; }
++#endif
+     uint32_t lwm = (uint32_t)ctx->gpr[3];
+     uint32_t self = LWM_SELF(ctx);
+     struct LwmSlot* sl0 = lwm_slot(lwm);
+     if (sl0) {
+         if (vm_read32(lwm + LWM_OWNER) == self && vm_read32(lwm + LWM_RECUR) > 0) {
++#ifdef PS3_NATIVE_STRICT
++            if (!(vm_read32(lwm + LWM_ATTR) & 0x10)) { ctx->gpr[3] = (int64_t)(int32_t)CELL_EDEADLK; return; }
++            if (vm_read32(lwm + LWM_RECUR) == UINT32_MAX) { ctx->gpr[3] = (int64_t)(int32_t)CELL_EKRESOURCE; return; }
++#endif
+             vm_write32(lwm + LWM_RECUR, vm_read32(lwm + LWM_RECUR) + 1);
+             ctx->gpr[3] = 0;
+             return;
+@@ -353,8 +425,17 @@
+ }
+ static void sys_lwmutex_unlock(ppu_context* ctx)
+ {
++#ifdef PS3_NATIVE_STRICT
++    NativeLwmUse use(ctx->gpr[3]);
++    if (!use.slot) { ctx->gpr[3] = (int64_t)(int32_t)CELL_ESRCH; return; }
++#endif
+     uint32_t lwm = (uint32_t)ctx->gpr[3];
+     uint32_t rc = vm_read32(lwm + LWM_RECUR);
++#ifdef PS3_NATIVE_STRICT
++    if (!rc || vm_read32(lwm + LWM_OWNER) != LWM_SELF(ctx)) {
++        ctx->gpr[3] = (int64_t)(int32_t)CELL_EPERM; return;
++    }
++#endif
+     if (rc > 1) {                       /* recursive hold: count down, keep the lock */
+         vm_write32(lwm + LWM_RECUR, rc - 1);
+         ctx->gpr[3] = 0;
+@@ -396,6 +477,127 @@
      ctx->gpr[3] = 0;
  }
  
@@ -382,7 +583,8 @@
 +    const uint32_t address = (uint32_t)ctx->gpr[3], mutex = (uint32_t)ctx->gpr[4], attr = (uint32_t)ctx->gpr[5];
 +    if (!ps3_native_guest_range_backed(address, 8) || !ps3_native_guest_range_backed(mutex, 24) ||
 +        !ps3_native_guest_range_backed(attr, 8)) { lwc_result(ctx, CELL_EFAULT); return; }
-+    if (!lwm_find(mutex)) { lwc_result(ctx, CELL_ESRCH); return; }
++    NativeLwmUse mutex_use(mutex);
++    if (!mutex_use.slot) { lwc_result(ctx, CELL_ESRCH); return; }
 +    const auto protocol = vm_read32(mutex + LWM_ATTR) & 15;
 +    if (protocol != 1 && protocol != 2) {
 +        fprintf(stderr, "[native-blocked] lightweight condition protocol requires audit: %u\n", protocol);
@@ -392,6 +594,7 @@
 +    for (const auto& slot : s_lwc) if (slot.address == address) { lwc_result(ctx, CELL_EBUSY); return; }
 +    for (auto& slot : s_lwc) if (!slot.address && s_lwc_next != UINT32_MAX) {
 +        slot.address = address; slot.mutex = mutex; slot.id = ++s_lwc_next;
++        { std::lock_guard<std::mutex> life(lwm_lifecycle); ++mutex_use.slot->conditions; }
 +        memcpy(slot.name, vm_base + attr, 8);
 +        vm_write32(address, mutex); vm_write32(address + 4, slot.id);
 +        lwc_result(ctx, CELL_OK); return;
@@ -403,6 +606,7 @@
 +    auto* slot = lwc_find((uint32_t)ctx->gpr[3]);
 +    if (!slot) { lwc_result(ctx, CELL_ESRCH); return; }
 +    if (slot->head) { lwc_result(ctx, CELL_EBUSY); return; }
++    { std::lock_guard<std::mutex> life(lwm_lifecycle); --lwm_find(slot->mutex)->conditions; }
 +    vm_write32(slot->address + 4, 0xFFFFFFFEu); // sysPrxForUser lwmutex_dead
 +    slot->address = 0; slot->id = 0; slot->mutex = 0;
 +    lwc_result(ctx, CELL_OK);
@@ -438,6 +642,7 @@
 +    auto* slot = lwc_find((uint32_t)ctx->gpr[3]);
 +    if (!slot) { lwc_result(ctx, CELL_ESRCH); return; }
 +    const uint32_t mutex = slot->mutex, self = LWM_SELF(ctx), recursion = vm_read32(mutex + LWM_RECUR);
++    NativeLwmUse mutex_use(mutex);
 +    auto* primitive = lwm_find(mutex);
 +    if (!primitive || vm_read32(mutex + LWM_OWNER) != self || !recursion) { lwc_result(ctx, CELL_EPERM); return; }
 +    LwcWaiter waiter;
@@ -470,7 +675,7 @@
  /* sys_lwcond (sysPrxForUser) — guest-side condition variable, paired with an
   * lwmutex. The CRT and (newly) libsre's cellSpurs create/wait/signal these. Like
   * sys_lwmutex above, model it directly in guest memory so the args stay GUEST
-@@ -442,6 +563,8 @@
+@@ -442,6 +644,8 @@
      ctx->gpr[3] = 0;
  }
  
@@ -479,7 +684,7 @@
  /* sys_ppu_thread_get_id(vm::ptr<u64> id) -> *id = calling thread's real id.
   * The old fixed "1" broke every am-I-the-designated-thread check in
   * multithreaded titles (LBP's job system routes work by thread identity, so
-@@ -461,10 +584,14 @@
+@@ -461,10 +665,14 @@
   * search_and_map just needs a non-zero id to track. */
  /* id -> size so sys_mmapper_search_and_map (lv2 337) can lay blocks out
   * without overlap. Ids are dense from 0x1000. */
@@ -494,7 +699,7 @@
      uint32_t i = mem_id - 0x1000u;
      return (i < 256) ? s_mm_sizes[i] : 0;
  }
-@@ -478,14 +605,13 @@
+@@ -478,14 +686,13 @@
  
  static void sys_mmapper_allocate_memory(ppu_context* ctx)
  {
@@ -516,7 +721,7 @@
  }
  /* sys_mmapper_allocate_memory_from_container(u32 size, u32 container, u64 flags,
   * vm::ptr<u32> mem_id) -> id in *r6. flОw's CRT uses this for its heap/mutex pool;
-@@ -504,6 +630,17 @@
+@@ -504,8 +711,38 @@
  
  /* A handful of CRT helpers the early boot tends to hit; accept and continue. */
  static void crt_ok(ppu_context* ctx) { ctx->gpr[3] = 0; }
@@ -533,8 +738,81 @@
 +}
  static void sys_lwmutex_destroy_counted(ppu_context* ctx)
  {
++#ifdef PS3_NATIVE_STRICT
++    const uint64_t address = ctx->gpr[3];
++    if (address > UINT32_MAX || (address & 7) || !ps3_native_guest_range_backed((uint32_t)address, 24)) {
++        ctx->gpr[3] = (int64_t)(int32_t)CELL_EFAULT; return;
++    }
++    std::lock_guard<std::mutex> lock(lwm_lifecycle);
++    auto* slot = lwm_find((uint32_t)address);
++    if (!slot || !slot->active) { ctx->gpr[3] = (int64_t)(int32_t)CELL_ESRCH; return; }
++    if (slot->references || InterlockedCompareExchange(&slot->state, 0, 0)) {
++        ctx->gpr[3] = (int64_t)(int32_t)CELL_EBUSY; return;
++    }
++    if (slot->conditions) {
++        fprintf(stderr, "[native-blocked] destroy lightweight mutex with live conditions requires audit\n");
++        fflush(stderr); ps3_native_stop();
++    }
++    slot->active = false;
++    vm_write32(address, 0xFFFFFFFEu);
++    ctx->gpr[3] = CELL_OK; return;
++#endif
      { static long long _n=0; _n++;
-@@ -543,16 +680,11 @@
+       if (getenv("LWM_COUNT") && (_n<=24 || (_n%50000)==0))
+         fprintf(stderr, "[LWM] destroy #%lld lwm=0x%08X r4=0x%08X r5=0x%08X\n", _n,
+@@ -530,7 +767,50 @@
+  * sub_52613C does `v6 = (ret==0); return v6 ? tid : 0`, so a nonzero ret makes it
+  * hand back 0 and the caller's init (sub_C1484 / KdConvert) bails. */
+ static void hle_ppu_thread_create(ppu_context* ctx) { ctx->gpr[3] = sys_ppu_thread_create(ctx); }
+-static void hle_ppu_thread_exit(ppu_context* ctx)   { ctx->gpr[3] = sys_ppu_thread_exit(ctx); }
++#ifdef PS3_NATIVE_STRICT
++extern "C" void ps3_native_call_opd(ppu_context*, uint32_t);
++static std::mutex thread_atexit_lock;
++static uint32_t thread_atexit[8]; /* Original sysPrxForUser has eight process-wide slots. */
++static void hle_thread_atexit(ppu_context* ctx, bool remove)
++{
++    std::unique_lock<std::mutex> lock(thread_atexit_lock, std::try_to_lock);
++    if (!lock.owns_lock()) {
++        fprintf(stderr, "[native-blocked] contended thread-atexit guest lock requires scheduling\n");
++        fflush(stderr); ps3_native_stop();
++    }
++    const uint64_t address = ctx->gpr[3];
++    if (!address) { ctx->gpr[3] = (int64_t)(int32_t)CELL_EPERM; return; }
++    if (address > UINT32_MAX || (address & 3) || !ps3_native_guest_range_backed((uint32_t)address, 8)) {
++        ctx->gpr[3] = (int64_t)(int32_t)CELL_EFAULT; return;
++    }
++    for (auto& slot : thread_atexit) if (slot == address) {
++        if (remove) slot = 0;
++        ctx->gpr[3] = remove ? CELL_OK : (int64_t)(int32_t)CELL_EPERM;
++        return;
++    }
++    if (!remove) for (auto& slot : thread_atexit) if (!slot) {
++        slot = (uint32_t)address; ctx->gpr[3] = CELL_OK; return;
++    }
++    ctx->gpr[3] = (int64_t)(int32_t)(remove ? CELL_ESRCH : CELL_ENOMEM);
++}
++static void hle_thread_atexit_register(ppu_context* ctx) { hle_thread_atexit(ctx, false); }
++static void hle_thread_atexit_unregister(ppu_context* ctx) { hle_thread_atexit(ctx, true); }
++#endif
++static void hle_ppu_thread_exit(ppu_context* ctx) {
++#ifdef PS3_NATIVE_STRICT
++    const uint64_t status = ctx->gpr[3];
++    {
++        std::unique_lock<std::mutex> lock(thread_atexit_lock, std::try_to_lock);
++        if (!lock.owns_lock()) {
++            fprintf(stderr, "[native-blocked] contended thread-atexit guest lock requires scheduling\n");
++            fflush(stderr); ps3_native_stop();
++        }
++        for (const auto opd : thread_atexit) if (opd) ps3_native_call_opd(ctx, opd);
++    }
++    ctx->gpr[3] = status;
++#endif
++    ctx->gpr[3] = sys_ppu_thread_exit(ctx);
++}
+ 
+ /* _cellGcmInitBody (NID 0x15BAE46B) -- the GCM init every PS3 game calls via the
+  * cellGcmInit() SDK macro. cellGcmSys.c provides the layout-correct core
+@@ -543,16 +823,11 @@
      unsigned int cmdSize, unsigned int ioSize, unsigned int ioAddress,
      CellGcmGuestAlloc galloc, CellGcmGuestWrite32 gwrite32);
  
@@ -554,7 +832,7 @@
  }
  static void gcm_guest_write32(unsigned int addr, unsigned int val) { vm_write32(addr, val); }
  
-@@ -584,8 +716,8 @@
+@@ -584,8 +859,8 @@
      uint32_t ioAddr  = (uint32_t)ctx->gpr[6];
      fprintf(stderr, "[HLE] _cellGcmInitBody(ctx_out=0x%08X, cmdSize=0x%X, ioSize=0x%X, ioAddr=0x%X)\n",
              ctx_out, cmdSize, ioSize, ioAddr);
@@ -565,7 +843,7 @@
  }
  
  /* --- sys_net offline model ---------------------------------------------
-@@ -678,18 +810,32 @@
+@@ -678,18 +953,32 @@
   * its entry. */
  #define SPU_IMG_SRC_MAX 32
  static struct { uint32_t img, src; } s_spu_img_src[SPU_IMG_SRC_MAX];
@@ -605,7 +883,7 @@
      for (int i = 0; i < SPU_IMG_SRC_MAX; i++)
          if (s_spu_img_src[i].img == img_ea) return s_spu_img_src[i].src;
      return 0;
-@@ -923,7 +1069,9 @@
+@@ -923,7 +1212,9 @@
  extern "C" void ppu_sysprx_register(void)
  {
      ps3_hle_register_ctx(0x15BAE46Bu, "_cellGcmInitBody", hle_cellGcmInitBody);
@@ -615,7 +893,7 @@
  
      /* PS3_NET_ONLINE: real host sockets (libs/network/sysNet.c). Registered
       * first because the first registration of a NID wins, so these shadow the
-@@ -962,8 +1110,8 @@
+@@ -962,8 +1253,8 @@
      ps3_hle_register_ctx(ps3_compute_nid("sys_time_get_system_time"), "sys_time_get_system_time", sys_time_get_system_time);
      ps3_hle_register_ctx(ps3_compute_nid("sys_process_is_stack"),     "sys_process_is_stack",     sys_process_is_stack);
      /* Atexit registration: nothing to do at boot, just succeed. */
@@ -626,8 +904,14 @@
  
      /* Lightweight mutex family (guards global/singleton init in the CRT). */
      ps3_hle_register_ctx(ps3_compute_nid("sys_lwmutex_create"),  "sys_lwmutex_create",  sys_lwmutex_create);
-@@ -994,7 +1142,7 @@
+@@ -992,9 +1283,13 @@
+     ps3_hle_register_ctx(ps3_compute_nid("sys_ppu_thread_get_id"),      "sys_ppu_thread_get_id",      sys_ppu_thread_get_id);
+     ps3_hle_register_ctx(ps3_compute_nid("sys_ppu_thread_create"),      "sys_ppu_thread_create",      hle_ppu_thread_create);
      ps3_hle_register_ctx(ps3_compute_nid("sys_ppu_thread_exit"),        "sys_ppu_thread_exit",        hle_ppu_thread_exit);
++#ifdef PS3_NATIVE_STRICT
++    ps3_hle_register_ctx(ps3_compute_nid("sys_ppu_thread_register_atexit"), "sys_ppu_thread_register_atexit", hle_thread_atexit_register);
++    ps3_hle_register_ctx(ps3_compute_nid("sys_ppu_thread_unregister_atexit"), "sys_ppu_thread_unregister_atexit", hle_thread_atexit_unregister);
++#endif
      ps3_hle_register_ctx(ps3_compute_nid("sys_mmapper_allocate_memory"), "sys_mmapper_allocate_memory", sys_mmapper_allocate_memory);
      ps3_hle_register_ctx(ps3_compute_nid("sys_mmapper_allocate_memory_from_container"), "sys_mmapper_allocate_memory_from_container", sys_mmapper_allocate_memory_from_container);
 -    ps3_hle_register_ctx(ps3_compute_nid("sys_mmapper_map_memory"),     "sys_mmapper_map_memory",     crt_ok);
@@ -951,7 +1235,27 @@
      return CELL_OK;
  }
  
-@@ -1426,6 +1427,7 @@
+@@ -1408,6 +1409,19 @@
+  * these before it; a size of 0 keeps the default below. */
+ uint32_t g_ppu_main_stack_addr = 0;
+ uint32_t g_ppu_main_stack_size = 0;
++uint32_t ppu_thread_allocate_main_stack(uint32_t size)
++{
++    const uint32_t page = vm_host_page_size();
++    if (!size || size > VM_CB_STACK_BASE - VM_STACK_BASE - page * 2u) return 0;
++    if (size < 0x4000) size = 0x4000;
++    size = VM_ALIGN_UP(size, page);
++    table_lock();
++    if (g_ppu_main_stack_size) { table_unlock(); return 0; }
++    uint32_t base = vm_stack_allocate(&g_vm_stack_alloc, size);
++    if (base) { g_ppu_main_stack_addr = base; g_ppu_main_stack_size = size; }
++    table_unlock();
++    return base ? base + size : 0;
++}
+ 
+ /* What the main thread is told. The default names the first allocation in the
+  * thread stack region (VM_STACK_BASE), which is where a host that gives main an
+@@ -1426,6 +1440,7 @@
  int64_t sys_ppu_thread_get_stack_information(ppu_context* ctx)
  {
      uint32_t out_addr = LV2_ARG_PTR(ctx, 0);
@@ -983,8 +1287,221 @@
  
 --- a/runtime/ppu/ppu_fs.cpp
 +++ b/runtime/ppu/ppu_fs.cpp
-@@ -454,8 +454,8 @@
+@@ -26,6 +26,7 @@
+ #include <errno.h>
+ #include <mutex>
+ #include <atomic>
++#include <filesystem>
+ #include <sys/stat.h>
+ #include "../platform/win32_dirent.h"   /* <dirent.h>, or a Win32 stand-in */
+ #include "../platform/ps3_dev_flash.h"   /* ps3_dev_flash_path: PS3_DEV_FLASH may name several roots */
+@@ -60,10 +61,20 @@
+ static int FS_STAT64(const char* p, fs_stat64_t* s)
+ {
+     char t[1100]; size_t n = strlen(p);
+-    if (n >= sizeof t) return _stat64(p, s);
++    if (n >= sizeof t) {
++#ifdef PS3_NATIVE_STRICT
++        return _wstat64(std::filesystem::u8path(p).c_str(), s);
++#else
++        return _stat64(p, s);
++#endif
++    }
+     memcpy(t, p, n + 1);
+     while (n > 1 && (t[n - 1] == '/' || t[n - 1] == '\\') && t[n - 2] != ':') t[--n] = 0;
++#ifdef PS3_NATIVE_STRICT
++    return _wstat64(std::filesystem::u8path(t).c_str(), s);
++#else
+     return _stat64(t, s);
++#endif
+ }
+ #else
+ #  define FS_SEEK64(f, o, w) fseeko((f), (off_t)(o), (w))
+@@ -73,6 +84,13 @@
+ #endif
+ 
+ extern "C" uint8_t* vm_base;
++#ifdef PS3_NATIVE_STRICT
++extern "C" [[noreturn]] void ps3_native_stop(void);
++extern "C" int ps3_native_guest_range_backed(uint32_t, uint32_t);
++extern "C" void ppu_write_coherent(uint32_t, const void*, uint32_t);
++extern "C" int32_t ps3_native_install_open(const char*, uint32_t, FILE**);
++extern "C" void ps3_native_install_charge(uint64_t);
++#endif
+ extern "C" void ppu_guest_caller(char* out, size_t n);
+ extern "C" uint32_t ppu_vm_size;
+ extern "C" void     ps3_hle_register_ctx(uint32_t nid, const char* name, void (*fn)(ppu_context*));
+@@ -95,6 +113,7 @@
+ #define CELL_FS_EBADF        (-2147418070)   /* 0x8001002A: not an open fd */
+ #define CELL_FS_EMFILE       (-2147418068)   /* 0x8001002C: fd table full */
+ #define CELL_FS_EINVAL       (-2147418110)   /* 0x80010002 */
++#define CELL_FS_EFAULT       ((int32_t)0x8001000Du)
+ #define CELL_FS_ENOSYS       (-2147418109)   /* 0x80010003 */
+ #define CELL_FS_S_IFDIR      0x4000u
+ #define CELL_FS_S_IFREG      0x8000u
+@@ -139,6 +158,21 @@
+  * prefixes are stripped; the rest is appended to the root. */
+ static void host_path(char* out, size_t cap, const char* guest)
+ {
++#if defined(_WIN32) && defined(PS3_NATIVE_STRICT)
++    const wchar_t* mounted = nullptr;
++    if (!strncmp(guest, "/dev_hdd0", 9) && (!guest[9] || guest[9] == '/')) mounted = _wgetenv(L"PS3_HDD0_ROOT");
++    if (!strncmp(guest, "/dev_hdd1", 9) && (!guest[9] || guest[9] == '/')) mounted = _wgetenv(L"PS3_HDD1_ROOT");
++    if (mounted) {
++        auto path = std::filesystem::path(mounted);
++        if (guest[9]) path /= std::filesystem::u8path(guest + 10);
++        const auto utf8 = path.u8string();
++        if (utf8.size() >= cap) {
++            fprintf(stderr, "[native-blocked] HDD path exceeds VFS buffer\n"); fflush(stderr); ps3_native_stop();
++        }
++        memcpy(out, utf8.data(), utf8.size()); out[utf8.size()] = 0;
++        return;
++    }
++#endif
+     const char* rel = guest;
+     /* /dev_hdd0 overlays the installed game-update dir (a disc title patched to
+      * e.g. v1.30 runs the update's EBOOT and reads its patchN.farc from
+@@ -229,10 +263,11 @@
+  * validated and FIOS rebuilt it for good -- ICO stayed on a black screen.
+  * fs_set_dir() repositions in place (SEEK_CUR 0) when the direction changes. */
+ static uint8_t g_fd_dir[FS_MAX];
+-static void fs_set_dir(int fd, FILE* f, uint8_t dir)
+-{
+-    if (g_fd_dir[fd] && g_fd_dir[fd] != dir) FS_SEEK64(f, 0, SEEK_CUR);
++static int fs_set_dir(int fd, FILE* f, uint8_t dir)
++{
++    if (g_fd_dir[fd] && g_fd_dir[fd] != dir && FS_SEEK64(f, 0, SEEK_CUR)) return -1;
+     g_fd_dir[fd] = dir;
++    return 0;
+ }
+ static char  g_dir_path[FS_MAX][1024];   /* host path per open dir (for readdir stat) */
+ 
+@@ -241,12 +276,16 @@
+  * claim the same slot, and every handler reads its slot once (fd_file/fd_dir)
+  * rather than re-reading a pointer another thread's close may have cleared. */
+ static std::mutex g_fd_lock;
+-static int fd_alloc_file(FILE* f)
++static uint8_t g_fd_access[FS_MAX];
++static int fd_alloc_file(FILE* f, const char* path = "", uint8_t access = 0)
+ {
+     std::lock_guard<std::mutex> hold(g_fd_lock);
+     for (int i = 3; i < FS_MAX; i++)
+         if (!g_files[i] && !g_dirs[i]) {
+             g_fd_dir[i] = 0;
++            g_fd_access[i] = access;
++            g_fd_usm[i] = strstr(path, ".usm") != nullptr;
++            snprintf(g_fd_path[i], sizeof g_fd_path[i], "%s", path);
+             __atomic_store_n(&g_files[i], f, __ATOMIC_RELEASE);
+             return i;
+         }
+@@ -268,13 +307,43 @@
+     return fd >= 0 && fd < FS_MAX ? __atomic_load_n(&g_dirs[fd], __ATOMIC_ACQUIRE) : nullptr;
+ }
+ 
++#ifdef PS3_NATIVE_STRICT
++static void fs_guest_count(uint32_t address, uint64_t count, unsigned width) {
++    uint8_t bytes[8];
++    for (unsigned i = 0; i < width; ++i) bytes[i] = (uint8_t)(count >> ((width - i - 1) * 8));
++    ppu_write_coherent(address, bytes, width);
++}
++#endif
++
+ /* ---- handlers ---- */
+ static void cellFsOpen(ppu_context* ctx)
+ {
++#ifdef PS3_NATIVE_STRICT
++    if (ctx->gpr[5] > UINT32_MAX || !ctx->gpr[5] ||
++        !ps3_native_guest_range_backed((uint32_t)ctx->gpr[5], 4)) {
++        ctx->gpr[3] = (int64_t)CELL_FS_EFAULT; return;
++    }
++    if (ctx->gpr[6] || ctx->gpr[7]) {
++        fprintf(stderr, "[native-blocked] filesystem open extension arguments require audit\n");
++        fflush(stderr); ps3_native_stop();
++    }
++#endif
+     char gpath[1024], hpath[1100];
+     guest_strcpy(gpath, (uint32_t)ctx->gpr[3], sizeof gpath);
+     uint32_t flags  = (uint32_t)ctx->gpr[4];
+     uint32_t fd_ptr = (uint32_t)ctx->gpr[5];
++#ifdef PS3_NATIVE_STRICT
++    if (flags) {
++        FILE* stream = nullptr;
++        const int32_t result = ps3_native_install_open(gpath, flags, &stream);
++        if (result) { ctx->gpr[3] = (int64_t)result; return; }
++        const int descriptor = fd_alloc_file(stream, gpath, (uint8_t)(flags & 3));
++        if (descriptor < 0) { fclose(stream); ctx->gpr[3] = (int64_t)CELL_FS_EMFILE; return; }
++        fs_guest_count(fd_ptr, (uint32_t)descriptor, 4);
++        fprintf(stderr, "[fs] installation open '%s' flags=0x%X -> fd %d\n", gpath, flags, descriptor);
++        ctx->gpr[3] = CELL_OK; return;
++    }
++#endif
+     host_path(hpath, sizeof hpath, gpath);
+ 
+     /* NPDRM: see the note in sys_fs.c -- an EDAT is decrypted once into a cache
+@@ -302,13 +371,17 @@
+      * instead read as "no disc" and it drew nothing but a clear colour.
+      * S_IFMT/S_IFDIR rather than S_ISDIR: MSVC's CRT does not define the macro. */
+     {
+-        struct stat _dst;
+-        if (stat(hpath, &_dst) == 0 && (_dst.st_mode & S_IFMT) == S_IFDIR) {
++        fs_stat64_t _dst;
++        if (FS_STAT64(hpath, &_dst) == 0 && (_dst.st_mode & S_IFMT) == S_IFDIR) {
+             ctx->gpr[3] = (uint64_t)(int64_t)CELL_FS_EISDIR;
+             return;
+         }
+     }
++#if defined(_WIN32) && defined(PS3_NATIVE_STRICT)
++    int hfd = _wopen(std::filesystem::u8path(hpath).c_str(), oflags | _O_BINARY | _O_NOINHERIT, _S_IREAD | _S_IWRITE);
++#else
+     int hfd = open(hpath, oflags | O_BINARY, 0666);
++#endif
+     if (hfd < 0) {
+         fprintf(stderr, "[fs] open FAIL '%s' -> '%s' (flags=0x%X)\n", gpath, hpath, flags);
+         ctx->gpr[3] = (uint64_t)(int64_t)CELL_FS_ENOENT; return;
+@@ -323,15 +396,13 @@
+         close(hfd);
+         ctx->gpr[3] = (uint64_t)(int64_t)CELL_FS_EIO; return;
+     }
+-    int fd = fd_alloc_file(f);
++    int fd = fd_alloc_file(f, gpath);
+     if (fd < 0) { fclose(f); ctx->gpr[3] = (uint64_t)(int64_t)CELL_FS_EMFILE; return; }
+     if (fd_ptr) vm_write32(fd_ptr, (uint32_t)fd);
+-    g_fd_usm[fd] = (strstr(gpath, ".usm") != nullptr) ? 1 : 0;
+     /* FS_CALLER=1: name the guest function that opened each file. A title whose
+      * streaming layer opens a file and never reads it (You Don't Know Jack's
+      * movies) is diagnosed from the opener: its sibling read path is the one
+      * that is not running. */
+-    if (fd >= 0 && fd < FS_MAX) { strncpy(g_fd_path[fd], gpath, sizeof g_fd_path[fd]-1); g_fd_path[fd][sizeof g_fd_path[fd]-1]=0; }
+     { char who[64] = "?";
+       if (ps3_env_once("FS_CALLER")) { ppu_guest_caller(who, sizeof who);
+           fprintf(stderr, "[fs] open '%s' -> fd %d  (opened by %s)\n", gpath, fd, who);
+@@ -351,6 +422,21 @@
+     }
+     ctx->gpr[3] = CELL_OK;
+ }
++
++#ifdef PS3_NATIVE_STRICT
++extern "C" void ps3_hle_call(uint32_t, ppu_context*);
++extern "C" int64_t ps3_native_fs_open_syscall(ppu_context* ctx) {
++    const uint64_t mode = ctx->gpr[6], arg = ctx->gpr[7];
++    if (ctx->gpr[4] || mode) {
++        fprintf(stderr, "[native-blocked] LV2 filesystem mutation requires audit\n");
++        fflush(stderr); ps3_native_stop();
++    }
++    ctx->gpr[6] = arg; ctx->gpr[7] = ctx->gpr[8];
++    ps3_hle_call(ps3_compute_nid("cellFsOpen"), ctx);
++    ctx->gpr[6] = mode; ctx->gpr[7] = arg;
++    return (int64_t)ctx->gpr[3];
++}
++#endif
+ 
+ /* cellFsSdataOpen(path, flags, fd*, arg*, size): opens a PS3 SDATA/EDAT
+  * encrypted-data file and returns an fd whose reads yield the DECRYPTED
+@@ -452,10 +538,11 @@
+             if (g_fd_usm[fd] && ps3_env_once("PS3_FSLOG_READS")) fprintf(stderr, "[USMRD] CLOSE usm fd=%d\n", fd);
+             __atomic_store_n(&g_files[fd], (FILE*)nullptr, __ATOMIC_RELEASE);
              g_fd_usm[fd] = 0; g_fd_dir[fd] = 0;
++            g_fd_access[fd] = 0;
          }
      }
 -    if (f) fclose(f);
@@ -994,6 +1511,217 @@
  }
  
  /* Pre-fault a guest range so the kernel can write into it.
+@@ -482,6 +569,40 @@
+ 
+ static void cellFsRead(ppu_context* ctx)
+ {
++#ifdef PS3_NATIVE_STRICT
++    const auto buffer = ctx->gpr[4], requested = ctx->gpr[5], count = ctx->gpr[6];
++    if (buffer > UINT32_MAX || requested > UINT32_MAX || count > UINT32_MAX ||
++        (requested && !ps3_native_guest_range_backed((uint32_t)buffer, (uint32_t)requested)) ||
++        (count && !ps3_native_guest_range_backed((uint32_t)count, 8))) {
++        ctx->gpr[3] = (int64_t)CELL_FS_EFAULT; return;
++    }
++    std::lock_guard<std::mutex> hold(g_fd_lock);
++    const int descriptor = (int)(uint32_t)ctx->gpr[3];
++    FILE* stream = fd_file(descriptor);
++    if (!stream) { ctx->gpr[3] = (int64_t)CELL_FS_EBADF; return; }
++    if (g_fd_access[descriptor] == 1) {
++        if (count) fs_guest_count((uint32_t)count, 0, 8);
++        ctx->gpr[3] = (int64_t)CELL_FS_EBADF; return;
++    }
++    if (fs_set_dir(descriptor, stream, 1)) { ctx->gpr[3] = (int64_t)CELL_FS_EIO; return; }
++    clearerr(stream);
++    uint8_t chunk[65536];
++    uint64_t total = 0;
++    while (total < requested) {
++        const size_t length = (size_t)((requested - total) < sizeof chunk ? requested - total : sizeof chunk);
++        const size_t read = fread(chunk, 1, length, stream);
++        if (read) ppu_write_coherent((uint32_t)(buffer + total), chunk, (uint32_t)read);
++        total += read;
++        if (read < length) break;
++    }
++    if (count) {
++        uint8_t bytes[8];
++        for (unsigned i = 0; i < 8; ++i) bytes[i] = (uint8_t)(total >> (56 - i * 8));
++        ppu_write_coherent((uint32_t)count, bytes, 8);
++    }
++    ctx->gpr[3] = ferror(stream) ? (int64_t)CELL_FS_EIO : CELL_OK;
++    return;
++#endif
+     int fd          = (int)(uint32_t)ctx->gpr[3];
+     uint32_t buf    = (uint32_t)ctx->gpr[4];
+     uint64_t nbytes = ctx->gpr[5];
+@@ -554,6 +675,32 @@
+ 
+ static void cellFsWrite(ppu_context* ctx)
+ {
++#ifdef PS3_NATIVE_STRICT
++    const uint64_t buffer = ctx->gpr[4], requested = ctx->gpr[5], count = ctx->gpr[6];
++    if (!count || count > UINT32_MAX || !ps3_native_guest_range_backed((uint32_t)count, 8)) {
++        ctx->gpr[3] = (int64_t)CELL_FS_EFAULT; return;
++    }
++    if (!buffer || buffer > UINT32_MAX || requested > UINT32_MAX ||
++        (requested && !ps3_native_guest_range_backed((uint32_t)buffer, (uint32_t)requested))) {
++        fs_guest_count((uint32_t)count, 0, 8);
++        ctx->gpr[3] = (int64_t)CELL_FS_EFAULT; return;
++    }
++    std::lock_guard<std::mutex> hold(g_fd_lock);
++    const int descriptor = (int)(uint32_t)ctx->gpr[3];
++    FILE* stream = fd_file(descriptor);
++    if (!stream || (requested && !g_fd_access[descriptor])) {
++        fs_guest_count((uint32_t)count, 0, 8); ctx->gpr[3] = (int64_t)CELL_FS_EBADF; return;
++    }
++    if (fs_set_dir(descriptor, stream, 2)) {
++        fs_guest_count((uint32_t)count, 0, 8); ctx->gpr[3] = (int64_t)CELL_FS_EIO; return;
++    }
++    ps3_native_install_charge(requested);
++    clearerr(stream);
++    const size_t written = requested ? fwrite(vm_base + (uint32_t)buffer, 1, (size_t)requested, stream) : 0;
++    fs_guest_count((uint32_t)count, written, 8);
++    ctx->gpr[3] = ferror(stream) || written != requested ? (int64_t)CELL_FS_EIO : CELL_OK;
++    return;
++#endif
+     int fd          = (int)(uint32_t)ctx->gpr[3];
+     uint32_t buf    = (uint32_t)ctx->gpr[4];
+     uint64_t nbytes = ctx->gpr[5];
+@@ -636,6 +783,12 @@
+ 
+ static void cellFsLseek(ppu_context* ctx)
+ {
++#ifdef PS3_NATIVE_STRICT
++    if (ctx->gpr[6] > UINT32_MAX || (ctx->gpr[6] && !ps3_native_guest_range_backed((uint32_t)ctx->gpr[6], 8))) {
++        ctx->gpr[3] = (int64_t)CELL_FS_EFAULT; return;
++    }
++    std::lock_guard<std::mutex> hold(g_fd_lock);
++#endif
+     int fd        = (int)(uint32_t)ctx->gpr[3];
+     int64_t off   = (int64_t)ctx->gpr[4];
+     uint32_t wh   = (uint32_t)ctx->gpr[5];
+@@ -670,8 +823,29 @@
+  * field right after the stat (the fd at obj+0x10c), which later fails lseek.
+  * Layout: mode@0 uid@4 gid@8 atime@0x0C mtime@0x14 ctime@0x1C size@0x24 blksize@0x2C. */
+ static void write_stat(uint32_t sb, uint32_t mode, uint64_t size,
+-                       int64_t atime = 0, int64_t mtime = 0, int64_t ctime = 0)
+-{
++                       int64_t atime = 0, int64_t mtime = 0, int64_t ctime = 0, const char* guest = nullptr)
++{
++#ifdef PS3_NATIVE_STRICT
++    uint64_t block = 0; uint32_t owner = 0;
++    auto mount = [&](const char* prefix) {
++        size_t n = strlen(prefix); return guest && !strncmp(guest, prefix, n) && (!guest[n] || guest[n] == '/');
++    };
++    // Guest mount geometry, independent of the host volume's capacity.
++    if (mount("/dev_bdvd") || mount("/app_home")) { block = 2048; owner = UINT32_MAX; mode &= ~0222u; }
++    else if (mount("/dev_hdd0")) block = 4096;
++    else if (mount("/dev_hdd1")) { block = 32768; owner = UINT32_MAX; }
++    else { fprintf(stderr, "[native-blocked] stat mount geometry requires audit\n"); fflush(stderr); ps3_native_stop(); }
++    uint8_t bytes[52];
++    auto put32 = [&](unsigned offset, uint32_t value) {
++        for (unsigned i = 0; i < 4; ++i) bytes[offset + i] = (uint8_t)(value >> (24 - i * 8));
++    };
++    auto put64 = [&](unsigned offset, uint64_t value) { put32(offset, (uint32_t)(value >> 32)); put32(offset + 4, (uint32_t)value); };
++    put32(0, mode); put32(4, owner); put32(8, owner);
++    put64(12, (uint64_t)atime); put64(20, (uint64_t)mtime); put64(28, (uint64_t)ctime);
++    put64(36, size); put64(44, block);
++    ppu_write_coherent(sb, bytes, sizeof bytes);
++    return;
++#endif
+     vm_write32(sb + 0x00, mode);
+     vm_write32(sb + 0x04, 0);            /* uid */
+     vm_write32(sb + 0x08, 0);            /* gid */
+@@ -684,6 +858,11 @@
+ 
+ static void cellFsStat(ppu_context* ctx)
+ {
++#ifdef PS3_NATIVE_STRICT
++    if (ctx->gpr[4] > UINT32_MAX || !ctx->gpr[4] || !ps3_native_guest_range_backed((uint32_t)ctx->gpr[4], 52)) {
++        ctx->gpr[3] = (uint64_t)(int64_t)CELL_FS_EFAULT; return;
++    }
++#endif
+     char gpath[1024], hpath[1100];
+     guest_strcpy(gpath, (uint32_t)ctx->gpr[3], sizeof gpath);
+     uint32_t sb = (uint32_t)ctx->gpr[4];
+@@ -700,13 +879,32 @@
+      * that lists a directory and shows or compares file dates saw all of them
+      * equal. */
+     if (sb) write_stat(sb, mode, (uint64_t)st.st_size,
+-                       (int64_t)st.st_atime, (int64_t)st.st_mtime, (int64_t)st.st_ctime);
++                       (int64_t)st.st_atime, (int64_t)st.st_mtime, (int64_t)st.st_ctime, gpath);
+     if (ps3_env_once("PS3_FSLOG") && strstr(gpath,".toc")) fprintf(stderr,"[FSDBG] cellFsStat('%s') -> size=0x%llX\n",gpath,(unsigned long long)st.st_size);
+     ctx->gpr[3] = CELL_OK;
+ }
+ 
+ static void cellFsFstat(ppu_context* ctx)
+ {
++#ifdef PS3_NATIVE_STRICT
++    const int handle = (int)(uint32_t)ctx->gpr[3];
++    std::lock_guard<std::mutex> hold(g_fd_lock);
++    FILE* stream = fd_file(handle);
++    if (!stream) { ctx->gpr[3] = (uint64_t)(int64_t)CELL_FS_EBADF; return; }
++    if (ctx->gpr[4] > UINT32_MAX || !ctx->gpr[4] || !ps3_native_guest_range_backed((uint32_t)ctx->gpr[4], 52)) {
++        ctx->gpr[3] = (uint64_t)(int64_t)CELL_FS_EFAULT; return;
++    }
++    fs_stat64_t info;
++#ifdef _WIN32
++    const int result = _fstat64(_fileno(stream), &info);
++#else
++    const int result = fstat(fileno(stream), &info);
++#endif
++    if (result || info.st_size < 0) { ctx->gpr[3] = (uint64_t)(int64_t)CELL_FS_EIO; return; }
++    write_stat((uint32_t)ctx->gpr[4], CELL_FS_S_IFREG | 0666, (uint64_t)info.st_size,
++               info.st_atime, info.st_mtime, info.st_ctime, g_fd_path[handle]);
++    ctx->gpr[3] = CELL_OK; return;
++#endif
+     int fd      = (int)(uint32_t)ctx->gpr[3];
+     uint32_t sb = (uint32_t)ctx->gpr[4];
+     FILE* f = fd_file(fd);
+@@ -894,6 +1092,22 @@
+ static void cellFsUnlink(ppu_context* ctx) { ctx->gpr[3] = CELL_OK; }
+ static void cellFsFsync(ppu_context* ctx)
+ {
++#ifdef PS3_NATIVE_STRICT
++    std::lock_guard<std::mutex> hold(g_fd_lock);
++    const int descriptor = (int)(uint32_t)ctx->gpr[3];
++    FILE* stream = fd_file(descriptor);
++    if (!stream || !g_fd_access[descriptor]) { ctx->gpr[3] = (int64_t)CELL_FS_EBADF; return; }
++    int result = fflush(stream);
++    if (!result) {
++#ifdef _WIN32
++        result = _commit(_fileno(stream));
++#else
++        do { result = fsync(fileno(stream)); } while (result && errno == EINTR);
++#endif
++    }
++    ctx->gpr[3] = result ? (int64_t)CELL_FS_EIO : CELL_OK;
++    return;
++#endif
+     int fd = (int)(uint32_t)ctx->gpr[3];
+     if (FILE* f = fd_file(fd)) fflush(f);
+     ctx->gpr[3] = CELL_OK;
+@@ -1074,6 +1288,22 @@
+                                  (uint64_t)(int64_t)id, (uint64_t)n, 0, 0, 0, 0);
+ }
+ 
++#ifdef PS3_NATIVE_STRICT
++extern "C" int64_t ps3_native_fs_dispatch(uint32_t number, ppu_context* ctx) {
++    if (number == 801) return ps3_native_fs_open_syscall(ctx);
++    const char* name = nullptr;
++    switch (number) {
++    case 802: name = "cellFsRead"; break;
++    case 804: name = "cellFsClose"; break;
++    case 808: name = "cellFsStat"; break;
++    case 809: name = "cellFsFstat"; break;
++    case 818: name = "cellFsLseek"; break;
++    default: ps3_native_stop();
++    }
++    ps3_hle_call(ps3_compute_nid(name), ctx);
++    return (int64_t)ctx->gpr[3];
++}
++#endif
+ extern "C" void ppu_fs_register(void)
+ {
+     ps3_hle_register_ctx(ps3_compute_nid("cellFsOpen"),     "cellFsOpen",     cellFsOpen);
 --- a/runtime/spu/spu_channels.c
 +++ b/runtime/spu/spu_channels.c
 @@ -1,3 +1,4 @@
@@ -1787,12 +2515,24 @@
          if (hdd0 && *hdd0)
              snprintf(s_content_path, sizeof s_content_path, "%s/game", hdd0);
          else if (ppu_vfs_root && *ppu_vfs_root && strcmp(ppu_vfs_root, ".") != 0)
-@@ -99,6 +124,14 @@
+@@ -99,6 +124,26 @@
   * semaphore forever. */
  static int  s_check_is_disc = 1;
  static char s_check_dir[64] = "";
 +#ifdef PS3_NATIVE_STRICT
 +static int s_check_state; /* 0 idle, 1 pending permit, 2 executing */
++static int s_check_exists, s_check_created;
++int cellGameReleaseCheck(void)
++{
++    int state = __atomic_load_n(&s_check_state, __ATOMIC_ACQUIRE);
++    if (state == 2 || !__atomic_compare_exchange_n(&s_check_state, &state, 2, 0, __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE)) return 0;
++    if (s_check_created) { __atomic_store_n(&s_check_state, state, __ATOMIC_RELEASE); return 0; }
++    s_check_dir[0] = 0; s_check_exists = 0; s_boot_checked = 0;
++    __atomic_store_n(&s_check_state, 0, __ATOMIC_RELEASE);
++    return 1;
++}
++extern int32_t ps3_native_install_create(const char*, const uint8_t*, char*, char*);
++extern int32_t ps3_native_install_permit(const char*, char*, char*);
 +static int begin_check(void)
 +{
 +    int idle = 0;
@@ -1802,7 +2542,7 @@
  
  static void ensure_dirs(const char* path)
  {
-@@ -133,12 +166,14 @@
+@@ -133,12 +178,14 @@
   * so installation checks use the destination volume, without creating data. */
  static s32 content_free_kb(void)
  {
@@ -1819,7 +2559,7 @@
              u64 kb = available.QuadPart / 1024;
              return kb > INT32_MAX ? INT32_MAX : (s32)kb;
          }
-@@ -181,6 +216,10 @@
+@@ -181,6 +228,10 @@
              *slash = 0;
          }
      }
@@ -1830,7 +2570,7 @@
      return 0;
  }
  
-@@ -200,6 +239,9 @@
+@@ -200,6 +251,9 @@
  static s32 content_free_kb_reported(void)
  {
      const s32 kb = content_free_kb();
@@ -1840,7 +2580,7 @@
      const char* raw = getenv("PS3_GAME_FREE_SPACE_RAW");
      if (raw && *raw && *raw != '0') return kb;
      return kb >= CELL_GAME_FREE_KB_WRAP ? CELL_GAME_FREE_KB_REPORTED : kb;
-@@ -259,7 +301,14 @@
+@@ -259,7 +313,14 @@
  static int sfo_read_string(const char* sfo_path, const char* key,
                             char* out, int out_size)
  {
@@ -1856,7 +2596,7 @@
      if (!fp) return -1;
      fseek(fp, 0, SEEK_END); long sz = ftell(fp); fseek(fp, 0, SEEK_SET);
      if (sz < 0x14 || sz > (1 << 20)) { fclose(fp); return -1; }
-@@ -282,10 +331,12 @@
+@@ -282,10 +343,12 @@
              u32 key_off  = SFO_RD16(e + 0x00);
              u32 data_len = SFO_RD32(e + 0x04);
              u32 data_off = SFO_RD32(e + 0x0C);
@@ -1873,7 +2613,7 @@
              int copy = (int)data_len;
              if (copy > (int)((u32)sz - src)) copy = (int)((u32)sz - src);
              if (copy >= out_size) copy = out_size - 1;
-@@ -362,6 +413,10 @@
+@@ -362,6 +425,10 @@
                         char* dirName)
  {
      printf("[cellGame] BootCheck()\n");
@@ -1884,7 +2624,7 @@
  
      /* Build paths based on title ID */
      snprintf(s_content_info_path, sizeof(s_content_info_path),
-@@ -409,11 +464,23 @@
+@@ -409,11 +476,35 @@
      strncpy(s_check_dir, s_title_id, sizeof(s_check_dir) - 1);
      s_check_dir[sizeof(s_check_dir) - 1] = '\0';
      printf("[cellGame] BootCheck: type=%u, titleId='%s'\n", s_game_type, s_title_id);
@@ -1900,15 +2640,27 @@
 +    int pending = 1;
 +    if (!__atomic_compare_exchange_n(&s_check_state, &pending, 2, 0, __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE))
 +        return CELL_GAME_ERROR_FAILURE;
-+    if (!s_check_is_disc) {
-+        fprintf(stderr, "[native-blocked] HDD content permission requires an audited writable mount\n");
-+        fflush(stderr); ps3_native_stop();
++    char info[128] = "", user[128] = "";
++    s32 result = CELL_OK;
++    if (s_check_is_disc) {
++        strcpy(info, "/dev_bdvd/PS3_GAME"); strcpy(user, "/dev_bdvd/PS3_GAME/USRDIR");
++    } else if (s_check_created) result = ps3_native_install_permit(s_check_dir, info, user);
++    else if (s_check_exists) {
++        snprintf(info, sizeof info, "/dev_hdd0/game/%s", s_check_dir);
++        snprintf(user, sizeof user, "/dev_hdd0/game/%s/USRDIR", s_check_dir);
 +    }
++    if (!result) {
++        if (contentInfoPath) ppu_write_coherent((u32)(uintptr_t)contentInfoPath, info, (u32)strlen(info) + 1);
++        if (usrdirPath) ppu_write_coherent((u32)(uintptr_t)usrdirPath, user, (u32)strlen(user) + 1);
++    }
++    s_check_created = 0;
++    __atomic_store_n(&s_check_state, 0, __ATOMIC_RELEASE);
++    return result;
 +#endif
      printf("[cellGame] ContentPermit() -> %s\n",
             s_check_is_disc ? "/dev_bdvd/PS3_GAME" : "game-data dir");
  
-@@ -454,11 +521,62 @@
+@@ -454,11 +545,63 @@
          memcpy(vm_base + usr_ea, tmp, (size_t)n + 1);
      }
  
@@ -1965,12 +2717,55 @@
 +    }
 +    s_check_is_disc = 0;
 +    snprintf(s_check_dir, sizeof s_check_dir, "%s", name);
++    s_check_exists = exists; s_check_created = 0;
 +    __atomic_store_n(&s_check_state, 1, __ATOMIC_RELEASE);
 +    return exists ? CELL_OK : CELL_GAME_RET_NONE;
 +#endif
      /* dirName is a GUEST address -- translate BEFORE any use. The old code
       * printf'd the raw EA as a host char* and crashed (LBP: read fault at
       * 0x94AEA0 = the guest EA of its dir string). */
+@@ -641,6 +784,15 @@
+  * and expects to read it back on the next run. */
+ s32 cellGameSetParamString(s32 id, const char* buf)
+ {
++#ifdef PS3_NATIVE_STRICT
++    extern int32_t ps3_native_install_string(int32_t, const char*);
++    int pending = 1;
++    if (!__atomic_compare_exchange_n(&s_check_state, &pending, 2, 0, __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE))
++        return CELL_GAME_ERROR_FAILURE;
++    s32 result = s_check_created ? ps3_native_install_string(id, (const char*)vm_base + (u32)(uintptr_t)buf) : CELL_GAME_ERROR_NOTSUPPORTED;
++    __atomic_store_n(&s_check_state, 1, __ATOMIC_RELEASE);
++    return result;
++#endif
+     /* `buf` is a GUEST address (raw r4), like GetParamString's -- a host
+      * dereference here faults. See [[guest-pointer-abi]]. */
+     uint32_t buf_ea = (uint32_t)(uintptr_t)buf;
+@@ -731,6 +883,25 @@
+ s32 cellGameCreateGameData(CellGameSetInitParams* init, char* tmp_contentInfoPath,
+                             char* tmp_usrdirPath)
+ {
++#ifdef PS3_NATIVE_STRICT
++    int pending = 1;
++    if (!__atomic_compare_exchange_n(&s_check_state, &pending, 2, 0, __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE))
++        return CELL_GAME_ERROR_FAILURE;
++    s32 result;
++    if (s_check_is_disc) result = CELL_GAME_ERROR_NOTSUPPORTED;
++    else if (s_check_exists || s_check_created) result = CELL_GAME_ERROR_EXIST;
++    else {
++        char info[128], user[128];
++        result = ps3_native_install_create(s_check_dir, vm_base + (u32)(uintptr_t)init, info, user);
++        if (!result) {
++            if (tmp_contentInfoPath) ppu_write_coherent((u32)(uintptr_t)tmp_contentInfoPath, info, (u32)strlen(info) + 1);
++            if (tmp_usrdirPath) ppu_write_coherent((u32)(uintptr_t)tmp_usrdirPath, user, (u32)strlen(user) + 1);
++            s_check_created = 1;
++        }
++    }
++    __atomic_store_n(&s_check_state, 1, __ATOMIC_RELEASE);
++    return result;
++#endif
+     printf("[cellGame] CreateGameData()\n");
+ 
+     uint32_t init_ea = (uint32_t)(uintptr_t)init;   /* guest addrs */
 --- a/runtime/syscalls/sys_memory.c
 +++ b/runtime/syscalls/sys_memory.c
 @@ -1,9 +1,11 @@
@@ -2595,10 +3390,19 @@
  /* Set flip status directly */
 --- a/libs/system/sysPrxForUser.c
 +++ b/libs/system/sysPrxForUser.c
-@@ -59,6 +59,31 @@
+@@ -7,6 +7,7 @@
+  */
+ 
+ #include "sysPrxForUser.h"
++s32 sys_process_is_stack(u32 address) { return (address >> 28) == 0xDu; }
+ #include "../../runtime/memory/vm.h"
+ #include <ps3emu/guest_call.h>
+ #include "../../runtime/ppu/ppu_memory.h"   /* vm_base, vm_write32: translate + byte-swap */
+@@ -58,6 +59,31 @@
+ static void slot_lock(void)   { pthread_mutex_lock(&s_slot_lock); }
  static void slot_unlock(void) { pthread_mutex_unlock(&s_slot_lock); }
  #endif
- 
++
 +static u32 s_spu_printf_callbacks[4];
 +s32 _sys_spu_printf_initialize(u32 attach_group, u32 detach_group, u32 attach_thread, u32 detach_thread)
 +{
@@ -2623,11 +3427,10 @@
 +    slot_unlock();
 +    return callback;
 +}
-+
+ 
  /* Reset all lwmutex/lwcond state — call before CRT redirect to game main */
  void sys_lwmutex_reset_all(void)
- {
-@@ -201,7 +226,12 @@
+@@ -201,7 +227,12 @@
  
  s32 sys_process_getpid(void)
  {
@@ -2641,7 +3444,7 @@
  }
  
  s32 sys_process_get_number_of_object(u32 object_type, u32* count)
-@@ -380,15 +410,25 @@
+@@ -380,15 +411,25 @@
  
  void* _sys_memset(void* dst, s32 val, u32 size)
  {
@@ -2667,7 +3470,7 @@
      return dst;
  }
  
-@@ -455,44 +495,33 @@
+@@ -455,44 +496,33 @@
      return CELL_EAGAIN;
  }
  
@@ -2736,7 +3539,7 @@
  }
  
  s32 sys_lwmutex_create(sys_lwmutex_t_hle* lwmutex, const sys_lwmutex_attribute_t* attr)
-@@ -867,6 +896,14 @@
+@@ -867,6 +897,14 @@
  static u32 s_heap_bump = 0;
  static u32 s_heap_bin[YZ_BINS];          /* guest EA of each free list head */
  
@@ -2751,7 +3554,7 @@
  static u32 yz_bin_for(u32 need)
  {
      u32 b = 4;                            /* 16 bytes minimum */
-@@ -877,6 +914,7 @@
+@@ -877,6 +915,7 @@
  static u32 yz_heap_alloc(u32 size, u32 align)
  {
      if (align < 16) align = 16;
@@ -2759,7 +3562,7 @@
      /* Anything larger than the window can never fit, and letting it through
       * wrapped `need` (size + align + 16 in 32 bits) to a tiny bin: a block far
       * smaller than the caller asked for. */
-@@ -896,6 +934,7 @@
+@@ -896,6 +935,7 @@
           * YZ_HEAP_END and hand out an address outside the window. */
          if ((1u << b) > YZ_HEAP_END - s_heap_bump) { slot_unlock(); return 0; }
          raw = s_heap_bump;
@@ -2873,7 +3676,16 @@
  }
 --- a/templates/project/main.cpp
 +++ b/templates/project/main.cpp
-@@ -179,6 +179,8 @@
+@@ -72,6 +72,8 @@
+ void     ppu_fs_register(void);               /* cellFs over the real game directory */
+ void     lv2_init_syscalls(void);             /* the lv2 syscall table */
+ int      ppu_run(uint32_t entry_opd, uint32_t stack_top);
++uint32_t ppu_primary_stack_size(void);
++uint32_t ppu_thread_allocate_main_stack(uint32_t);
+ 
+ /* This project's own: load whatever real system PRX modules the title needs
+  * into guest RAM and register their exports. stubs.cpp has the empty version
+@@ -179,6 +181,8 @@
   * took. A hidden or occluded window makes present block hard, and pacing the
   * ticks behind it paces the whole game behind it. */
  static volatile LONG g_frames_presented = 0;
@@ -2882,7 +3694,7 @@
  
  /* Frames handed to the backend at a guest FLIP boundary -- one per frame the
   * guest actually finished. The presents made before the guest's first flip, so
-@@ -203,10 +205,10 @@
+@@ -203,10 +207,10 @@
      if (!title || !*title) title = "ps3recomp";
  
      int rsx_ok = (rsx_backend_init(WINDOW_WIDTH, WINDOW_HEIGHT, title) == 0);
@@ -2894,7 +3706,7 @@
      ULONGLONG next_tick = GetTickCount64();
  
      for (;;) {
-@@ -216,7 +218,6 @@
+@@ -216,7 +220,6 @@
          int fired = 0;
          while ((long long)(now - next_tick) >= 0 && fired < 240) {
              cellGcmTickVBlank();
@@ -2902,7 +3714,7 @@
              /* Present a pending flip BEFORE draining any further. The flip
               * fires at a get==put frame boundary on the guest thread, so the
               * batch held right now is exactly the completed frame; presenting
-@@ -224,8 +225,8 @@
+@@ -224,8 +227,8 @@
               * mixed one. */
              if (rsx_ok && cellGcm_take_flip_pending()) {
                  present_guest_frame();
@@ -2912,7 +3724,7 @@
              /* Drain the FIFO every tick. This is what writes the RSX sync-fence
               * labels the game's per-frame logic blocks on, so it has to keep
               * advancing at 60 Hz even while present() throttles. */
-@@ -242,7 +243,6 @@
+@@ -242,7 +245,6 @@
          if (rsx_ok) {
              if (cellGcm_take_flip_pending()) {
                  present_guest_frame();
@@ -2920,7 +3732,7 @@
              }
              cellGcm_rsx_process_fifo();
  
-@@ -253,16 +253,8 @@
+@@ -253,16 +255,8 @@
                  ps3_host_quit("window closed");
                  continue;
              }
@@ -2939,7 +3751,7 @@
          }
      }
      return 0;
-@@ -415,9 +407,9 @@
+@@ -415,9 +409,9 @@
       * inflates every shorter wait the title makes and throttles the whole
       * thing. POSIX timers are already fine-grained. */
      timeBeginPeriod(1);
@@ -2952,6 +3764,31 @@
      printf("=== ps3recomp game runner ===\n");
  
      if (!alloc_guest_vm()) {
+@@ -446,15 +440,20 @@
+     g_ps3_guest_caller = harness_guest_caller;
+     CreateThread(NULL, 4u * 1024 * 1024, frame_clock, NULL, 0, NULL);
+ 
+-    printf("\n[boot] dispatching entry OPD 0x%08X (stack top 0x%08X)\n\n",
+-           entry, STACK_TOP);
++#ifdef PS3_NATIVE_STRICT
++    const uint32_t main_stack_top = ppu_thread_allocate_main_stack(ppu_primary_stack_size());
++    if (!main_stack_top) { fprintf(stderr, "[native-blocked] cannot allocate primary thread stack\n"); return 86; }
++#else
++    const uint32_t main_stack_top = STACK_TOP;
+ 
+     /* A title that reads its own stack bounds (to find data its parent left
+      * below the top, say) gets the stack it really runs on. */
+     g_ppu_main_stack_addr = STACK_TOP - STACK_SIZE;
+     g_ppu_main_stack_size = STACK_SIZE;
+-
+-    int rc = run_guest(entry, STACK_TOP);
++#endif
++    printf("\n[boot] dispatching entry OPD 0x%08X (stack top 0x%08X)\n\n", entry, main_stack_top);
++
++    int rc = run_guest(entry, main_stack_top);
+     printf("\n[boot] ppu_run returned %d (entry function unwound)\n", rc);
+ 
+     /* A title that called sys_process_exit never reaches this line: that path
 --- a/runtime/syscalls/sys_memory.h
 +++ b/runtime/syscalls/sys_memory.h
 @@ -24,7 +24,7 @@
@@ -5386,7 +6223,60 @@
  #ifndef _WIN32
  #include <unistd.h>   /* sleep: MUTEX_WATCH=2 reporter */
  #endif
-@@ -64,7 +70,11 @@
+@@ -19,8 +25,7 @@
+ sys_mutex_info g_sys_mutexes[SYS_MUTEX_MAX];
+ 
+ #ifdef _WIN32
+-static CRITICAL_SECTION s_mtx_table_lock;
+-static int              s_mtx_table_lock_init = 0;
++static SRWLOCK s_mtx_table_lock = SRWLOCK_INIT;
+ #else
+ static pthread_mutex_t  s_mtx_table_lock = PTHREAD_MUTEX_INITIALIZER;
+ #endif
+@@ -28,11 +33,7 @@
+ static void mtx_table_lock(void)
+ {
+ #ifdef _WIN32
+-    if (!s_mtx_table_lock_init) {
+-        InitializeCriticalSection(&s_mtx_table_lock);
+-        s_mtx_table_lock_init = 1;
+-    }
+-    EnterCriticalSection(&s_mtx_table_lock);
++    AcquireSRWLockExclusive(&s_mtx_table_lock);
+ #else
+     pthread_mutex_lock(&s_mtx_table_lock);
+ #endif
+@@ -41,7 +42,7 @@
+ static void mtx_table_unlock(void)
+ {
+ #ifdef _WIN32
+-    LeaveCriticalSection(&s_mtx_table_lock);
++    ReleaseSRWLockExclusive(&s_mtx_table_lock);
+ #else
+     pthread_mutex_unlock(&s_mtx_table_lock);
+ #endif
+@@ -54,6 +55,20 @@
+             return i;
+     }
+     return -1;
++}
++
++int32_t sys_mutex_condition_ref(uint32_t id, int delta)
++{
++    if (!id || id > SYS_MUTEX_MAX) return (int32_t)CELL_ESRCH;
++    mtx_table_lock();
++    sys_mutex_info* m = &g_sys_mutexes[id - 1];
++    int32_t result = CELL_OK;
++    if (!m->active) result = (int32_t)CELL_ESRCH;
++    else if (delta > 0) ++m->cond_count;
++    else if (m->cond_count) --m->cond_count;
++    else result = (int32_t)CELL_EINVAL;
++    mtx_table_unlock();
++    return result;
+ }
+ 
+ /* Byteswap helper for writing u32 to guest memory */
+@@ -64,7 +79,11 @@
      val = ((val >> 24) & 0xFF) | ((val >> 8) & 0xFF00) |
            ((val <<  8) & 0xFF0000) | ((val << 24) & 0xFF000000u);
  #endif
@@ -5398,7 +6288,7 @@
  }
  
  /* ---------------------------------------------------------------------------
-@@ -78,6 +88,23 @@
+@@ -78,6 +97,23 @@
      uint32_t id_out_addr = LV2_ARG_PTR(ctx, 0);
      uint32_t attr_addr   = LV2_ARG_PTR(ctx, 1);
  
@@ -5422,7 +6312,7 @@
      mtx_table_lock();
  
      int slot = mtx_find_free();
-@@ -88,7 +115,6 @@
+@@ -88,7 +124,6 @@
  
      sys_mutex_info* m = &g_sys_mutexes[slot];
      memset(m, 0, sizeof(*m));
@@ -5430,7 +6320,7 @@
  
      /* Read attributes from guest memory */
      if (attr_addr != 0) {
-@@ -121,6 +147,11 @@
+@@ -121,6 +156,11 @@
  #ifdef _WIN32
      InitializeCriticalSection(&m->cs);
      m->wait_handle = CreateEventA(NULL, FALSE, TRUE, NULL);
@@ -5442,7 +6332,7 @@
  #else
      {
          pthread_mutexattr_t mattr;
-@@ -130,13 +161,18 @@
+@@ -130,13 +170,18 @@
          } else {
              pthread_mutexattr_settype(&mattr, PTHREAD_MUTEX_ERRORCHECK);
          }
@@ -5462,7 +6352,19 @@
      if (id_out_addr != 0) {
          write_be32(id_out_addr, mutex_id);
      }
-@@ -252,8 +288,60 @@
+@@ -163,6 +208,11 @@
+     if (!m->active) {
+         mtx_table_unlock();
+         return (int64_t)(int32_t)CELL_ESRCH;
++    }
++
++    if (m->cond_count) {
++        mtx_table_unlock();
++        return (int64_t)(int32_t)CELL_EPERM;
+     }
+ 
+     /* lv2 refuses to destroy a mutex that is held or has waiters (EBUSY).
+@@ -252,8 +302,60 @@
  }
  #endif
  
@@ -5523,7 +6425,7 @@
      uint32_t mutex_id    = LV2_ARG_U32(ctx, 0);
      uint64_t timeout_us  = LV2_ARG_U64(ctx, 1);
      /* lv2_usec_deadline multiplies by the QPC frequency in 64 bits, which wraps
-@@ -357,6 +445,9 @@
+@@ -357,6 +459,9 @@
   * -----------------------------------------------------------------------*/
  int64_t sys_mutex_trylock(ppu_context* ctx)
  {
@@ -5533,7 +6435,7 @@
      uint32_t mutex_id = LV2_ARG_U32(ctx, 0);
  
      if (mutex_id == 0 || mutex_id > SYS_MUTEX_MAX)
-@@ -426,6 +517,26 @@
+@@ -426,6 +531,26 @@
   * -----------------------------------------------------------------------*/
  int64_t sys_mutex_unlock(ppu_context* ctx)
  {
@@ -5560,6 +6462,22 @@
      uint32_t mutex_id = LV2_ARG_U32(ctx, 0);
  
      if (mutex_id == 0 || mutex_id > SYS_MUTEX_MAX)
+@@ -465,14 +590,7 @@
+  * -----------------------------------------------------------------------*/
+ void sys_mutex_init(lv2_syscall_table* tbl)
+ {
+-    memset(g_sys_mutexes, 0, sizeof(g_sys_mutexes));
+-
+-#ifdef _WIN32
+-    if (!s_mtx_table_lock_init) {
+-        InitializeCriticalSection(&s_mtx_table_lock);
+-        s_mtx_table_lock_init = 1;
+-    }
+-#endif
++    /* Static descriptors start empty; registration must not reset live locks. */
+ 
+     lv2_syscall_register(tbl, SYS_MUTEX_CREATE,  sys_mutex_create);
+     lv2_syscall_register(tbl, SYS_MUTEX_DESTROY, sys_mutex_destroy);
 --- a/libs/system/cellSysutil.c
 +++ b/libs/system/cellSysutil.c
 @@ -374,6 +374,10 @@
@@ -5612,3 +6530,727 @@
 +#endif
      return CELL_OK;
  }
+--- a/libs/system/cellGame.h
++++ b/libs/system/cellGame.h
+@@ -164,6 +164,7 @@
+ s32 cellGameGetParamInt(s32 id, s32* value);
+ 
+ s32 cellGameGetParamString(s32 id, char* buf, u32 bufsize);
++s32 cellGameSetParamString(s32 id, const char* buf);
+ 
+ s32 cellGameCreateGameData(CellGameSetInitParams* init, char* tmp_contentInfoPath,
+                             char* tmp_usrdirPath);
+--- a/runtime/syscalls/sys_rwlock.c
++++ b/runtime/syscalls/sys_rwlock.c
+@@ -5,8 +5,15 @@
+ #include "sys_rwlock.h"
+ #include "sys_timer.h"   /* lv2_usec_deadline: timed rlock/wlock on Windows */
+ #include "../memory/vm.h"
++#include "../ppu/ppu_memory.h"
+ #include <string.h>
+ #include <time.h>
++#include <stdio.h>
++#ifdef PS3_NATIVE_STRICT
++extern int ps3_native_guest_range_backed(uint32_t, uint32_t);
++extern void ppu_write_coherent(uint32_t, const void*, uint32_t);
++extern void ps3_native_stop(void);
++#endif
+ 
+ /* ---------------------------------------------------------------------------
+  * Globals
+@@ -97,7 +104,11 @@
+     val = ((val >> 24) & 0xFF) | ((val >> 8) & 0xFF00) |
+           ((val <<  8) & 0xFF0000) | ((val << 24) & 0xFF000000u);
+ #endif
++#ifdef PS3_NATIVE_STRICT
++    ppu_write_coherent(addr, &val, 4);
++#else
+     *p = val;
++#endif
+ }
+ 
+ /* ---------------------------------------------------------------------------
+@@ -110,6 +121,16 @@
+ {
+     uint32_t id_out_addr = LV2_ARG_PTR(ctx, 0);
+     uint32_t attr_addr   = LV2_ARG_PTR(ctx, 1);
++#ifdef PS3_NATIVE_STRICT
++    if (ctx->gpr[3] > UINT32_MAX || ctx->gpr[4] > UINT32_MAX || !id_out_addr || !attr_addr ||
++        !ps3_native_guest_range_backed(id_out_addr, 4) || !ps3_native_guest_range_backed(attr_addr, 32))
++        return (int64_t)(int32_t)CELL_EFAULT;
++    if (vm_read32(attr_addr) != 1 && vm_read32(attr_addr) != 2) return (int64_t)(int32_t)CELL_EINVAL;
++    if (vm_read32(attr_addr + 4) != 0x200) {
++        fprintf(stderr, "[native-blocked] shared RW lock requires IPC ownership\n");
++        fflush(stderr); ps3_native_stop();
++    }
++#endif
+ 
+     rw_table_lock();
+     int slot = -1;
+@@ -144,7 +165,15 @@
+     r->readers = 0;
+     r->writer  = 0;
+ #else
++#ifdef PS3_NATIVE_STRICT
++    if (pthread_rwlock_init(&r->rwl, NULL)) {
++        rw_table_unlock();
++        fprintf(stderr, "[native-blocked] host RW lock initialization failed\n");
++        fflush(stderr); ps3_native_stop();
++    }
++#else
+     pthread_rwlock_init(&r->rwl, NULL);
++#endif
+     r->writer_tid = 0;
+     r->readers = 0;
+ #endif
+@@ -171,6 +200,9 @@
+         rw_table_unlock();
+         return (int64_t)(int32_t)CELL_ESRCH;
+     }
++#ifdef PS3_NATIVE_STRICT
++    if (r->readers || r->writer_tid) { rw_table_unlock(); return (int64_t)(int32_t)CELL_EBUSY; }
++#endif
+ 
+     /* lv2 refuses while any reader or the writer holds it (CELL_EBUSY). It used
+      * to free the slot under the holders, whose later unlock then hit a
+@@ -193,8 +225,50 @@
+     return CELL_OK;
+ }
+ 
++#ifdef PS3_NATIVE_STRICT
++static int64_t strict_rw(ppu_context* ctx, int operation)
++{
++    const uint32_t id = LV2_ARG_U32(ctx, 0);
++    if (!id || id > SYS_RWLOCK_MAX) return (int64_t)(int32_t)CELL_ESRCH;
++    rw_table_lock();
++    sys_rwlock_info* r = &g_sys_rwlocks[id - 1];
++    int64_t result = CELL_OK;
++    int blocked = 0;
++    if (!r->active) result = (int64_t)(int32_t)CELL_ESRCH;
++    else if (!ctx->thread_id) blocked = 1;
++    else if (operation == SYS_RWLOCK_RUNLOCK) {
++        if (!r->readers) result = (int64_t)(int32_t)CELL_EPERM;
++        else --r->readers;
++    } else if (operation == SYS_RWLOCK_WUNLOCK) {
++        if (r->writer_tid != ctx->thread_id) result = (int64_t)(int32_t)CELL_EPERM;
++        else r->writer_tid = 0;
++    } else if (operation == SYS_RWLOCK_RLOCK || operation == SYS_RWLOCK_TRYRLOCK) {
++        if (r->writer_tid) {
++            if (operation == SYS_RWLOCK_TRYRLOCK) result = (int64_t)(int32_t)CELL_EBUSY;
++            else blocked = 1;
++        } else if (r->readers == INT32_MAX) blocked = 1;
++        else ++r->readers;
++    } else {
++        if (r->writer_tid == ctx->thread_id) result = (int64_t)(int32_t)CELL_EDEADLK;
++        else if (r->writer_tid || r->readers) {
++            if (operation == SYS_RWLOCK_TRYWLOCK) result = (int64_t)(int32_t)CELL_EBUSY;
++            else blocked = 1;
++        } else r->writer_tid = ctx->thread_id;
++    }
++    rw_table_unlock();
++    if (blocked) {
++        // shortcut: guest wait queues are required before permitting contended blocking.
++        fprintf(stderr, "[native-blocked] RW lock requires valid caller, counter capacity and guest waiter ordering\n");
++        fflush(stderr); ps3_native_stop();
++    }
++    return result;
++}
++#endif
+ int64_t sys_rwlock_rlock(ppu_context* ctx)
+ {
++#ifdef PS3_NATIVE_STRICT
++    return strict_rw(ctx, SYS_RWLOCK_RLOCK);
++#endif
+     uint32_t rwlock_id  = LV2_ARG_U32(ctx, 0);
+     uint64_t timeout    = LV2_ARG_U64(ctx, 1);   /* us, 0 = forever */
+ 
+@@ -218,6 +292,9 @@
+ 
+ int64_t sys_rwlock_tryrlock(ppu_context* ctx)
+ {
++#ifdef PS3_NATIVE_STRICT
++    return strict_rw(ctx, SYS_RWLOCK_TRYRLOCK);
++#endif
+     uint32_t rwlock_id = LV2_ARG_U32(ctx, 0);
+ 
+     if (rwlock_id == 0 || rwlock_id > SYS_RWLOCK_MAX)
+@@ -243,6 +320,9 @@
+ 
+ int64_t sys_rwlock_runlock(ppu_context* ctx)
+ {
++#ifdef PS3_NATIVE_STRICT
++    return strict_rw(ctx, SYS_RWLOCK_RUNLOCK);
++#endif
+     uint32_t rwlock_id = LV2_ARG_U32(ctx, 0);
+ 
+     if (rwlock_id == 0 || rwlock_id > SYS_RWLOCK_MAX)
+@@ -281,6 +361,9 @@
+ 
+ int64_t sys_rwlock_wlock(ppu_context* ctx)
+ {
++#ifdef PS3_NATIVE_STRICT
++    return strict_rw(ctx, SYS_RWLOCK_WLOCK);
++#endif
+     uint32_t rwlock_id  = LV2_ARG_U32(ctx, 0);
+     uint64_t timeout    = LV2_ARG_U64(ctx, 1);   /* us, 0 = forever */
+ 
+@@ -318,6 +401,9 @@
+ 
+ int64_t sys_rwlock_trywlock(ppu_context* ctx)
+ {
++#ifdef PS3_NATIVE_STRICT
++    return strict_rw(ctx, SYS_RWLOCK_TRYWLOCK);
++#endif
+     uint32_t rwlock_id = LV2_ARG_U32(ctx, 0);
+ 
+     if (rwlock_id == 0 || rwlock_id > SYS_RWLOCK_MAX)
+@@ -348,6 +434,9 @@
+ 
+ int64_t sys_rwlock_wunlock(ppu_context* ctx)
+ {
++#ifdef PS3_NATIVE_STRICT
++    return strict_rw(ctx, SYS_RWLOCK_WUNLOCK);
++#endif
+     uint32_t rwlock_id = LV2_ARG_U32(ctx, 0);
+ 
+     if (rwlock_id == 0 || rwlock_id > SYS_RWLOCK_MAX)
+--- a/libs/system/sysPrxForUser.h
++++ b/libs/system/sysPrxForUser.h
+@@ -15,6 +15,7 @@
+ #ifdef __cplusplus
+ extern "C" {
+ #endif
++s32 sys_process_is_stack(u32 address);
+ 
+ /* ---------------------------------------------------------------------------
+  * Types
+--- a/runtime/syscalls/sys_cond.c
++++ b/runtime/syscalls/sys_cond.c
+@@ -9,9 +9,15 @@
+ #include "sys_ppu_thread.h"   /* ppu_thread_note_block */
+ #include "sys_timer.h"        /* lv2_usec_deadline: QPC deadline for timed waits */
+ #include "../memory/vm.h"
++#include "../ppu/ppu_memory.h"
+ #include <string.h>
+ #include <stdlib.h>
+ #include <stdio.h>
++#ifdef PS3_NATIVE_STRICT
++extern int ps3_native_guest_range_backed(uint32_t, uint32_t);
++extern void ppu_write_coherent(uint32_t, const void*, uint32_t);
++extern void ps3_native_stop(void);
++#endif
+ 
+ struct sys_cond_waiter {
+     struct sys_cond_waiter* next;
+@@ -72,8 +78,15 @@
+     uint32_t out = LV2_ARG_PTR(ctx, 0);
+     uint32_t mid = LV2_ARG_U32(ctx, 1);
+     uint32_t attr = LV2_ARG_PTR(ctx, 2);
+-    if (!mid || mid > SYS_MUTEX_MAX || !g_sys_mutexes[mid - 1].active)
+-        return (int32_t)CELL_ESRCH;
++#ifdef PS3_NATIVE_STRICT
++    if (ctx->gpr[3] > UINT32_MAX || ctx->gpr[5] > UINT32_MAX ||
++        !out || !attr || !ps3_native_guest_range_backed(out, 4) ||
++        !ps3_native_guest_range_backed(attr, 24)) return (int32_t)CELL_EFAULT;
++    if (vm_read32(attr) != 0x200 || vm_read32(attr + 4) || vm_read64(attr + 8)) {
++        fprintf(stderr, "[native-blocked] shared or IPC kernel condition requires implementation\n");
++        fflush(stderr); ps3_native_stop();
++    }
++#endif
+     table_lock();
+     for (unsigned i = 0; i < SYS_COND_MAX; ++i) {
+         sys_cond_info* c = &g_sys_conds[i];
+@@ -93,6 +106,8 @@
+ #endif
+             c->initialized = 1;
+         }
++        int32_t ref = sys_mutex_condition_ref(mid, 1);
++        if (ref) { table_unlock(); return ref; }
+         c->mutex_id = mid;
+         c->waiters = NULL;
+         memset(c->name, 0, sizeof(c->name));
+@@ -104,8 +119,12 @@
+         if (out) {
+             uint8_t* p = vm_to_host(out);
+             uint32_t id = i + 1;
+-            p[0] = (uint8_t)(id >> 24); p[1] = (uint8_t)(id >> 16);
+-            p[2] = (uint8_t)(id >> 8); p[3] = (uint8_t)id;
++            uint8_t bytes[4] = {(uint8_t)(id >> 24), (uint8_t)(id >> 16), (uint8_t)(id >> 8), (uint8_t)id};
++#ifdef PS3_NATIVE_STRICT
++            ppu_write_coherent(out, bytes, 4);
++#else
++            memcpy(p, bytes, 4);
++#endif
+         }
+         if (getenv("PS3_SYNCLOG") || getenv("YDKJ_SYNCLOG")) {
+             char name[9]; memcpy(name, c->name, 8); name[8] = 0;
+@@ -129,7 +148,10 @@
+     cond_lock(c);
+     int32_t result = CELL_OK;
+     if (c->waiters) result = (int32_t)CELL_EBUSY;
+-    else { c->active = 0; g_cond_id_addr[id] = 0; }
++    else {
++        result = sys_mutex_condition_ref(c->mutex_id, -1);
++        if (!result) { c->active = 0; g_cond_id_addr[id] = 0; }
++    }
+     cond_unlock(c);
+     table_unlock();
+     return result;
+--- a/runtime/syscalls/sys_mutex.h
++++ b/runtime/syscalls/sys_mutex.h
+@@ -63,6 +63,7 @@
+     uint64_t owner_tid;   /* thread_id of current owner (for recursive/error checking) */
+     int      lock_count;  /* recursive lock count */
+     volatile int waiters; /* threads blocked acquiring it (sys_mutex_lock, cond re-lock) */
++    unsigned cond_count; /* live conditions retain the mutex descriptor */
+ 
+ #ifdef _WIN32
+     CRITICAL_SECTION cs;
+@@ -74,6 +75,7 @@
+ } sys_mutex_info;
+ 
+ extern sys_mutex_info g_sys_mutexes[SYS_MUTEX_MAX];
++int32_t sys_mutex_condition_ref(uint32_t id, int delta);
+ 
+ /* Syscall handlers */
+ int64_t sys_mutex_create(ppu_context* ctx);
+--- a/runtime/syscalls/sys_fs.c
++++ b/runtime/syscalls/sys_fs.c
+@@ -330,6 +330,10 @@
+  * -----------------------------------------------------------------------*/
+ int64_t sys_fs_open(ppu_context* ctx)
+ {
++#ifdef PS3_NATIVE_STRICT
++    extern int64_t ps3_native_fs_open_syscall(ppu_context*);
++    return ps3_native_fs_open_syscall(ctx);
++#endif
+     uint32_t path_addr  = LV2_ARG_PTR(ctx, 0);
+     int32_t  flags      = LV2_ARG_S32(ctx, 1);
+     uint32_t fd_out     = LV2_ARG_PTR(ctx, 2);
+@@ -527,6 +531,10 @@
+  * -----------------------------------------------------------------------*/
+ int64_t sys_fs_read(ppu_context* ctx)
+ {
++#ifdef PS3_NATIVE_STRICT
++    extern int64_t ps3_native_fs_dispatch(uint32_t, ppu_context*);
++    return ps3_native_fs_dispatch(SYS_FS_READ, ctx);
++#endif
+     int32_t  fd         = LV2_ARG_S32(ctx, 0);
+     uint32_t buf_addr   = LV2_ARG_PTR(ctx, 1);
+     uint64_t size       = LV2_ARG_U64(ctx, 2);
+@@ -635,6 +643,10 @@
+  * -----------------------------------------------------------------------*/
+ int64_t sys_fs_close(ppu_context* ctx)
+ {
++#ifdef PS3_NATIVE_STRICT
++    extern int64_t ps3_native_fs_dispatch(uint32_t, ppu_context*);
++    return ps3_native_fs_dispatch(SYS_FS_CLOSE, ctx);
++#endif
+     int32_t fd = LV2_ARG_S32(ctx, 0);
+ 
+     int slot = fd - 3;
+@@ -665,6 +677,10 @@
+  * -----------------------------------------------------------------------*/
+ int64_t sys_fs_lseek(ppu_context* ctx)
+ {
++#ifdef PS3_NATIVE_STRICT
++    extern int64_t ps3_native_fs_dispatch(uint32_t, ppu_context*);
++    return ps3_native_fs_dispatch(SYS_FS_LSEEK, ctx);
++#endif
+     int32_t  fd        = LV2_ARG_S32(ctx, 0);
+     int64_t  offset    = LV2_ARG_S64(ctx, 1);
+     int32_t  whence    = LV2_ARG_S32(ctx, 2);
+@@ -762,6 +778,10 @@
+  * -----------------------------------------------------------------------*/
+ int64_t sys_fs_stat(ppu_context* ctx)
+ {
++#ifdef PS3_NATIVE_STRICT
++    extern int64_t ps3_native_fs_dispatch(uint32_t, ppu_context*);
++    return ps3_native_fs_dispatch(SYS_FS_STAT, ctx);
++#endif
+     uint32_t path_addr = LV2_ARG_PTR(ctx, 0);
+     uint32_t stat_addr = LV2_ARG_PTR(ctx, 1);
+ 
+@@ -794,6 +814,10 @@
+  * -----------------------------------------------------------------------*/
+ int64_t sys_fs_fstat(ppu_context* ctx)
+ {
++#ifdef PS3_NATIVE_STRICT
++    extern int64_t ps3_native_fs_dispatch(uint32_t, ppu_context*);
++    return ps3_native_fs_dispatch(SYS_FS_FSTAT, ctx);
++#endif
+     int32_t  fd        = LV2_ARG_S32(ctx, 0);
+     uint32_t stat_addr = LV2_ARG_PTR(ctx, 1);
+ 
+--- a/libs/audio/cellAudio.c
++++ b/libs/audio/cellAudio.c
+@@ -238,6 +238,8 @@
+ static IAudioRenderClient*  s_wasapi_render = NULL;
+ static HANDLE               s_wasapi_event  = NULL;
+ static UINT32               s_wasapi_buf_frames = 0;
++static int                  s_wasapi_com_owned = 0;
++static DWORD                s_wasapi_com_thread = 0;
+ 
+ static int audio_backend_init(void)
+ {
+@@ -248,6 +250,10 @@
+         printf("[cellAudio] CoInitializeEx failed: 0x%08lX\n", hr);
+         return -1;
+     }
++#ifdef PS3_NATIVE_STRICT
++    s_wasapi_com_owned = SUCCEEDED(hr);
++    s_wasapi_com_thread = GetCurrentThreadId();
++#endif
+ 
+     IMMDeviceEnumerator* enumerator = NULL;
+     hr = CoCreateInstance(&CLSID_MMDeviceEnumerator, NULL, CLSCTX_ALL,
+@@ -326,10 +332,12 @@
+         CloseHandle(s_wasapi_event);
+         s_wasapi_event = NULL;
+     } else {
+-        s_wasapi_client->lpVtbl->SetEventHandle(s_wasapi_client, s_wasapi_event);
+-    }
+-
+-    s_wasapi_client->lpVtbl->GetBufferSize(s_wasapi_client, &s_wasapi_buf_frames);
++        hr = s_wasapi_client->lpVtbl->SetEventHandle(s_wasapi_client, s_wasapi_event);
++        if (FAILED(hr)) return -1;
++    }
++
++    hr = s_wasapi_client->lpVtbl->GetBufferSize(s_wasapi_client, &s_wasapi_buf_frames);
++    if (FAILED(hr)) return -1;
+ 
+     hr = s_wasapi_client->lpVtbl->GetService(
+         s_wasapi_client, &IID_IAudioRenderClient, (void**)&s_wasapi_render);
+@@ -340,12 +348,20 @@
+         return -1;
+     }
+ 
+-    s_wasapi_client->lpVtbl->Start(s_wasapi_client);
++    hr = s_wasapi_client->lpVtbl->Start(s_wasapi_client);
++    if (FAILED(hr)) return -1;
+     return 0;
+ }
+ 
+ static void audio_backend_shutdown(void)
+ {
++#ifdef PS3_NATIVE_STRICT
++    if (s_wasapi_com_owned && s_wasapi_com_thread != GetCurrentThreadId()) {
++        extern void ps3_native_stop(void);
++        fprintf(stderr, "[native-blocked] audio shutdown requires its COM owner thread\n");
++        fflush(stderr); ps3_native_stop();
++    }
++#endif
+     if (s_wasapi_client) {
+         s_wasapi_client->lpVtbl->Stop(s_wasapi_client);
+     }
+@@ -361,6 +377,7 @@
+         CloseHandle(s_wasapi_event);
+         s_wasapi_event = NULL;
+     }
++    if (s_wasapi_com_owned) { CoUninitialize(); s_wasapi_com_owned = 0; }
+ }
+ 
+ static void audio_backend_submit(const float* stereo_samples, u32 num_samples)
+@@ -417,6 +434,52 @@
+ 
+ 
+ #endif /* AUDIO_BACKEND_WASAPI */
++
++#ifdef PS3_NATIVE_STRICT
++/* Probe the same stereo float stream used by the mixer, without starting playback. */
++int cellAudioOutputProbe(void)
++{
++#if AUDIO_BACKEND_WASAPI
++    HRESULT initialized = CoInitializeEx(NULL, COINIT_MULTITHREADED);
++    if (FAILED(initialized) && initialized != RPC_E_CHANGED_MODE) return -1;
++    IMMDeviceEnumerator* enumerator = NULL;
++    IMMDevice* device = NULL;
++    IAudioClient* client = NULL;
++    HRESULT result = CoCreateInstance(&CLSID_MMDeviceEnumerator, NULL, CLSCTX_ALL,
++        &IID_IMMDeviceEnumerator, (void**)&enumerator);
++    if (SUCCEEDED(result)) result = enumerator->lpVtbl->GetDefaultAudioEndpoint(enumerator, eRender, eConsole, &device);
++    if (SUCCEEDED(result)) result = device->lpVtbl->Activate(device, &IID_IAudioClient, CLSCTX_ALL, NULL, (void**)&client);
++    if (SUCCEEDED(result)) {
++        WAVEFORMATEX format;
++        memset(&format, 0, sizeof format);
++        format.wFormatTag = WAVE_FORMAT_IEEE_FLOAT;
++        format.nChannels = 2; format.nSamplesPerSec = CELL_AUDIO_SAMPLE_RATE;
++        format.wBitsPerSample = 32; format.nBlockAlign = 8;
++        format.nAvgBytesPerSec = format.nSamplesPerSec * format.nBlockAlign;
++        result = client->lpVtbl->Initialize(client, AUDCLNT_SHAREMODE_SHARED,
++            AUDCLNT_STREAMFLAGS_AUTOCONVERTPCM | AUDCLNT_STREAMFLAGS_SRC_DEFAULT_QUALITY,
++            600000, 0, &format, NULL);
++    }
++    if (client) client->lpVtbl->Release(client);
++    if (device) device->lpVtbl->Release(device);
++    if (enumerator) enumerator->lpVtbl->Release(enumerator);
++    if (SUCCEEDED(initialized)) CoUninitialize();
++    if (result == E_NOTFOUND || result == AUDCLNT_E_DEVICE_INVALIDATED || result == AUDCLNT_E_UNSUPPORTED_FORMAT) return 0;
++    return SUCCEEDED(result) ? 1 : -1;
++#else
++    int owned = !(SDL_WasInit(SDL_INIT_AUDIO) & SDL_INIT_AUDIO);
++    if (owned && SDL_InitSubSystem(SDL_INIT_AUDIO)) return -1;
++    SDL_AudioSpec want, have;
++    memset(&want, 0, sizeof want);
++    want.freq = CELL_AUDIO_SAMPLE_RATE; want.format = AUDIO_F32SYS;
++    want.channels = 2; want.samples = CELL_AUDIO_BLOCK_SAMPLES;
++    SDL_AudioDeviceID device = SDL_OpenAudioDevice(NULL, 0, &want, &have, 0);
++    if (device) SDL_CloseAudioDevice(device);
++    if (owned) SDL_QuitSubSystem(SDL_INIT_AUDIO);
++    return device ? 1 : -1;
++#endif
++}
++#endif
+ 
+ /* ---------------------------------------------------------------------------
+  * Mixing
+@@ -621,7 +684,7 @@
+      * With no device, pace on the performance counter instead. */
+     LARGE_INTEGER qf, q0; QueryPerformanceFrequency(&qf); QueryPerformanceCounter(&q0);
+     unsigned long long blocks = 0;
+-    while (s_mix_thread_running) {
++    while (__atomic_load_n(&s_mix_thread_running, __ATOMIC_ACQUIRE)) {
+         const int room = audio_backend_room();
+         if (room >= 0 && room < CELL_AUDIO_BLOCK_SAMPLES) { audio_backend_wait(); continue; }
+ #if AUDIO_BACKEND_WASAPI
+@@ -684,7 +747,7 @@
+     printf("[cellAudio] Mixing thread started\n");
+ 
+     unsigned long blocks = 0; float peak = 0.0f;
+-    while (s_mix_thread_running) {
++    while (__atomic_load_n(&s_mix_thread_running, __ATOMIC_ACQUIRE)) {
+         audio_mix_one_block();
+         audio_dump_mix();
+         audio_backend_submit(s_mix_buffer, CELL_AUDIO_BLOCK_SAMPLES);
+@@ -711,18 +774,18 @@
+ 
+ static int audio_start_mix_thread(void)
+ {
+-    s_mix_thread_running = 1;
++    __atomic_store_n(&s_mix_thread_running, 1, __ATOMIC_RELEASE);
+ 
+ #ifdef _WIN32
+     s_mix_thread = (HANDLE)_beginthreadex(NULL, 0, audio_mix_thread_func,
+                                            NULL, 0, NULL);
+     if (!s_mix_thread) {
+-        s_mix_thread_running = 0;
++        __atomic_store_n(&s_mix_thread_running, 0, __ATOMIC_RELEASE);
+         return -1;
+     }
+ #else
+     if (pthread_create(&s_mix_thread, NULL, audio_mix_thread_func, NULL) != 0) {
+-        s_mix_thread_running = 0;
++        __atomic_store_n(&s_mix_thread_running, 0, __ATOMIC_RELEASE);
+         return -1;
+     }
+     s_mix_thread_live = 1;
+@@ -732,10 +795,18 @@
+ 
+ static void audio_stop_mix_thread(void)
+ {
+-    s_mix_thread_running = 0;
++    __atomic_store_n(&s_mix_thread_running, 0, __ATOMIC_RELEASE);
+ #ifdef _WIN32
+     if (s_mix_thread) {
++#ifdef PS3_NATIVE_STRICT
++        if (WaitForSingleObject(s_mix_thread, 2000) != WAIT_OBJECT_0) {
++            extern void ps3_native_stop(void);
++            fprintf(stderr, "[native-blocked] audio mixer did not terminate\n");
++            fflush(stderr); ps3_native_stop();
++        }
++#else
+         WaitForSingleObject(s_mix_thread, 2000);
++#endif
+         CloseHandle(s_mix_thread);
+         s_mix_thread = NULL;
+     }
+@@ -764,6 +835,11 @@
+      * waiting on work we cannot yet complete; failing here lets a title take its
+      * silent path and keep going. Diagnostic first, workaround second. */
+     if (getenv("PS3_NO_AUDIO")) {
++#ifdef PS3_NATIVE_STRICT
++        extern void ps3_native_stop(void);
++        fprintf(stderr, "[native-blocked] diagnostic audio disable is unavailable in native execution\n");
++        fflush(stderr); ps3_native_stop();
++#endif
+         printf("[cellAudio] PS3_NO_AUDIO -- reporting audio unavailable\n");
+         return (s32)CELL_AUDIO_ERROR_NOT_INIT;
+     }
+@@ -777,6 +853,10 @@
+     mutex_init(&s_audio_mutex);
+ 
+     if (audio_backend_init() < 0) {
++#ifdef PS3_NATIVE_STRICT
++        audio_backend_shutdown(); mutex_destroy(&s_audio_mutex);
++        return CELL_AUDIO_ERROR_AUDIOSYSTEM;
++#endif
+         printf("[cellAudio] WARNING: Audio backend init failed, continuing silently\n");
+         /* Don't fail -- games should still run without audio */
+     }
+@@ -792,10 +872,15 @@
+       s_audio_start_us = (u64)ts.tv_sec * 1000000ULL + (u64)ts.tv_nsec / 1000ULL; }
+ #endif
+     if (audio_start_mix_thread() < 0) {
++#ifdef PS3_NATIVE_STRICT
++        audio_backend_shutdown(); mutex_destroy(&s_audio_mutex);
++        return CELL_AUDIO_ERROR_AUDIOSYSTEM;
++#endif
+         printf("[cellAudio] WARNING: Could not start mixing thread\n");
+     }
+ 
+     s_audio_initialized = 1;
++    fprintf(stderr, "[audio] started host output and mixer\n");
+     return CELL_OK;
+ }
+ 
+--- a/libs/misc/cellAvconfExt.c
++++ b/libs/misc/cellAvconfExt.c
+@@ -27,6 +27,13 @@
+  * -----------------------------------------------------------------------*/
+ 
+ static float s_gamma = 1.0f;
++#ifdef PS3_NATIVE_STRICT
++extern int ps3_native_audio_stereo_probe(void);
++extern void ps3_native_stop(void);
++extern int ps3_native_guest_range_backed(uint32_t, uint32_t);
++extern void ppu_write_coherent(uint32_t, const void*, uint32_t);
++static u32 s_native_audio_configuration = 2; /* The existing mixer is stereo LPCM. */
++#endif
+ 
+ /* ---------------------------------------------------------------------------
+  * API implementations
+@@ -34,6 +41,19 @@
+ 
+ s32 cellAudioOutGetSoundAvailability(u32 audioOut, u32 type, u32 fs, u32 option)
+ {
++#ifdef PS3_NATIVE_STRICT
++    if (option) {
++        fprintf(stderr, "[native-blocked] audio availability option requires audit\n");
++        fflush(stderr); ps3_native_stop();
++    }
++    if (audioOut || type != CELL_AUDIO_OUT_CODING_TYPE_LPCM || fs != CELL_AUDIO_OUT_FS_48KHZ) return 0;
++    const int available = ps3_native_audio_stereo_probe();
++    if (available < 0) {
++        fprintf(stderr, "[native-blocked] host audio output probe failed\n");
++        fflush(stderr); ps3_native_stop();
++    }
++    return available ? CELL_AUDIO_OUT_CHNUM_2 : 0;
++#endif
+     (void)audioOut;
+     (void)option;
+ 
+@@ -110,6 +130,14 @@
+                                   CellAudioOutConfiguration* config,
+                                   void* option, u32 optionSize)
+ {
++#ifdef PS3_NATIVE_STRICT
++    const uintptr_t address = (uintptr_t)config;
++    if (audioOut || option || !address || address > UINT32_MAX || !ps3_native_guest_range_backed((u32)address, 16)) return (s32)0x8002B242u;
++    u8 bytes[16] = {0};
++    bytes[0] = (u8)__atomic_load_n(&s_native_audio_configuration, __ATOMIC_ACQUIRE);
++    ppu_write_coherent((u32)address, bytes, 16);
++    return CELL_OK;
++#endif
+     (void)audioOut;
+     (void)option;
+     (void)optionSize;
+@@ -218,6 +246,27 @@
+  * the title queries availability separately. NID 0x4692AB35. */
+ s32 cellAudioOutConfigure(u32 audioOut, void* config, void* option, u32 waitForEvent)
+ {
++#ifdef PS3_NATIVE_STRICT
++    const uintptr_t address = (uintptr_t)config;
++    if (!address || address > UINT32_MAX || !ps3_native_guest_range_backed((u32)address, 16)) return (s32)0x8002B242u;
++    if (audioOut == 1) return (s32)0x8002B245u;
++    if (audioOut > 1) return (s32)0x8002B242u;
++    const u8* bytes = vm_base + address;
++    if (bytes[0] != 2 || bytes[1] || vm_read32(address + 12) || option || waitForEvent > 1) {
++        fprintf(stderr, "[native-blocked] audio configuration requires implementation channels=%u encoder=%u downmixer=%u option=%p wait=%u\n",
++            bytes[0], bytes[1], vm_read32(address + 12), option, waitForEvent);
++        fflush(stderr); ps3_native_stop();
++    }
++    int available = ps3_native_audio_stereo_probe();
++    if (!available) return (s32)0x8002B244u;
++    if (available < 0) {
++        fprintf(stderr, "[native-blocked] host audio configuration probe failed\n");
++        fflush(stderr); ps3_native_stop();
++    }
++    __atomic_store_n(&s_native_audio_configuration, bytes[0], __ATOMIC_RELEASE);
++    fprintf(stderr, "[audio] configured host stereo LPCM 48000 Hz\n");
++    return CELL_OK;
++#endif
+     (void)config; (void)option; (void)waitForEvent;
+     printf("[cellAvconfExt] AudioOutConfigure(audioOut=%u) -> ok\n", audioOut);
+     return 0;
+--- a/libs/network/sceNpTrophy.c
++++ b/libs/network/sceNpTrophy.c
+@@ -71,6 +71,20 @@
+ /* ID zero is the firmware invalid sentinel; retain all four usable slots. */
+ static TrophyContext s_contexts[SCE_NP_TROPHY_MAX_CONTEXTS + 1];
+ static TrophyHandle  s_handles[SCE_NP_TROPHY_MAX_HANDLES + 1];
++#ifdef PS3_NATIVE_STRICT
++extern void ps3_native_stop(void);
++#ifdef _WIN32
++#include <windows.h>
++static SRWLOCK s_trophy_lock = SRWLOCK_INIT;
++static void manager_lock(void) { AcquireSRWLockExclusive(&s_trophy_lock); }
++static void manager_unlock(void) { ReleaseSRWLockExclusive(&s_trophy_lock); }
++#else
++#include <pthread.h>
++static pthread_mutex_t s_trophy_lock = PTHREAD_MUTEX_INITIALIZER;
++static void manager_lock(void) { pthread_mutex_lock(&s_trophy_lock); }
++static void manager_unlock(void) { pthread_mutex_unlock(&s_trophy_lock); }
++#endif
++#endif
+ 
+ /* ---------------------------------------------------------------------------
+  * Persistent storage helpers
+@@ -195,6 +209,15 @@
+ 
+ s32 sceNpTrophyInit(void* poolPtr, u32 poolSize, u32 containerId, u64 options)
+ {
++#ifdef PS3_NATIVE_STRICT
++    manager_lock();
++    if (s_trophy_initialized) { manager_unlock(); return (s32)SCE_NP_TROPHY_ERROR_ALREADY_INITIALIZED; }
++    if (options) { manager_unlock(); return (s32)SCE_NP_TROPHY_ERROR_NOT_SUPPORTED; }
++    memset(s_contexts, 0, sizeof s_contexts); memset(s_handles, 0, sizeof s_handles);
++    s_trophy_initialized = 1;
++    manager_unlock();
++    return CELL_OK;
++#endif
+     (void)poolPtr; (void)poolSize; (void)containerId; (void)options;
+ 
+     printf("[sceNpTrophy] Init()\n");
+@@ -210,6 +233,18 @@
+ 
+ s32 sceNpTrophyTerm(void)
+ {
++#ifdef PS3_NATIVE_STRICT
++    manager_lock();
++    if (!s_trophy_initialized) { manager_unlock(); return (s32)SCE_NP_TROPHY_ERROR_NOT_INITIALIZED; }
++    for (unsigned i = 1; i <= SCE_NP_TROPHY_MAX_CONTEXTS; ++i) if (s_contexts[i].in_use) {
++        fprintf(stderr, "[native-blocked] trophy context teardown and persistence require audit\n");
++        fflush(stderr); ps3_native_stop();
++    }
++    memset(s_contexts, 0, sizeof s_contexts); memset(s_handles, 0, sizeof s_handles);
++    s_trophy_initialized = 0;
++    manager_unlock();
++    return CELL_OK;
++#endif
+     printf("[sceNpTrophy] Term()\n");
+ 
+     if (!s_trophy_initialized)
+--- a/libs/network/sceNpTrophy.h
++++ b/libs/network/sceNpTrophy.h
+@@ -18,8 +18,9 @@
+ /* ---------------------------------------------------------------------------
+  * Error codes
+  * -----------------------------------------------------------------------*/
+-#define SCE_NP_TROPHY_ERROR_NOT_INITIALIZED         0x80551601
+-#define SCE_NP_TROPHY_ERROR_ALREADY_INITIALIZED     0x80551602
++#define SCE_NP_TROPHY_ERROR_NOT_INITIALIZED         0x80022902
++#define SCE_NP_TROPHY_ERROR_ALREADY_INITIALIZED     0x80022901
++#define SCE_NP_TROPHY_ERROR_NOT_SUPPORTED           0x80022903
+ #define SCE_NP_TROPHY_ERROR_INVALID_ARGUMENT        0x80551603
+ #define SCE_NP_TROPHY_ERROR_OUT_OF_MEMORY           0x80551604
+ #define SCE_NP_TROPHY_ERROR_INVALID_CONTEXT         0x80551605

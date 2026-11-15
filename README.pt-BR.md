@@ -210,13 +210,18 @@ retornam os índices originais da fila e aguardam a submissão GPU. O backend at
 para explicitamente se houver mais de um quadro preparado em voo, até que as
 superfícies de exibição sejam preservadas separadamente. Uma janela aberta ainda
 não comprova um frame do jogo ou menu. El Chavo agora imprime
-`FIOS 1.3.5 initialized`, consulta a ausência de instalação sem escrever e lê
-português do Brasil do idioma da interface do host. A última parada é
-`cellGameCreateGameData` (`0x42A2E133`): instalação gravável e recuperação precisam
-do contrato de persistência aprovado. Frames originais continuam sem verificação.
+`FIOS 1.3.5 initialized` e lê português do Brasil do idioma da interface do host.
+A instalação usa uma área temporária limitada no HLE: copia e sincroniza o ícone
+original de 96.738 bytes e publica o diretório atomicamente com um SFO real.
+O SHA-256 do ícone copiado coincide com o original. O boot seguinte encontra essa
+instalação e para nos metadados de tamanho existentes: o significado de
+`sysSizeKB` no firmware ainda precisa ser verificado.
+Frames originais continuam sem verificação.
 O TTY preserva bytes binários e quantidades reais. A consulta somente de leitura
 valida caminhos, categoria SFO e buffers; diretórios vazios não são instalações.
-Metadados de tamanho de dados existentes e permissão HDD continuam bloqueados.
+Escritas ficam restritas à instalação ativa; links, substituição de metadados
+e excesso do orçamento diagnóstico param explicitamente. Chamadas LV2 e HLE
+compartilham descritores, contagens e escritas coerentes na memória guest.
 O idioma usa valores suportados da configuração/host; outras preferências e
 idiomas sem mapeamento param explicitamente.
 
@@ -229,10 +234,14 @@ comprova preparação, sem certificar fluxo completo, ISA, frames ou gameplay.
 O novo **God of War Collection (BCUS98229, 02.00)** tem catálogo somente de leitura
 e quatro ELF PPU extraídos localmente e validados estruturalmente. O EBOOT inicial
 tem 9.951 funções PPU compiladas localmente e 12 programas SPU registrados,
-incluindo o firmware SPURS original. O boot nativo cria os handlers SPURS e para
-em `sys_net_initialize_network_ex` (`0x139A9E9B`): o retorno zero existente não
-inicializa a rede. Nenhum frame, transição para o seletor ou gameplay foi
-verificado. Originais e derivados proprietários permanecem fora do Git.
+incluindo o firmware SPURS original. A `libnet.prx` original autorizada também
+está vinculada por AOT: 358 funções PPU, 100 exports e a entrada original de início.
+O boot passa pelo caminho de inicialização dessa biblioteca, lê
+`defaultSettings.cxml`, configura PCM estéreo real, inicia o mixer do host e abre
+o banco de som da logo. Em seguida, para em um acesso à região baixa não mapeada
+no carregador de som traduzido; chamadas nulas e esses acessos deixaram de ser
+ignorados. Nenhum frame, transição para o seletor ou gameplay foi verificado.
+Originais e derivados proprietários permanecem fora do Git.
 Criação/destruição de mutexes do kernel, locks sem disputa, recursão e erros de
 try-lock têm regressões sintéticas; esperas disputadas param explicitamente até
 implementar a ordem FIFO/prioridade dos waiters guest.
