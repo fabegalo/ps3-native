@@ -1,0 +1,10 @@
+{
+  "schema": 1,
+  "ps3recomp": {
+    "repository": "https://github.com/sp00nznet/ps3recomp.git",
+    "commit": "de4f090328ea08bef6b2f15caec0b85e343a7ece",
+    "path": "external/ps3recomp",
+    "license": "MIT",
+    "patches": []
+  }
+}

@@ -1,0 +1,38 @@
+name: build-and-test
+on: [push, pull_request, workflow_dispatch]
+permissions:
+  contents: read
+jobs:
+  native:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [windows-latest, ubuntu-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - uses: ilammy/msvc-dev-cmd@v1
+        if: runner.os == 'Windows'
+      - name: Linux dependencies
+        if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y libsdl2-dev ninja-build clang
+      - name: macOS dependencies
+        if: runner.os == 'macOS'
+        run: brew install sdl2 ninja
+      - name: Configure Windows
+        if: runner.os == 'Windows'
+        run: cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release -DCMAKE_C_COMPILER=clang-cl -DCMAKE_CXX_COMPILER=clang-cl
+      - name: Configure POSIX
+        if: runner.os != 'Windows'
+        run: cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release -DCMAKE_C_COMPILER=clang -DCMAKE_CXX_COMPILER=clang++
+      - run: cmake --build build --parallel 3
+      - name: CPU and catalog regression
+        run: ctest --test-dir build --output-on-failure -E rsx.d3d12.pixels
+      # Hosted Windows runners have no certified D3D12 adapter. Run the mandatory
+      # real-pixel RSX test locally on a GPU host: ctest --test-dir build -R rsx.

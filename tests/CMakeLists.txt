@@ -1,0 +1,47 @@
+set(gen "${CMAKE_CURRENT_BINARY_DIR}/generated")
+file(GLOB tools "${PS3RECOMP_DIR}/tools/*.py")
+add_custom_command(OUTPUT "${gen}/ppu_recomp.c" "${gen}/ppu_recomp.h" "${gen}/ppu.elf"
+    "${gen}/spu_recomp.c" "${gen}/spu_recomp.h"
+    COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/generate_fixtures.py" "${PROJECT_SOURCE_DIR}" "${gen}"
+    DEPENDS generate_fixtures.py ${tools})
+set(scaffold "${PS3RECOMP_DIR}/runtime/ppu/ppu_loader.cpp"
+    "${PS3RECOMP_DIR}/runtime/ppu/ppu_hle.cpp"
+    "${PS3RECOMP_DIR}/runtime/ppu/ppu_fs.cpp"
+    "${PS3RECOMP_DIR}/runtime/ppu/ppu_sysprx.cpp")
+set_source_files_properties("${gen}/ppu_recomp.c" PROPERTIES LANGUAGE CXX)
+add_library(fixture_ppu OBJECT ${scaffold} "${gen}/ppu_recomp.c")
+target_include_directories(fixture_ppu PUBLIC "${gen}" "${PS3RECOMP_DIR}/include"
+    "${PS3RECOMP_DIR}/runtime/ppu" "${PS3RECOMP_DIR}/runtime/spu"
+    "${PS3RECOMP_DIR}/runtime/memory" "${PS3RECOMP_DIR}/runtime/syscalls"
+    "${PS3RECOMP_DIR}/runtime/platform" "${PS3RECOMP_DIR}/libs/video")
+target_link_libraries(fixture_ppu PUBLIC ps3recomp_runtime)
+add_executable(ps3-native-ppu ppu_main.cpp)
+target_link_libraries(ps3-native-ppu PRIVATE fixture_ppu)
+add_executable(ps3-native-spu spu_main.c "${gen}/spu_recomp.c")
+target_link_libraries(ps3-native-spu PRIVATE fixture_ppu)
+set_target_properties(ps3-native-spu PROPERTIES LINKER_LANGUAGE CXX)
+if(CMAKE_CXX_COMPILER_ID MATCHES "Clang|GNU")
+    target_compile_options(fixture_ppu PRIVATE -fwrapv -fno-strict-aliasing -ffp-contract=off)
+endif()
+if(WIN32)
+    foreach(target ps3-native-ppu ps3-native-spu)
+        target_link_libraries(${target} PRIVATE dbghelp user32 gdi32 winmm shlwapi synchronization psapi)
+    endforeach()
+    add_executable(ps3-native-rsx "${PS3RECOMP_DIR}/libs/video/tests/test_live_draw_z16_clear.c"
+        "${PS3RECOMP_DIR}/runtime/host/host_stubs.c")
+    target_include_directories(ps3-native-rsx PRIVATE "${PS3RECOMP_DIR}/include"
+        "${PS3RECOMP_DIR}/libs/video" "${PS3RECOMP_DIR}/runtime")
+    target_link_libraries(ps3-native-rsx PRIVATE ps3recomp_runtime d3d12 dxgi d3dcompiler dxguid
+        gdi32 user32 ole32 ws2_32 xinput bcrypt winmm shlwapi synchronization psapi dbghelp)
+    set_target_properties(ps3-native-rsx PROPERTIES LINKER_LANGUAGE CXX)
+    add_test(NAME rsx.d3d12.pixels COMMAND ps3-native-rsx)
+    set_tests_properties(rsx.d3d12.pixels PROPERTIES TIMEOUT 60 WORKING_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}")
+endif()
+add_test(NAME ppu.aot COMMAND ps3-native-ppu "${gen}/ppu.elf")
+add_test(NAME spu.aot.dma COMMAND ps3-native-spu)
+add_test(NAME ppu.aot.negative COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/expect_failure.py"
+    $<TARGET_FILE:ps3-native-ppu> "${gen}/ppu.elf" wrong-oracle)
+add_test(NAME spu.aot.dma.negative COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/expect_failure.py"
+    $<TARGET_FILE:ps3-native-spu> corrupt-input)
+set_tests_properties(ppu.aot spu.aot.dma PROPERTIES TIMEOUT 30)
+set_tests_properties(ppu.aot.negative spu.aot.dma.negative PROPERTIES TIMEOUT 35)

@@ -1,0 +1,2 @@
+#define PS3_NATIVE_PYTHON "@Python3_EXECUTABLE@"
+#define PS3_NATIVE_CLI "@CMAKE_CURRENT_SOURCE_DIR@/src/ps3native/cli.py"

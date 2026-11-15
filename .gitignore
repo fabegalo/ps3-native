@@ -1,0 +1,17 @@
+/build/
+/.local/
+__pycache__/
+*.pyc
+/content/
+/firmware/
+/cache/
+*.local.cmd
+*.elf
+*.self
+*.sprx
+*.prx
+*.pup
+*.PUP
+*.pkg
+*.iso
+EBOOT.BIN
