@@ -1,13 +1,12 @@
 # Guide for AI maintainers
 
-Single policy for Codex, Claude and other agents. `CLAUDE.md` only points here.
-Read the request, affected code and the current blocker in README before editing.
-Adapted from the maintainer policies in x360-native and ps2-native.
+Single policy for Claude, Codex and other agents. `CLAUDE.md` is only a pointer here. Read the current request, then only relevant code and the current blocker. Historical reports describe evidence, not permanent architecture restrictions.
 
-## Shared architecture
+## 1. Shared architecture — mandatory
 
-x360-native defines the common boundaries and lifecycle for x360-native,
-ps2-native, xone-native and ps3-native. CPU implementations are not shared.
+**x360-native is the reference architecture for x360-native, ps2-native, xone-native and ps3-native. All four share the same seven logical boundaries, contracts and original-system -> game -> original-system lifecycle, not identical CPU or platform implementations.**
+
+CPU, firmware and service implementations are console-specific; no second runtime, invented original UI or duplicate system state.
 
 | Module | Responsibility and current location |
 | --- | --- |
@@ -19,10 +18,12 @@ ps2-native, xone-native and ps3-native. CPU implementations are not shared.
 | Original system and games | Original VSH/XMB and games; original code/resources stay local and separate from HLE. This integration remains pending. |
 | Session supervisor / host adapters | CLI host launch today; original system -> game -> system, persistence and recovery remain pending. |
 
+**Universal compatibility rule:** A newly tested title is evidence about shared CPU/AOT, GPU, kernel/HLE, devices and session behavior, not a separate game port. Fix the demonstrated root cause in the shared component and add a reusable regression; use title/revision-specific metadata or behavior only where an original difference is verified. Never treat an imported or compiled title as playable without end-to-end evidence.
+
 Windows x64/ARM64, Linux x64/ARM64, macOS Intel/Apple Silicon are targets;
 Steam Deck uses Linux. A successful build or fixture is not gameplay certification.
 
-## Architecture and approved scope
+## 2. Architecture requires maintainer validation
 
 The initial maintainer request approves ps3recomp as the PPU/SPU AOT, runtime,
 HLE and RSX base, these seven boundaries, read-only import, original firmware
@@ -34,11 +35,21 @@ Interpreter/JIT fallback, a new renderer, runtime replacement, firmware/HLE
 ownership changes and process-model changes require that explicit evaluation.
 Upstream containing an interpreter or successful HLE placeholders does not
 authorize using them to claim production support. No silent fallback.
+Routine fixes within approved boundaries need no repeated approval.
 
-## Implementation and validation
+## 3. Repository implementation map
 
-Use only Ponytail **full** for coding tasks. Inspect affected callers and actual
-upstream code first; reuse functioning components. Preserve the upstream base at
+- Pinned upstream: `external/ps3recomp/`, `deps.lock.json`, `patches/ps3recomp/` and `src/ps3native/dependency.py`; patches are hash-locked, not an alternate runtime.
+- Startup diagnostics: `src/ps3native/boot_subset.py`, `src/ps3native/codegen.py`, `src/ps3native/session.py`, `src/native_guard.cpp`, `src/module_hooks.cpp` and `cmake/NativeModule.cmake`; a diagnostic PPU entry is not gameplay.
+- Original VSH/XMB, module bindings and the system -> game -> system supervisor remain integration targets; preserve the upstream RSX contract.
+
+## 4. Implementation, correctness and validation
+
+**Ponytail `full` means the smallest complete outcome, not the smallest isolated diff.** Establish the requested functional acceptance path before editing. Fix the first proven shared blocker, inspect affected callers and tests, then continue through related blockers in that same authorized scope until the behavior works or a real limit stops progress (missing authorized inputs, permissions, architecture approval, environment or budget). Do not repeatedly replan, ask again about settled decisions or end a functional task with only a diagnosis, a successful build or a synthetic fixture. Do not expand into unrelated features. If blocked, commit only independently correct, tested progress and report the precise remaining boundary; never invent evidence.
+
+**Validation cadence:** During investigation use the cheapest focused compile, negative control or regression that can falsify the hypothesis, reusing incremental builds and existing artifacts. Validate the affected integration path after coherent fixes when real inputs and permissions are available; reserve broad test matrices and CI for affected integration or publication boundaries, not every small edit. Never rerun builds or game sessions for instructions-only changes. Keep guest-visible state, timing, output and renderer fidelity intact.
+
+**Only skill: [Ponytail](https://github.com/DietrichGebert/ponytail/blob/main/skills/ponytail/SKILL.md), in `full` mode for coding tasks.** Read its installed copy when available, otherwise consult upstream without cloning. If unavailable, say so and follow its essentials; do not claim it ran or activate other project skills. Inspect affected callers and actual upstream code first; reuse functioning components. Preserve the upstream base at
 `deps.lock.json` and the submodule gitlink; only exact hash-verified locked
 patches may modify it. `dependency.py` applies/verifies them at configuration.
 Prefer upstream fixes/pin updates;
@@ -60,7 +71,7 @@ original boot and gameplay evidence separately, naming the exact dependency pin.
 Never call imported/encrypted firmware executable. Keep original LLE modules,
 their exports/imports and provenance separate from HLE registrations.
 
-## Disk and documentation budgets
+## 5. Disk and test-artifact budget
 
 Inspect available space before large downloads/builds; estimate new bytes and
 file counts. Use one incremental build per necessary toolchain/configuration
@@ -72,12 +83,14 @@ reproducers. Delete only verified task-owned disposable paths; verify resolved
 absolute deletion targets first. No blanket build/cache deletion or copied
 game trees, archives, toolchains, backup trees or unnecessary worktrees.
 
+## 6. Documentation and token budget
+
 Do not create extra Markdown reports or duplicate roadmaps without a request.
 Update the shortest authoritative section; README translations describe public
 use and the current blocker. Keep this guide stable and concise. Instructions-only
 changes need content/reference checks, not game sessions or repeated CI runs.
 
-## Publication and provenance
+## 7. Publication and provenance
 
 Work directly on **main**, no PR. Use English Conventional Commits and identifiers;
 reply in the user's language. No assistant co-author/footer. Preserve concurrent
