@@ -9,7 +9,17 @@
  
  extern "C" void ps3_hle_register_ctx(uint32_t nid, const char* name, hle_ctx_fn fn)
  {
-@@ -279,8 +281,14 @@
+@@ -211,6 +213,9 @@
+  */
+ static void ps3_hle_unresolved(uint32_t nid, ppu_context* ctx)
+ {
++#ifdef PS3_NATIVE_STRICT
++    fprintf(stderr, "[native-blocked] unregistered HLE nid=0x%08X\n", nid); fflush(stderr); exit(86);
++#endif
+     enum { CELL_ERROR_ERROR = (int)0x8001003Fu };  /* generic CELL failure */
+     static int s_fake = -1;
+     if (s_fake < 0) {
+@@ -279,8 +284,14 @@
      for (int j = 0; j < ht_used; j++) ht_n[j] = 0;
  }
  extern "C" uint32_t ppu_prof_resolve_host(void* ra);
@@ -24,6 +34,16 @@
      if (const hle_fast_fn f = hle_fast(nid))
          if (f(ctx)) return;
  
+@@ -752,6 +763,9 @@
+ 
+     ps3_nid_entry* e = hs->tab_i >= 0 ? &g_hle_nids.entries[hs->tab_i] : nullptr;
+     if (!e || !e->handler) {
++#ifdef PS3_NATIVE_STRICT
++        fprintf(stderr, "[native-blocked] unregistered HLE nid=0x%08X\n", nid); fflush(stderr); exit(86);
++#endif
+         /* Recorded before the diagnostic paths below, several of which return
+          * early. An import moving between resolved and unresolved is exactly the
+          * kind of change the gate exists to catch. */
 --- a/runtime/ppu/ppu_loader.cpp
 +++ b/runtime/ppu/ppu_loader.cpp
 @@ -2889,6 +2889,12 @@
@@ -325,7 +345,23 @@
      ppu_thread_note_block(ctx->thread_id);   /* PS3_PRIO_START */
      { extern unsigned long long ps3_qpc_us(void);
        static int n=0; if (PS3_LOG_FIRST(n, 60))
-@@ -250,9 +252,12 @@
+@@ -245,42 +247,50 @@
+ 
+ #ifdef _WIN32
+     /* Use high-resolution sleep via waitable timer for better precision */
++    ensure_qpc_init();
++    LARGE_INTEGER sleep_start;
++    QueryPerformanceCounter(&sleep_start);
++    const uint64_t freq = (uint64_t)s_qpc_freq.QuadPart;
++    const uint64_t max_ticks = INT64_MAX - (uint64_t)sleep_start.QuadPart;
++    if (!freq || freq > UINT64_MAX / 1000000u || usec / 1000000u > max_ticks / freq)
++        return (int64_t)(int32_t)CELL_EINVAL;
++    const uint64_t whole_ticks = (usec / 1000000u) * freq;
++    const uint64_t tail_ticks = ((usec % 1000000u) * freq + 999999u) / 1000000u;
++    if (tail_ticks > max_ticks - whole_ticks) return (int64_t)(int32_t)CELL_EINVAL;
++    const int64_t deadline = sleep_start.QuadPart + whole_ticks + tail_ticks;
+     if (usec >= 1000) {
+         HANDLE timer = CreateWaitableTimerW(NULL, TRUE, NULL);
          if (timer) {
              LARGE_INTEGER due;
              due.QuadPart = -((LONGLONG)usec * 10); /* 100ns units, negative = relative */
@@ -338,9 +374,40 @@
              CloseHandle(timer);
 +            if (waited != WAIT_OBJECT_0) return (int64_t)(int32_t)CELL_EAGAIN;
          } else {
-             Sleep((DWORD)(usec / 1000));
-         }
-@@ -280,7 +285,9 @@
+-            Sleep((DWORD)(usec / 1000));
+-        }
+-    } else if (usec > 0) {
+-        /* Sub-millisecond sleep. Sleep()/waitable timers round up to the
+-         * ~0.5-1 ms scheduler quantum, far too coarse for a guest that relies
+-         * on accurate microsecond pacing -- a short usleep() spin waiting on
+-         * another thread to make progress otherwise collapses to a single yield
+-         * and busy-spins at full speed (so the wait is effectively a no-op).
+-         * Busy-wait to a precise QPC deadline, yielding inside the spin
+-         * (SwitchToThread) so a sibling host thread the guest may be waiting on
+-         * still gets the core. Mirrors RPCS3's "Usleep Only" TSC busy-tail. */
+-        ensure_qpc_init();
+-        LARGE_INTEGER qpc_start, qpc_now;
+-        QueryPerformanceCounter(&qpc_start);
+-        const int64_t qpc_deadline = qpc_start.QuadPart +
+-            (int64_t)((usec * (uint64_t)s_qpc_freq.QuadPart) / 1000000ULL);
+-        do {
++            Sleep((DWORD)(usec / 1000 > 0xFFFFFFFEull ? 0xFFFFFFFEu : usec / 1000));
++        }
++    }
++    if (usec) {
++        /* Relative Windows timers can wake before the requested QPC duration.
++         * Enforce the remaining tail without delaying a sibling guest thread. */
++        LARGE_INTEGER now;
++        for (;;) {
++            QueryPerformanceCounter(&now);
++            if (now.QuadPart >= deadline) break;
+             SwitchToThread();
+-            QueryPerformanceCounter(&qpc_now);
+-        } while (qpc_now.QuadPart < qpc_deadline);
++        }
+     }
+ #else
+     if (usec > 0) {
          struct timespec ts;
          ts.tv_sec  = (time_t)(usec / 1000000);
          ts.tv_nsec = (long)((usec % 1000000) * 1000);
@@ -351,7 +418,7 @@
      }
  #endif
  
-@@ -358,21 +365,11 @@
+@@ -358,21 +368,11 @@
  
      uint64_t sec, nsec;
  
@@ -378,6 +445,83 @@
          write_be64(sec_addr, sec);
 --- a/runtime/syscalls/sys_ppu_thread.c
 +++ b/runtime/syscalls/sys_ppu_thread.c
+@@ -459,6 +459,11 @@
+     uint32_t stack_size   = LV2_ARG_U32(ctx, 4);
+     uint64_t flags        = LV2_ARG_U64(ctx, 5);
+     uint32_t name_addr    = LV2_ARG_PTR(ctx, 6);
++    if (!tid_out_addr || tid_out_addr > UINT32_MAX - 7u || !entry || entry > UINT32_MAX - 7u)
++        return (int64_t)(int32_t)CELL_EFAULT;
++    if (priority < 0 || priority > 3071 || stack_size > VM_CB_STACK_BASE - VM_STACK_BASE)
++        return (int64_t)(int32_t)CELL_EINVAL;
++    if (!g_ppu_thread_entry_trampoline) return (int64_t)(int32_t)CELL_ENOSYS;
+ 
+     if (stack_size == 0) stack_size = VM_PPU_STACK_SIZE;
+     if (stack_size < 0x4000) stack_size = 0x4000; /* 16 KB minimum */
+@@ -645,6 +650,11 @@
+  * -----------------------------------------------------------------------*/
+ int64_t sys_ppu_thread_exit(ppu_context* ctx)
+ {
++#ifdef PS3_NATIVE_STRICT
++    if (!s_exit_armed) {
++        fprintf(stderr, "[native-blocked] PPU thread exit has no owned host-thread continuation\n"); fflush(stderr); exit(86);
++    }
++#endif
+     uint64_t status = LV2_ARG_U64(ctx, 0);
+     uint64_t tid = ctx->thread_id;
+     fprintf(stderr, "[SYS] sys_ppu_thread_exit(tid=%llu status=%llu)\n",
+@@ -691,6 +701,7 @@
+ {
+     uint64_t tid          = LV2_ARG_U64(ctx, 0);
+     uint32_t status_addr  = LV2_ARG_PTR(ctx, 1);
++    if (status_addr > UINT32_MAX - 7u) return (int64_t)(int32_t)CELL_EFAULT;
+     { static int n=0; if(PS3_LOG_FIRST(n, 30)) fprintf(stderr,"[WAIT] ppu_thread_join(tid=%llu)\n", (unsigned long long)tid); }
+     ppu_thread_note_block(ctx->thread_id);   /* PS3_PRIO_START */
+ 
+@@ -726,6 +737,9 @@
+      * pthread_join does below. Bounded, so that a thread kept running past its
+      * exit (PS3_NO_THREAD_EXIT_UNWIND=1) cannot hang the joiner. */
+     if (t->host_thread && WaitForSingleObject(t->host_thread, 5000) == WAIT_TIMEOUT) {
++#ifdef PS3_NATIVE_STRICT
++        fprintf(stderr, "[native-blocked] PPU join cannot release a live host thread\n"); fflush(stderr); exit(86);
++#endif
+         static int s_warned = 0;
+         if (s_warned++ < 4)
+             fprintf(stderr, "[SYS] ppu_thread_join(tid=%llu): host thread still running 5 s "
+@@ -1268,6 +1282,7 @@
+ {
+     uint64_t tid       = LV2_ARG_U64(ctx, 0);
+     uint32_t prio_addr = LV2_ARG_PTR(ctx, 1);
++    if (!prio_addr || prio_addr > UINT32_MAX - 3u) return (int64_t)(int32_t)CELL_EFAULT;
+ 
+     table_lock();
+     ppu_thread_info* t = find_thread(tid);
+@@ -1278,24 +1293,9 @@
+         return (int64_t)(int32_t)CELL_ESRCH;
+     }
+     if (!t) {
+-        /* The main thread (and any thread we didn't spawn via sys_ppu_thread_create)
+-         * isn't in our table. Returning ESRCH here is fatal for engines that query
+-         * their own priority at startup (PhyreEngine PApplication::PlatformInit ->
+-         * "Error initializing PSSG"). Report a sane default priority + success. */
++        /* Main and worker threads are registered; an unknown ID has no priority. */
+         table_unlock();
+-        if (prio_addr != 0) {
+-            int32_t prio = PPU_DEFAULT_PRIORITY;
+-            int32_t* out = (int32_t*)vm_to_host(prio_addr);
+-#if __BYTE_ORDER__ == __ORDER_LITTLE_ENDIAN__ || defined(_WIN32)
+-            uint32_t u = (uint32_t)prio;
+-            u = ((u >> 24) & 0xFF) | ((u >> 8) & 0xFF00) |
+-                ((u <<  8) & 0xFF0000) | ((u << 24) & 0xFF000000u);
+-            *out = (int32_t)u;
+-#else
+-            *out = prio;
+-#endif
+-        }
+-        return CELL_OK;
++        return (int64_t)(int32_t)CELL_ESRCH;
+     }
+ 
+     if (prio_addr != 0) {
 @@ -1426,6 +1426,7 @@
  int64_t sys_ppu_thread_get_stack_information(ppu_context* ctx)
  {
@@ -1139,3 +1283,126 @@
  
  /* Optional loader-owned image query: return addr unchanged when [addr, end)
   * is clear, otherwise the greatest exclusive end of an overlapping PT_LOAD.
+--- a/runtime/spu/spu_raw.h
++++ b/runtime/spu/spu_raw.h
+@@ -32,6 +32,7 @@
+ #define SPU_RAW_BASE      0xE0000000u
+ #define SPU_RAW_STRIDE    0x00100000u
+ #define SPU_RAW_COUNT     6u                    /* lv2 exposes 5; one spare */
++int32_t spu_raw_configure_limit(uint32_t limit);
+ #define SPU_RAW_SPAN      (SPU_RAW_COUNT * SPU_RAW_STRIDE)
+ #define SPU_RAW_PROB_OFF  0x40000u              /* LS below this, registers above */
+ 
+--- a/runtime/spu/spu_raw.c
++++ b/runtime/spu/spu_raw.c
+@@ -38,6 +38,8 @@
+ #include <stdlib.h>
+ #include <string.h>
+ #include <time.h>      /* nanosleep, in the POSIX half of spu_intr.inc */
++#include <stdatomic.h>
++#include "../memory/vm.h"
+ 
+ #ifdef _WIN32
+ #include <windows.h>
+@@ -97,6 +99,20 @@
+ } raw_spu;
+ 
+ static raw_spu s_spu[SPU_RAW_COUNT];
++static uint32_t s_raw_limit;
++static atomic_flag s_raw_directory = ATOMIC_FLAG_INIT;
++static void raw_lock(void) { while (atomic_flag_test_and_set_explicit(&s_raw_directory, memory_order_acquire)) {} }
++static void raw_unlock(void) { atomic_flag_clear_explicit(&s_raw_directory, memory_order_release); }
++int32_t spu_raw_configure_limit(uint32_t limit)
++{
++    if (limit > 5) return (int32_t)CELL_EINVAL;
++    raw_lock();
++    uint32_t used = 0;
++    for (uint32_t i = 0; i < SPU_RAW_COUNT; ++i) used += s_spu[i].used != 0;
++    if (used > limit) { raw_unlock(); return (int32_t)CELL_EBUSY; }
++    s_raw_limit = limit;
++    raw_unlock(); return CELL_OK;
++}
+ 
+ static int dbg(void)
+ {
+@@ -646,8 +662,16 @@
+ static int64_t sc_raw_spu_create(ppu_context* ctx)
+ {
+     uint32_t id_ea = (uint32_t)ctx->gpr[3];
+-    for (uint32_t n = 0; n < SPU_RAW_COUNT; n++) {
++    if (!id_ea || id_ea > UINT32_MAX - 3u) return (int64_t)(int32_t)CELL_EFAULT;
++    raw_lock();
++    uint32_t used = 0;
++    for (uint32_t i = 0; i < SPU_RAW_COUNT; ++i) used += s_spu[i].used != 0;
++    if (used >= s_raw_limit) { raw_unlock(); return (int64_t)(int32_t)CELL_EAGAIN; }
++    for (uint32_t n = 0; n < 5; n++) {
+         if (s_spu[n].used) continue;
++        if (vm_commit(SPU_RAW_BASE + n * SPU_RAW_STRIDE, SPU_RAW_STRIDE) != CELL_OK) {
++            raw_unlock(); return (int64_t)(int32_t)CELL_ENOMEM;
++        }
+         s_spu[n].used = 1;
+         s_spu[n].base = SPU_RAW_BASE + n * SPU_RAW_STRIDE;
+ 
+@@ -666,16 +690,19 @@
+         fprintf(stderr, "[spu-raw] create -> raw spu %u, window 0x%08X\n",
+                 n, s_spu[n].base);
+         fflush(stderr);
++        raw_unlock();
+         return CELL_OK;
+     }
+-    return CELL_ENOMEM;
++    raw_unlock(); return (int64_t)(int32_t)CELL_EAGAIN;
+ }
+ 
+ /* 161: sys_raw_spu_destroy(u32 id) */
+ static int64_t sc_raw_spu_destroy(ppu_context* ctx)
+ {
+     uint32_t n = (uint32_t)ctx->gpr[3];
++    raw_lock();
+     if (n < SPU_RAW_COUNT) s_spu[n].used = 0;
++    raw_unlock();
+     return CELL_OK;
+ }
+ 
+--- a/runtime/syscalls/lv2_register.c
++++ b/runtime/syscalls/lv2_register.c
+@@ -363,6 +363,7 @@
+ static uint32_t     s_spu_next_group_id  = 0x1000;
+ static uint32_t     s_spu_next_thread_id = 0x2000;
+ static int          s_spu_initialized    = 0;
++static uint32_t     s_spu_managed_limit = 6;
+ 
+ static spu_group_t* spu_find_group(uint32_t id)
+ {
+@@ -494,6 +495,14 @@
+     uint32_t nrawspu = (uint32_t)ctx->gpr[4];
+     fprintf(stderr, "[SPU] initialize(nspu=%u, nrawspu=%u)\n", nspu, nrawspu);
+     fflush(stderr);
++    if (nrawspu > 5) return (int64_t)(int32_t)CELL_EINVAL;
++    for (int i = 0; i < MAX_SPU_GROUPS; ++i)
++        if (s_spu_groups[i].in_use && s_spu_groups[i].state == SPU_GROUP_STATE_RUNNING &&
++            s_spu_groups[i].num_threads > 6 - nrawspu) return (int64_t)(int32_t)CELL_EBUSY;
++    extern int32_t spu_raw_configure_limit(uint32_t);
++    int32_t result = spu_raw_configure_limit(nrawspu);
++    if (result) return result;
++    s_spu_managed_limit = 6 - nrawspu;
+     s_spu_initialized = 1;
+     ctx->gpr[3] = 0;
+     return 0;
+@@ -516,6 +525,8 @@
+     int32_t  prio     = (int32_t)ctx->gpr[5];
+     uint32_t attr_ea  = (uint32_t)ctx->gpr[6];
+     fprintf(stderr, "[SPU] thread_group_create(num=%u prio=%d)\n", num, prio);
++    if (!s_spu_initialized) return (int64_t)(int32_t)CELL_ESTAT;
++    if (!num || num > s_spu_managed_limit) return (int64_t)(int32_t)CELL_EINVAL;
+ 
+     spu_group_t* g = spu_alloc_group();
+     if (!g) {
+@@ -524,7 +535,6 @@
+         ctx->gpr[3] = (uint64_t)(int64_t)(int32_t)CELL_EAGAIN;
+         return (int64_t)ctx->gpr[3];
+     }
+-    if (num > 8) num = 8;
+     g->num_threads = num;
+ 
+     int32_t  gtype   = 0;

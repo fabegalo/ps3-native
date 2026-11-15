@@ -199,6 +199,9 @@ Execução SPURS e cobertura de imagens ainda precisam de implementação e vali
 Disponibilidade de módulo e execução de cada API são verificadas separadamente.
 Layouts de atributos/vídeo, quota e backing do mapper, esperas/callbacks e
 metadados de boot em disco têm regressões sintéticas; tiles comprimidos param.
+Criação/saída/join de threads PPU, consulta de prioridade e limites SPU também
+têm regressões. Esperas Windows conferem o prazo monotônico após o timer do host.
+Inicializar recursos não habilita execução SPU ainda não preparada.
 
 **Próxima tarefa:** concluir CRT/construtores originais através das paradas
 diagnósticas, ampliar destinos indiretos preparados e auditar serviços alcançados

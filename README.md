@@ -196,6 +196,9 @@ execution semantics and image coverage still require implementation and validati
 Module availability and per-API execution approval are separate. Attribute and
 video layouts, live mapper quota/backing, real waits/callbacks and disc boot
 metadata have focused synthetic regressions; compressed tiles remain blocked.
+PPU worker creation/exit/join, priority lookup and SPU resource limits also have
+regressions. Windows waits enforce their monotonic deadline after the host timer
+wakes. Resource initialization does not enable unprepared SPU execution.
 
 **Next task:** finish original CRT/static initialization through strict stops,
 expand prepared indirect targets and audit reached services with real regressions.

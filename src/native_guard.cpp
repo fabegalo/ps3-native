@@ -49,6 +49,7 @@ extern "C" void ps3_native_hle_gate(uint32_t nid, ppu_context* ctx) {
                                     "cellGameBootCheck", "cellGameContentPermit",
                                     "cellGameGetParamString",
                                     "sys_mmapper_allocate_memory", "sys_mmapper_map_memory",
+                                    "sys_ppu_thread_create", "sys_ppu_thread_exit",
                                     "_cellGcmInitBody",
                                     "cellGcmGetConfiguration", "cellGcmGetControlRegister", "cellGcmGetLabelAddress", "cellGcmAddressToOffset",
                                     "cellGcmMapMainMemory",
@@ -101,6 +102,10 @@ extern "C" void ps3_native_hle_gate(uint32_t nid, ppu_context* ctx) {
             std::fflush(stderr); std::exit(86);
         }
     }
+    if (nid == ps3_compute_nid("sys_ppu_thread_create") && (ctx->gpr[8] & ~1ull)) {
+        std::fprintf(stderr, "[native-blocked] unsupported PPU thread creation flags\n");
+        std::fflush(stderr); std::exit(86);
+    }
     if (nid == ps3_compute_nid("cellGcmSetTileInfo") && (uint8_t)ctx->gpr[8] != 0) {
         std::fprintf(stderr, "[native-blocked] compressed RSX tiles need validated compression semantics\n");
         std::fflush(stderr); std::exit(86);
@@ -151,7 +156,7 @@ extern "C" void ps3_native_syscall_gate(ppu_context* ctx) {
             if (page == 0 || page == 0x200 || page == 0x400) return;
     }
     // Host clocks and allocator operations have state/result regressions.
-    if (number == 49 || number == 141 || number == 144 || number == 145 || number == 147 || number == 348 || number == 349 || number == 352) return;
+    if (number == 42 || number == 44 || number == 48 || number == 49 || number == 141 || number == 144 || number == 145 || number == 147 || number == 169 || number == 348 || number == 349 || number == 352) return;
     std::fprintf(stderr, "[native-blocked] LV2 requires audit syscall=%llu lr=0x%08X args=%llX,%llX,%llX,%llX\n",
                  (unsigned long long)number, (uint32_t)ctx->lr, (unsigned long long)ctx->gpr[3],
                  (unsigned long long)ctx->gpr[4], (unsigned long long)ctx->gpr[5], (unsigned long long)ctx->gpr[6]);

@@ -34,10 +34,22 @@ extern PPU_THREAD_LOCAL ppu_context* g_active_ctx;
 void ppu_register_function(uint64_t, void (*)(ppu_context*));
 uint64_t ppu_guest_call(uint32_t, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t);
 uint64_t ppu_guest_call_ct(uint32_t, uint32_t, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t);
+void ppu_install_thread_trampoline(void);
+uint64_t ppu_thread_register_main(void);
+uint64_t ppu_thread_register_main_priority(int32_t);
+int lv2_try_syscall(ppu_context*);
 }
 static unsigned callbacks;
 static unsigned gcm_callbacks;
 static uint64_t callback_tls, callback_tid, callback_toc;
+static std::atomic<bool> continued_after_exit{false};
+static void native_guest_thread(ppu_context* ctx) {
+    vm_write32((u32)ctx->gpr[3], 0xC0FFEE);
+    vm_write64(ctx->gpr[1] - 32, 0xCAFEBABE);
+    ctx->gpr[3] = 0x1122334455667788ull;
+    ps3_hle_call(ps3_compute_nid("sys_ppu_thread_exit"), ctx);
+    continued_after_exit.store(true);
+}
 static void native_guest_callback(ppu_context* ctx) {
     callback_tls = ctx->gpr[13]; callback_tid = ctx->thread_id; callback_toc = ctx->gpr[2];
     vm_write64(ctx->gpr[1] - 16, ctx->gpr[3]);
@@ -135,6 +147,17 @@ int main(int argc, char** argv) {
             ctx.gpr[4] = 0x100000; ctx.gpr[5] = 0x20000;
             call(ctx, "cellGcmMapMainMemory", 0x40000000);
         }
+        if (!strcmp(argv[1], "thread_flags")) { ctx.gpr[8] = 2; call(ctx, "sys_ppu_thread_create", 0); }
+        if (!strcmp(argv[1], "thread_exit_unowned")) {
+            if (vm_init()) return 1;
+            ppu_sysprx_register();
+            ctx.gpr[1] = 0xD00FFFF0; call(ctx, "sys_ppu_thread_exit", 0);
+        }
+        if (!strcmp(argv[1], "audited_not_registered")) {
+            if (vm_init()) return 1;
+            ctx.gpr[1] = 0xD00FFFF0; call(ctx, "sys_ppu_thread_exit", 0);
+        }
+        if (!strcmp(argv[1], "raw_spu_unreviewed")) { ctx.gpr[11] = 160; lv2_syscall(&ctx); }
         return 1; // Every unsupported path must terminate before reaching here.
     }
     if (vm_init() != 0) return 1;
@@ -347,7 +370,11 @@ int main(int argc, char** argv) {
     auto sleep_start = std::chrono::steady_clock::now();
     ctx.gpr[11] = 141; ctx.gpr[3] = 2000; lv2_syscall(&ctx);
     auto slept = std::chrono::steady_clock::now() - sleep_start;
-    if (ctx.gpr[3] || gcm_callbacks != 2 || slept < std::chrono::microseconds(2000)) return 93;
+    if (ctx.gpr[3] || gcm_callbacks != 2 || slept < std::chrono::microseconds(2000)) {
+        std::fprintf(stderr, "usleep elapsed=%lldus callbacks=%u\n",
+            (long long)std::chrono::duration_cast<std::chrono::microseconds>(slept).count(), gcm_callbacks);
+        return 93;
+    }
     call(ctx, "cellGcmSetVBlankHandler", 0);
     call(ctx, "sys_ppu_thread_get_id", 0x24000);
     if (vm_read64(0x24000) != 17) return 5;
@@ -387,6 +414,38 @@ int main(int argc, char** argv) {
     callback_result = ppu_guest_call_ct(0x12380, 0x12340000, 10,3,0,0,0,0,0,0);
     if (callback_result != 13 || g_active_ctx != &ctx || callback_tls != ctx.gpr[13] || callback_tid != 17) return 96;
     g_active_ctx = nullptr;
+    ppu_install_thread_trampoline();
+    ctx.thread_id = ppu_thread_register_main_priority(2000);
+    ctx.gpr[11] = 48; ctx.gpr[3] = ctx.thread_id; ctx.gpr[4] = 0x39020; lv2_syscall(&ctx);
+    if (ctx.gpr[3] || vm_read32(0x39020) != 2000) return 106;
+    vm_write32(0x39020, 0xA5A5A5A5); ctx.gpr[3] = 9999; lv2_syscall(&ctx);
+    if ((int64_t)ctx.gpr[3] >= 0 || vm_read32(0x39020) != 0xA5A5A5A5) return 107;
+    vm_write32(0x39100, 0x12400); vm_write32(0x39104, 0);
+    std::memcpy(vm_base + 0x39300, "own worker", 11);
+    ppu_register_function(0x12400, native_guest_thread);
+    ctx.gpr[4] = 0x39100; ctx.gpr[5] = 0x39200; ctx.gpr[6] = 1001;
+    ctx.gpr[7] = 0x10000; ctx.gpr[8] = 1; ctx.gpr[9] = 0x39300;
+    call(ctx, "sys_ppu_thread_create", 0x39000);
+    auto worker_id = vm_read64(0x39000);
+    if (ctx.gpr[3] || !worker_id || worker_id == ctx.thread_id) return 97;
+    ctx.gpr[11] = 44; ctx.gpr[3] = worker_id; ctx.gpr[4] = 0x39010; lv2_syscall(&ctx);
+    if (ctx.gpr[3] || vm_read64(0x39010) != 0x1122334455667788ull ||
+        vm_read32(0x39200) != 0xC0FFEE || continued_after_exit.load()) return 98;
+    ctx.gpr[11] = 169; ctx.gpr[3] = 6; ctx.gpr[4] = 6; lv2_syscall(&ctx);
+    if ((int64_t)ctx.gpr[3] >= 0) return 99;
+    ctx.gpr[3] = 6; ctx.gpr[4] = 1; lv2_syscall(&ctx);
+    if (ctx.gpr[3]) return 100;
+    // Internal pool test only: guest raw-SPU creation/start remain outside the execution allowlist.
+    ctx.gpr[11] = 160; ctx.gpr[3] = 0x39400; ctx.gpr[4] = 0;
+    if (!lv2_try_syscall(&ctx) || ctx.gpr[3]) return 101;
+    auto raw_id = vm_read32(0x39400);
+    ctx.gpr[11] = 169; ctx.gpr[3] = 6; ctx.gpr[4] = 0; lv2_syscall(&ctx);
+    if ((int64_t)ctx.gpr[3] >= 0) return 102;
+    ctx.gpr[11] = 160; ctx.gpr[3] = 0x39404; vm_write32(0x39404, 0xA5A5A5A5);
+    if (!lv2_try_syscall(&ctx) || (int64_t)ctx.gpr[3] >= 0 || vm_read32(0x39404) != 0xA5A5A5A5) return 103;
+    ctx.gpr[11] = 161; ctx.gpr[3] = raw_id; if (!lv2_try_syscall(&ctx) || ctx.gpr[3]) return 104;
+    ctx.gpr[11] = 169; ctx.gpr[3] = 6; ctx.gpr[4] = 0; lv2_syscall(&ctx);
+    if (ctx.gpr[3]) return 105;
     vm_shutdown();
     std::puts("Verified first-callback retention, real mutual exclusion and monotonic clock");
     return 0;
