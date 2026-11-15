@@ -8,7 +8,7 @@
     "patches": [
       {
         "path": "patches/ps3recomp/0001-strict-aot-execution.patch",
-        "sha256": "c242a8029993da2aa71bc49c662840f084e1aa25c540c7419e84c4e4e037b37f",
+        "sha256": "75bfebc4b55508b507da6e21d882ce47758ebd1ded7550bf215ce965588f685f",
         "source_hash_normalization": "LF",
         "files": {
           "runtime/ppu/ppu_hle.cpp": {

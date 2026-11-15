@@ -223,7 +223,9 @@
  
  #ifdef __cplusplus
  }
--#endif+#endif
+-#endif
+\ No newline at end of file
++#endif
 --- a/runtime/spu/spu_workload.c
 +++ b/runtime/spu/spu_workload.c
 @@ -356,6 +356,12 @@

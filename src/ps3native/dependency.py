@@ -14,8 +14,11 @@ def dependency(root, apply=False):
     lock = json.loads((root / 'deps.lock.json').read_text(encoding='utf-8'))['ps3recomp']
     sdk = root / lock['path']
     def git(*args):
-        return subprocess.run(['git', '-C', str(sdk), *args], check=True,
-                              capture_output=True, text=True, timeout=30).stdout
+        try:
+            return subprocess.run(['git', '-C', str(sdk), *args], check=True,
+                                  capture_output=True, text=True, timeout=30).stdout
+        except subprocess.CalledProcessError as exc:
+            raise ValueError(f'Upstream Git operation failed: {exc.stderr.strip()}') from exc
     if git('rev-parse', 'HEAD').strip() != lock['commit']:
         raise ValueError('Upstream revision does not match deps.lock.json')
     expected = set()
