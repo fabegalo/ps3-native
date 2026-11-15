@@ -15,10 +15,29 @@
 #include "cellSpurs.h"
 extern "C" s32 _cellSpursAttributeInitialize(CellSpursAttribute*, u32, u32, s32, s32, s32, u8);
 extern "C" void ps3_hle_register_ctx(uint32_t, const char*, void (*)(ppu_context*));
+extern "C" [[noreturn]] void ps3_native_stop(void);
 extern "C" int sys_memory_range_backed(uint32_t, uint32_t);
+extern "C" int ps3_sysprx_heap_range_backed(uint32_t, uint32_t);
+extern "C" s32 sys_ppu_thread_once(u32, u32);
+extern "C" s32 _sys_spu_printf_initialize(u32, u32, u32, u32);
+extern "C" s32 _sys_spu_printf_finalize(void);
 // Standalone CPU harnesses have no presentation backend.
 extern "C" __attribute__((weak)) int ppu_host_video_state(void) { return 0; }
 namespace {
+void spu_printf_initialize(ppu_context* ctx) {
+    ctx->gpr[3] = (uint64_t)(int64_t)_sys_spu_printf_initialize(
+        (u32)ctx->gpr[3], (u32)ctx->gpr[4], (u32)ctx->gpr[5], (u32)ctx->gpr[6]);
+}
+void spu_printf_finalize(ppu_context* ctx) { ctx->gpr[3] = (uint64_t)(int64_t)_sys_spu_printf_finalize(); }
+void thread_once(ppu_context* ctx) {
+    const auto control = (u32)ctx->gpr[3], initializer = (u32)ctx->gpr[4];
+    if ((control & 3) || !sys_memory_range_backed(control, 4) ||
+        !sys_memory_range_backed(initializer, 8) ||
+        sys_ppu_thread_once(control, initializer) != 0) {
+        std::fprintf(stderr, "[native-blocked] invalid thread-once control or missing initializer dispatcher\n");
+        std::fflush(stderr); ps3_native_stop();
+    }
+}
 void load_module(ppu_context* ctx) { ctx->gpr[3] = (uint64_t)(int64_t)cellSysmoduleLoadModule((uint16_t)ctx->gpr[3]); }
 void module_loaded(ppu_context* ctx) { ctx->gpr[3] = (uint64_t)(int64_t)cellSysmoduleIsLoaded((uint16_t)ctx->gpr[3]); }
 void sysutil_register(ppu_context* ctx) {
@@ -46,7 +65,7 @@ void game_boot(ppu_context* ctx) {
 void game_permit(ppu_context* ctx) {
     if (cellGame_get_hdd_title_id()) {
         std::fprintf(stderr, "[native-blocked] HDD content permission needs an audited writable mount\n");
-        std::fflush(stderr); std::exit(86);
+        std::fflush(stderr); ps3_native_stop();
     }
     ctx->gpr[3] = (uint64_t)(int64_t)cellGameContentPermit((char*)(uintptr_t)(u32)ctx->gpr[3],
         (char*)(uintptr_t)(u32)ctx->gpr[4]);
@@ -64,6 +83,14 @@ void gcm_flip_mode(ppu_context* ctx) { cellGcmSetFlipMode((u32)ctx->gpr[3]); }
 void gcm_vblank_handler(ppu_context* ctx) { cellGcmSetVBlankHandler((CellGcmVBlankHandler)(uintptr_t)(u32)ctx->gpr[3]); }
 void gcm_flip_handler(ppu_context* ctx) { cellGcmSetFlipHandler((CellGcmFlipHandler)(uintptr_t)(u32)ctx->gpr[3]); }
 void gcm_user_handler(ppu_context* ctx) { cellGcmSetUserHandler((CellGcmUserHandler)(uintptr_t)(u32)ctx->gpr[3]); }
+void gcm_prepare_flip(ppu_context* ctx) {
+    const auto context = (u32)ctx->gpr[3];
+    if (!sys_memory_range_backed(context, 16) && !ps3_sysprx_heap_range_backed(context, 16)) {
+        std::fprintf(stderr, "[native-blocked] unbacked GCM flip context\n");
+        std::fflush(stderr); ps3_native_stop();
+    }
+    ctx->gpr[3] = (uint64_t)(int64_t)cellGcmSetPrepareFlip((void*)(uintptr_t)context, (u32)ctx->gpr[4]);
+}
 void gcm_graphics_handler(ppu_context* ctx) { cellGcmSetGraphicsHandler((CellGcmGraphicsHandler)(uintptr_t)(u32)ctx->gpr[3]); }
 void gcm_label(ppu_context* ctx) { ctx->gpr[3] = (uintptr_t)cellGcmGetLabelAddress((u8)ctx->gpr[3]); }
 void gcm_offset(ppu_context* ctx) {
@@ -72,7 +99,7 @@ void gcm_offset(ppu_context* ctx) {
 void gcm_map_main(ppu_context* ctx) {
     if (!sys_memory_range_backed((u32)ctx->gpr[3], (u32)ctx->gpr[4])) {
         std::fprintf(stderr, "[native-blocked] RSX IO mapping requires allocated and mapped guest backing\n");
-        std::fflush(stderr); std::exit(86);
+        std::fflush(stderr); ps3_native_stop();
     }
     ctx->gpr[3] = (uint64_t)(int64_t)cellGcmMapMainMemory((u32)ctx->gpr[3], (u32)ctx->gpr[4],
         (u32*)(uintptr_t)(u32)ctx->gpr[5]);
@@ -111,7 +138,7 @@ void video_available(ppu_context* ctx) {
 void video_configure(ppu_context* ctx) {
     if (ctx->gpr[4] && (vm_read8(ctx->gpr[4]) != 2 || vm_read8(ctx->gpr[4] + 1) != 0)) {
         std::fprintf(stderr, "[native-blocked] video mode differs from the native 720p RGB output\n");
-        std::fflush(stderr); std::exit(86);
+        std::fflush(stderr); ps3_native_stop();
     }
     ctx->gpr[3] = (uint64_t)(int64_t)cellVideoOutConfigure((u32)ctx->gpr[3], (CellVideoOutConfiguration*)(uintptr_t)(u32)ctx->gpr[4],
         (void*)(uintptr_t)(u32)ctx->gpr[5], (u32)ctx->gpr[6]);
@@ -130,9 +157,20 @@ void spurs_prefix(ppu_context* ctx) {
         (const char*)(uintptr_t)(uint32_t)ctx->gpr[4], (u32)ctx->gpr[5]);
     ctx->gpr[3] = (uint64_t)(int64_t)rc;
 }
+void spurs_printf_attribute(ppu_context* ctx) {
+    ctx->gpr[3] = (uint64_t)(int64_t)cellSpursAttributeEnableSpuPrintfIfAvailable(
+        (CellSpursAttribute*)(uintptr_t)(u32)ctx->gpr[3]);
+}
+void spurs_group_type(ppu_context* ctx) {
+    ctx->gpr[3] = (uint64_t)(int64_t)cellSpursAttributeSetSpuThreadGroupType(
+        (CellSpursAttribute*)(uintptr_t)(u32)ctx->gpr[3], (s32)ctx->gpr[4]);
+}
 // Typed HLE adapters only; no original PRX is loaded by this registration.
 struct RegisterAdapters {
     RegisterAdapters() {
+        ps3_hle_register_ctx(ps3_compute_nid("_sys_spu_printf_initialize"), "_sys_spu_printf_initialize", spu_printf_initialize);
+        ps3_hle_register_ctx(ps3_compute_nid("_sys_spu_printf_finalize"), "_sys_spu_printf_finalize", spu_printf_finalize);
+        ps3_hle_register_ctx(ps3_compute_nid("sys_ppu_thread_once"), "sys_ppu_thread_once", thread_once);
         ps3_hle_register_ctx(ps3_compute_nid("cellSysmoduleLoadModule"), "cellSysmoduleLoadModule", load_module);
         ps3_hle_register_ctx(ps3_compute_nid("cellSysmoduleIsLoaded"), "cellSysmoduleIsLoaded", module_loaded);
         ps3_hle_register_ctx(ps3_compute_nid("cellSysutilRegisterCallback"), "cellSysutilRegisterCallback", sysutil_register);
@@ -152,6 +190,7 @@ struct RegisterAdapters {
         ps3_hle_register_ctx(ps3_compute_nid("cellGcmSetVBlankHandler"), "cellGcmSetVBlankHandler", gcm_vblank_handler);
         ps3_hle_register_ctx(ps3_compute_nid("cellGcmSetFlipHandler"), "cellGcmSetFlipHandler", gcm_flip_handler);
         ps3_hle_register_ctx(ps3_compute_nid("cellGcmSetUserHandler"), "cellGcmSetUserHandler", gcm_user_handler);
+        ps3_hle_register_ctx(ps3_compute_nid("cellGcmSetPrepareFlip"), "cellGcmSetPrepareFlip", gcm_prepare_flip);
         ps3_hle_register_ctx(ps3_compute_nid("cellGcmSetGraphicsHandler"), "cellGcmSetGraphicsHandler", gcm_graphics_handler);
         ps3_hle_register_ctx(ps3_compute_nid("cellGcmGetLabelAddress"), "cellGcmGetLabelAddress", gcm_label);
         ps3_hle_register_ctx(ps3_compute_nid("cellGcmAddressToOffset"), "cellGcmAddressToOffset", gcm_offset);
@@ -169,6 +208,8 @@ struct RegisterAdapters {
         ps3_hle_register_ctx(ps3_compute_nid("cellVideoOutGetConfiguration"), "cellVideoOutGetConfiguration", video_configuration);
         ps3_hle_register_ctx(ps3_compute_nid("_cellSpursAttributeInitialize"), "_cellSpursAttributeInitialize", spurs_attribute);
         ps3_hle_register_ctx(ps3_compute_nid("cellSpursAttributeSetNamePrefix"), "cellSpursAttributeSetNamePrefix", spurs_prefix);
+        ps3_hle_register_ctx(ps3_compute_nid("cellSpursAttributeEnableSpuPrintfIfAvailable"), "cellSpursAttributeEnableSpuPrintfIfAvailable", spurs_printf_attribute);
+        ps3_hle_register_ctx(ps3_compute_nid("cellSpursAttributeSetSpuThreadGroupType"), "cellSpursAttributeSetSpuThreadGroupType", spurs_group_type);
     }
 } registration;
 }

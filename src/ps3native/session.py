@@ -27,7 +27,7 @@ def bind(root, original, elf, generation, build):
                'generation': {str(p.resolve()): digest(p) for p in generation.glob('ppu_recomp*.*')},
                'guard_sha256': digest(root / 'src/native_guard.cpp'),
                'own_sources': {str(p): digest(root / p) for p in
-                               ('src/module_hooks.cpp', 'cmake/NativeModule.cmake', 'CMakeLists.txt', 'src/ps3native/codegen.py')}}
+                               ('src/module_hooks.cpp', 'src/native_stop.cpp', 'cmake/NativeModule.cmake', 'CMakeLists.txt', 'src/ps3native/codegen.py')}}
     target = build / 'module/receipt.json'
     target.parent.mkdir(parents=True, exist_ok=True)
     temporary = target.with_suffix('.pending')

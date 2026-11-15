@@ -9,6 +9,15 @@
 extern "C" ps3_guest_caller_fn g_ps3_guest_caller;
 extern "C" int ps3_native_context_ready(uint32_t);
 extern "C" int ps3_hle_has(uint32_t);
+extern "C" [[noreturn]] void ps3_native_stop(void);
+extern "C" int sys_memory_range_backed(uint32_t, uint32_t);
+extern "C" uint32_t g_ppu_main_stack_addr, g_ppu_main_stack_size;
+static bool guest_backed(uint32_t address, uint32_t size) {
+    const uint64_t end = (uint64_t)address + size;
+    return end <= 0x100000000ull &&
+        (sys_memory_range_backed(address, size) ||
+         (address >= g_ppu_main_stack_addr && end <= (uint64_t)g_ppu_main_stack_addr + g_ppu_main_stack_size));
+}
 static void filesystem_path(ppu_context* ctx) {
     const auto address = (uint32_t)ctx->gpr[3];
     std::string path;
@@ -33,27 +42,30 @@ static void filesystem_path(ppu_context* ctx) {
     }
     if (!safe) {
         std::fprintf(stderr, "[native-blocked] unsupported or escaping filesystem path\n");
-        std::fflush(stderr); std::exit(86);
+        std::fflush(stderr); ps3_native_stop();
     }
 }
 extern "C" void ps3_native_hle_gate(uint32_t nid, ppu_context* ctx) {
     // Expand only after inspecting and testing the upstream implementation.
     static const char* audited[] = {"sys_initialize_tls", "sys_lwmutex_create", "sys_lwmutex_lock", "sys_lwmutex_unlock",
                                     "sys_time_get_system_time", "sys_ppu_thread_get_id",
+                                    "_sys_spu_printf_initialize", "_sys_spu_printf_finalize",
                                     "_sys_process_atexitspawn", "_sys_process_at_Exitspawn",
                                     "cellSysmoduleLoadModule", "cellSysmoduleIsLoaded",
                                     "_cellSpursAttributeInitialize", "cellSpursAttributeSetNamePrefix",
+                                    "cellSpursAttributeEnableSpuPrintfIfAvailable",
+                                    "cellSpursAttributeSetSpuThreadGroupType",
                                     "cellSysutilRegisterCallback", "cellSysutilUnregisterCallback", "cellSysutilCheckCallback",
                                     "cellRtcGetCurrentTick",
                                     "sceNpInit", "sceNpTerm", "sceNpManagerGetStatus",
                                     "cellGameBootCheck", "cellGameContentPermit",
                                     "cellGameGetParamString",
                                     "sys_mmapper_allocate_memory", "sys_mmapper_map_memory",
-                                    "sys_ppu_thread_create", "sys_ppu_thread_exit",
+                                    "sys_ppu_thread_create", "sys_ppu_thread_exit", "sys_ppu_thread_once",
                                     "_cellGcmInitBody",
                                     "cellGcmGetConfiguration", "cellGcmGetControlRegister", "cellGcmGetLabelAddress", "cellGcmAddressToOffset",
                                     "cellGcmMapMainMemory",
-                                    "cellGcmSetTileInfo", "cellGcmBindTile", "cellGcmUnbindTile", "cellGcmSetDisplayBuffer",
+                                    "cellGcmSetTileInfo", "cellGcmBindTile", "cellGcmUnbindTile", "cellGcmSetDisplayBuffer", "cellGcmSetPrepareFlip",
                                     "cellVideoOutGetNumberOfDevice", "cellVideoOutGetState", "cellVideoOutGetResolution",
                                     "cellVideoOutGetDeviceInfo",
                                     "cellGcmGetTiledPitchSize", "cellGcmSetFlipMode", "cellGcmSetVBlankHandler",
@@ -99,39 +111,39 @@ extern "C" void ps3_native_hle_gate(uint32_t nid, ppu_context* ctx) {
         }
         if (!ready) {
             std::fprintf(stderr, "[native-blocked] HLE module provider not ready id=0x%llX\n", (unsigned long long)ctx->gpr[3]);
-            std::fflush(stderr); std::exit(86);
+            std::fflush(stderr); ps3_native_stop();
         }
     }
     if (nid == ps3_compute_nid("sys_ppu_thread_create") && (ctx->gpr[8] & ~1ull)) {
         std::fprintf(stderr, "[native-blocked] unsupported PPU thread creation flags\n");
-        std::fflush(stderr); std::exit(86);
+        std::fflush(stderr); ps3_native_stop();
     }
     if (nid == ps3_compute_nid("cellGcmSetTileInfo") && (uint8_t)ctx->gpr[8] != 0) {
         std::fprintf(stderr, "[native-blocked] compressed RSX tiles need validated compression semantics\n");
-        std::fflush(stderr); std::exit(86);
+        std::fflush(stderr); ps3_native_stop();
     }
     if (nid == ps3_compute_nid("cellVideoOutGetResolution") && ctx->gpr[3] != 2) {
         std::fprintf(stderr, "[native-blocked] unaudited video resolution id=%llu\n", (unsigned long long)ctx->gpr[3]);
-        std::fflush(stderr); std::exit(86);
+        std::fflush(stderr); ps3_native_stop();
     }
     if (nid == ps3_compute_nid("cellGameGetParamString") &&
         ((u32)ctx->gpr[3] != 100 || ctx->gpr[4] > UINT32_MAX - (u32)ctx->gpr[5])) {
         std::fprintf(stderr, "[native-blocked] unaudited game string id or overflowing guest output\n");
-        std::fflush(stderr); std::exit(86);
+        std::fflush(stderr); ps3_native_stop();
     }
     if (nid == ps3_compute_nid("cellRtcGetCurrentTick") && ctx->gpr[3] > UINT32_MAX - 7u) {
         std::fprintf(stderr, "[native-blocked] RTC tick output crosses guest address space\n");
-        std::fflush(stderr); std::exit(86);
+        std::fflush(stderr); ps3_native_stop();
     }
     if (nid == ps3_compute_nid("cellSysutilCheckCallback") && !g_ps3_guest_caller) {
         std::fprintf(stderr, "[native-blocked] sysutil callback dispatcher is not installed\n");
-        std::fflush(stderr); std::exit(86);
+        std::fflush(stderr); ps3_native_stop();
     }
     if (nid == ps3_compute_nid("cellFsOpen")) {
         filesystem_path(ctx);
         if ((uint32_t)ctx->gpr[4] != 0) {
             std::fprintf(stderr, "[native-blocked] filesystem startup only supports read-only opens\n");
-            std::fflush(stderr); std::exit(86);
+            std::fflush(stderr); ps3_native_stop();
         }
     }
     if (nid == ps3_compute_nid("cellFsStat")) filesystem_path(ctx);
@@ -145,10 +157,15 @@ extern "C" void ps3_native_hle_gate(uint32_t nid, ppu_context* ctx) {
     std::fprintf(stderr, "[native-blocked] HLE requires audit nid=0x%08X cia=0x%08X lr=0x%08X r3=0x%llX\n",
                  nid, (uint32_t)ctx->cia, (uint32_t)ctx->lr, (unsigned long long)ctx->gpr[3]);
     std::fflush(stderr);
-    std::exit(86);
+    ps3_native_stop();
 }
 extern "C" void ps3_native_syscall_gate(ppu_context* ctx) {
     const auto number = ctx->gpr[11];
+    if (number == 128 && guest_backed((uint32_t)ctx->gpr[3], 4) &&
+        guest_backed((uint32_t)ctx->gpr[4], 16)) return;
+    if (number == 134 && guest_backed((uint32_t)ctx->gpr[3], 4) &&
+        ctx->gpr[4] == 1 && ctx->gpr[5] != 0) return;
+    if (number == 136) return;
     if (number == 330) {
         const auto flags = ctx->gpr[4];
         const auto page = flags & ~0xFull;
@@ -161,5 +178,5 @@ extern "C" void ps3_native_syscall_gate(ppu_context* ctx) {
                  (unsigned long long)number, (uint32_t)ctx->lr, (unsigned long long)ctx->gpr[3],
                  (unsigned long long)ctx->gpr[4], (unsigned long long)ctx->gpr[5], (unsigned long long)ctx->gpr[6]);
     std::fflush(stderr);
-    std::exit(86);
+    ps3_native_stop();
 }

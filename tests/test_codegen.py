@@ -29,9 +29,12 @@ class CodegenTests(unittest.TestCase):
             counts = guard_sources(tmp)
             self.assertEqual(counts[path.name], 4)
             text = path.read_text(encoding='utf-8')
-            self.assertEqual(text.count('exit(86)'), 4)
+            self.assertEqual(text.count('ps3_native_stop();'), 4)
             self.assertIn('if (flag) {', text)
             self.assertEqual(guard_sources(tmp)[path.name], 0)
+            path.write_text('fprintf(stderr, "[native-blocked] old guard"); fflush(stderr); exit(86);', encoding='utf-8')
+            self.assertEqual(guard_sources(tmp)[path.name], 1)
+            self.assertIn('ps3_native_stop();', path.read_text(encoding='utf-8'))
 
     def test_subset_selects_entry_and_seeds_without_skipping_missing_calls(self):
         with tempfile.TemporaryDirectory() as tmp:

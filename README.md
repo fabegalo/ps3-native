@@ -187,7 +187,10 @@ The local **EL CHAVO KART (BLUS31198, 01.00)** session reaches the original
 PPU CRT/static constructors, original SFO metadata and a local NP pool without
 sign-in. It initializes GCM, opens the real D3D12 1280×720 output, maps 10 MiB
 of main memory into RSX IO, registers three display buffers and executes an RSX
-FIFO label fence. Remaining PPU targets and unaudited services stop explicitly.
+FIFO label fence and a screen-clear command. Original startup creates the
+`FlipPump` and `_SPU_printf_server` threads, an event queue and a connected port.
+The current strict stop is `cellSpursInitializeWithAttribute` (NID `0xAA6269A8`).
+Remaining PPU targets and unaudited services stop explicitly.
 An open backend window is not a verified game frame, menu or gameplay.
 Offline discovery found 47 embedded SPU images: 45 generated without reported
 unsupported instructions; two failed because executable ranges include data
@@ -199,6 +202,10 @@ metadata have focused synthetic regressions; compressed tiles remain blocked.
 PPU worker creation/exit/join, priority lookup and SPU resource limits also have
 regressions. Windows waits enforce their monotonic deadline after the host timer
 wakes. Resource initialization does not enable unprepared SPU execution.
+Once-initializer publication, event creation/connection, SPURS attribute flags
+and printf callback registration have focused regressions. Prepared flips stay
+in the FIFO until consumed; request-time callbacks and frame-skipping catch-up
+are disabled in strict execution. Fatal diagnostics exit without guest teardown.
 
 **Next task:** finish original CRT/static initialization through strict stops,
 expand prepared indirect targets and audit reached services with real regressions.

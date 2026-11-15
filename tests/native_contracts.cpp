@@ -38,11 +38,28 @@ void ppu_install_thread_trampoline(void);
 uint64_t ppu_thread_register_main(void);
 uint64_t ppu_thread_register_main_priority(int32_t);
 int lv2_try_syscall(ppu_context*);
+s32 sys_ppu_thread_once(u32, u32);
+void cellGcm_rsx_process_fifo(void);
+int cellGcm_take_flip_pending(void);
+unsigned cellGcm_flip_request_count(void);
+u32 ps3_spu_printf_callback(u32);
 }
 static unsigned callbacks;
 static unsigned gcm_callbacks;
 static uint64_t callback_tls, callback_tid, callback_toc;
 static std::atomic<bool> continued_after_exit{false};
+static std::atomic<bool> once_entered{false}, once_release{false};
+static unsigned once_calls;
+static void native_once_initializer(ppu_context*) {
+    ++once_calls;
+    once_entered.store(true);
+    while (!once_release.load()) std::this_thread::yield();
+    vm_write32(0x39600, 0xC001C0DE);
+}
+static void synchronous_guest(uint32_t opd, uint64_t a0, uint64_t a1, uint64_t a2,
+    uint64_t a3, uint64_t a4, uint64_t a5, uint64_t a6, uint64_t a7) {
+    ppu_guest_call(opd, a0,a1,a2,a3,a4,a5,a6,a7);
+}
 static void native_guest_thread(ppu_context* ctx) {
     vm_write32((u32)ctx->gpr[3], 0xC0FFEE);
     vm_write64(ctx->gpr[1] - 32, 0xCAFEBABE);
@@ -158,6 +175,7 @@ int main(int argc, char** argv) {
             ctx.gpr[1] = 0xD00FFFF0; call(ctx, "sys_ppu_thread_exit", 0);
         }
         if (!strcmp(argv[1], "raw_spu_unreviewed")) { ctx.gpr[11] = 160; lv2_syscall(&ctx); }
+        if (!strcmp(argv[1], "once_invalid")) call(ctx, "sys_ppu_thread_once", 0x40000000);
         return 1; // Every unsupported path must terminate before reaching here.
     }
     if (vm_init() != 0) return 1;
@@ -446,6 +464,100 @@ int main(int argc, char** argv) {
     ctx.gpr[11] = 161; ctx.gpr[3] = raw_id; if (!lv2_try_syscall(&ctx) || ctx.gpr[3]) return 104;
     ctx.gpr[11] = 169; ctx.gpr[3] = 6; ctx.gpr[4] = 0; lv2_syscall(&ctx);
     if (ctx.gpr[3]) return 105;
+    const auto once_opd = reserved_a + 0x2000, once_control = once_opd + 0x20;
+    vm_write32(once_opd, 0x12480); vm_write32(once_opd + 4, 0);
+    vm_write32(once_control, 0);
+    ppu_register_function(0x12480, native_once_initializer);
+    g_ps3_guest_caller = nullptr;
+    if (!sys_ppu_thread_once(once_control, once_opd) || vm_read32(once_control)) return 108;
+    g_ps3_guest_caller = synchronous_guest;
+    std::atomic<bool> second_started{false}, second_finished{false}, once_bad{false};
+    auto once_worker = [&](bool second) {
+        ppu_context local{}; local.thread_id = second ? 102 : 101;
+        local.gpr[1] = second ? 0xD040FFF0 : 0xD030FFF0;
+        g_active_ctx = &local;
+        if (second) second_started.store(true);
+        local.gpr[4] = once_opd; call(local, "sys_ppu_thread_once", once_control);
+        if (vm_read32(once_control) != 1 || vm_read32(0x39600) != 0xC001C0DE) once_bad.store(true);
+        if (second) second_finished.store(true);
+        g_active_ctx = nullptr;
+    };
+    std::thread once_first(once_worker, false);
+    while (!once_entered.load()) std::this_thread::yield();
+    if (vm_read32(once_control) != 0) once_bad.store(true);
+    std::thread once_second(once_worker, true);
+    while (!second_started.load()) std::this_thread::yield();
+    std::this_thread::sleep_for(std::chrono::milliseconds(10));
+    bool returned_early = second_finished.load();
+    once_release.store(true);
+    once_first.join(); once_second.join();
+    if (returned_early || once_bad.load() || once_calls != 1 ||
+        sys_ppu_thread_once(once_control, once_opd) || once_calls != 1) return 109;
+    const auto event_attr = reserved_a + 0x2100, event_output = event_attr + 0x20;
+    vm_write32(event_attr, 1); vm_write32(event_attr + 4, 1);
+    vm_write64(event_attr + 8, 0x4F574E5445535400ull);
+    auto create_queue = [&](uint64_t key, int size) {
+        ctx.gpr[11] = 128; ctx.gpr[3] = event_output; ctx.gpr[4] = event_attr;
+        ctx.gpr[5] = key; ctx.gpr[6] = size; lv2_syscall(&ctx);
+        return (int64_t)ctx.gpr[3];
+    };
+    vm_write32(event_output, 0xA5A5A5A5);
+    if (create_queue(0, 0) >= 0 || vm_read32(event_output) != 0xA5A5A5A5 ||
+        create_queue(0, 128) >= 0) return 110;
+    vm_write32(event_attr, 99);
+    if (create_queue(0, 127) >= 0 || vm_read32(event_output) != 0xA5A5A5A5) return 111;
+    vm_write32(event_attr, 1);
+    if (create_queue(0x12345678, 127) || !vm_read32(event_output)) return 112;
+    auto first_queue = vm_read32(event_output);
+    vm_write32(event_output, 0xA5A5A5A5);
+    if (create_queue(0x12345678, 127) >= 0 || vm_read32(event_output) != 0xA5A5A5A5) return 113;
+    if (create_queue(0, 1) || vm_read32(event_output) == first_queue) return 114;
+    ctx.gpr[11] = 134; ctx.gpr[3] = event_output; ctx.gpr[4] = 1;
+    ctx.gpr[5] = 0xFFFFFFFF0000DEADull; lv2_syscall(&ctx);
+    if (ctx.gpr[3] || !vm_read32(event_output)) return 116;
+    const auto event_port = vm_read32(event_output);
+    ctx.gpr[11] = 136; ctx.gpr[3] = event_port; ctx.gpr[4] = 0; lv2_syscall(&ctx);
+    if ((int64_t)ctx.gpr[3] >= 0) return 117;
+    ctx.gpr[3] = event_port; ctx.gpr[4] = first_queue; lv2_syscall(&ctx);
+    if (ctx.gpr[3]) return 118;
+    ctx.gpr[3] = event_port; lv2_syscall(&ctx);
+    if ((int64_t)ctx.gpr[3] >= 0) return 119;
+    const auto command_start = vm_read32(gcm_context + 8);
+    const auto control = (u32)(uintptr_t)cellGcmGetControlRegister();
+    const auto previous_put = vm_read32(control), previous_flips = cellGcm_flip_request_count();
+    ctx.gpr[4] = 7; call(ctx, "cellGcmSetPrepareFlip", gcm_context);
+    if ((int64_t)ctx.gpr[3] >= 0 || vm_read32(gcm_context + 8) != command_start) return 120;
+    ctx.gpr[4] = 0; call(ctx, "cellGcmSetPrepareFlip", gcm_context);
+    if (ctx.gpr[3] || vm_read32(gcm_context + 8) != command_start + 4 ||
+        vm_read32(control) != previous_put + 4 || cellGcm_flip_request_count() != previous_flips ||
+        cellGcm_take_flip_pending()) return 121;
+    cellGcmTickFlip();
+    if (cellGcm_flip_request_count() != previous_flips || cellGcm_take_flip_pending()) return 122;
+    cellGcm_rsx_process_fifo();
+    if (cellGcm_flip_request_count() != previous_flips + 1 || !cellGcm_take_flip_pending() ||
+        cellGcm_take_flip_pending()) return 123;
+    ctx.gpr[4] = 0x21000; ctx.gpr[5] = 0x22000; ctx.gpr[6] = 0x23000;
+    call(ctx, "_sys_spu_printf_initialize", 0x20000);
+    if (ctx.gpr[3] || ps3_spu_printf_callback(0) != 0x20000 ||
+        ps3_spu_printf_callback(1) != 0x21000 || ps3_spu_printf_callback(2) != 0x22000 ||
+        ps3_spu_printf_callback(3) != 0x23000 || ps3_spu_printf_callback(4)) return 124;
+    call(ctx, "_sys_spu_printf_finalize", 0);
+    if (ctx.gpr[3] || ps3_spu_printf_callback(0) || ps3_spu_printf_callback(1) ||
+        ps3_spu_printf_callback(2) || ps3_spu_printf_callback(3)) return 125;
+    vm_write32(0x33028, 0x40);
+    call(ctx, "cellSpursAttributeEnableSpuPrintfIfAvailable", 0x33000);
+    if (ctx.gpr[3] || vm_read32(0x33028) != 0x10000040) return 126;
+    call(ctx, "cellSpursAttributeEnableSpuPrintfIfAvailable", 0x33001);
+    if ((int64_t)ctx.gpr[3] >= 0 || vm_read32(0x33028) != 0x10000040) return 127;
+    ctx.gpr[4] = 0x18; call(ctx, "cellSpursAttributeSetSpuThreadGroupType", 0x33000);
+    if (ctx.gpr[3] || vm_read32(0x33028) != 0x30000040) return 128;
+    ctx.gpr[4] = 99; call(ctx, "cellSpursAttributeSetSpuThreadGroupType", 0x33000);
+    if ((int64_t)ctx.gpr[3] >= 0 || vm_read32(0x33028) != 0x30000040) return 129;
+    ctx.gpr[4] = 0; call(ctx, "cellSpursAttributeSetSpuThreadGroupType", 0x33000);
+    if (ctx.gpr[3] || vm_read32(0x33028) != 0x10000040) return 130;
+    vm_write32(0x33028, 0x40000040);
+    ctx.gpr[4] = 0x18; call(ctx, "cellSpursAttributeSetSpuThreadGroupType", 0x33000);
+    if ((int64_t)ctx.gpr[3] >= 0 || vm_read32(0x33028) != 0x40000040) return 131;
     vm_shutdown();
     std::puts("Verified first-callback retention, real mutual exclusion and monotonic clock");
     return 0;

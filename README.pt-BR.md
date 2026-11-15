@@ -189,7 +189,10 @@ própria; uma matriz de runners não comprova todas as arquiteturas ou execuçã
 A sessão local de **EL CHAVO KART (BLUS31198, 01.00)** chega ao CRT/construtores
 PPU originais, metadados SFO e pool NP local sem login. Ela inicializa GCM, abre
 a saída D3D12 real em 1280×720, mapeia 10 MiB de memória principal no IO RSX,
-registra três framebuffers e executa uma fence por label no FIFO RSX. Destinos
+registra três framebuffers e executa uma fence por label e um comando de limpeza
+de tela no FIFO RSX. O código original cria as threads `FlipPump` e
+`_SPU_printf_server`, uma fila de eventos e uma porta conectada.
+A parada atual é `cellSpursInitializeWithAttribute` (NID `0xAA6269A8`). Destinos
 PPU restantes e serviços não auditados param explicitamente. A janela do backend
 aberta ainda não comprova um frame do jogo, menu ou gameplay.
 A descoberta offline encontrou 47 imagens SPU embutidas: 45 geradas sem
@@ -202,6 +205,10 @@ metadados de boot em disco têm regressões sintéticas; tiles comprimidos param
 Criação/saída/join de threads PPU, consulta de prioridade e limites SPU também
 têm regressões. Esperas Windows conferem o prazo monotônico após o timer do host.
 Inicializar recursos não habilita execução SPU ainda não preparada.
+Publicação de inicializadores únicos, criação/conexão de eventos, flags SPURS
+e registro de callbacks printf têm regressões. Flips preparados aguardam seu
+consumo no FIFO; callbacks antecipados e descarte de frames para alcançar a fila
+ficam desativados na execução estrita. Paradas fatais dispensam o teardown guest.
 
 **Próxima tarefa:** concluir CRT/construtores originais através das paradas
 diagnósticas, ampliar destinos indiretos preparados e auditar serviços alcançados
