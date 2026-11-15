@@ -206,7 +206,15 @@ samples, and 256 samples after a partial depth clear. Prepared flips return thei
 original queue indices and wait for GPU submission; the current backend explicitly
 blocks more than one prepared frame in flight until display surfaces are retained
 independently. An open backend window still does not verify a game frame or menu.
-The latest retail stop is an unprepared PPU target `0x0169AA08`.
+El Chavo now prints `FIOS 1.3.5 initialized`, checks missing installation data
+without writes, and reads Brazilian Portuguese from the host UI language. Its
+latest stop is `cellGameCreateGameData` (`0x42A2E133`): writable installation and
+recovery need an approved persistence contract. Original game frames remain unverified.
+TTY output preserves binary bytes and real write counts. Read-only game-data
+checks validate paths, SFO category and output ranges; empty directories are not
+installed content. Existing-data size metadata and HDD content permission stay
+blocked. System-language queries use supported configured/host values; other
+system preferences and unmapped languages stop explicitly.
 
 All 47 discovered game SPU ELFs, two embedded firmware ELFs and two verified raw
 firmware payloads are compiled locally: 51 registrations with input/tool/output
@@ -215,9 +223,15 @@ payloads; all loaded data remains intact. This is preparation coverage, not comp
 control-flow, ISA, frame or gameplay certification.
 
 The added **God of War Collection (BCUS98229, 02.00)** has a read-only catalog and
-four locally decrypted, structurally validated PPU ELFs. Its initial EBOOT PPU AOT
-has been generated; native startup and the selector/game transitions remain untested.
-Original files and derived proprietary outputs remain outside Git.
+four locally decrypted, structurally validated PPU ELFs. Its initial EBOOT has
+9,951 PPU functions compiled locally and 12 SPU programs registered, including
+the original SPURS firmware. Native startup reaches SPURS handler creation and
+stops at `sys_net_initialize_network_ex` (`0x139A9E9B`): the existing zero-return
+placeholder cannot initialize networking. No game frame, selector transition or
+gameplay is verified. Original and derived proprietary files remain outside Git.
+Kernel mutex creation/destruction, uncontended locks, recursion and try-lock
+errors have synthetic regressions; contended blocking explicitly stops until
+guest FIFO/priority waiter ordering is implemented.
 Module availability and per-API execution approval are separate. Attribute and
 video layouts, live mapper quota/backing, real waits/callbacks and disc boot
 metadata have focused synthetic regressions; compressed tiles remain blocked.

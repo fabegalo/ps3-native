@@ -43,3 +43,45 @@ class FilesystemTests(unittest.TestCase):
             (game / 'PARAM.SFO').write_bytes(corrupt)
             result = subprocess.run([str(exe), 'fs_boot_broken', str(root)], capture_output=True, timeout=20, env=env)
             self.assertEqual(result.returncode, 0, (result.stdout, result.stderr))
+
+    def test_game_data_query_preserves_unicode_hdd_and_originals(self):
+        default = Path(__file__).resolve().parents[1] / 'build/tests/generated'
+        fixture = Path(os.environ.get('PS3_NATIVE_FIXTURE_DIR', default))
+        exe = fixture.parent / ('ps3-native-contracts.exe' if os.name == 'nt' else 'ps3-native-contracts')
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            root = base / 'disc'
+            game = root / 'PS3_GAME'
+            game.mkdir(parents=True)
+            hdd = base / ('estado ação ' + 'x' * 80)
+            hdd.mkdir()
+            env = dict(os.environ, PS3_VFS_ROOT=str(root), PS3_HDD0_ROOT=str(hdd))
+            def sfo(category):
+                key, value = b'CATEGORY\0', category.encode() + b'\0'
+                return (struct.pack('<4s4I', b'\0PSF', 0x101, 36, 36 + len(key), 1)
+                        + struct.pack('<HHIII', 0, 0x204, len(value), len(value), 0) + key + value)
+            (game / 'PARAM.SFO').write_bytes(sfo('DG'))
+            def check(mode, expected=0):
+                before = {p.relative_to(base): p.read_bytes() for p in base.rglob('*') if p.is_file()}
+                dirs = {p.relative_to(base) for p in base.rglob('*') if p.is_dir()}
+                free = shutil.disk_usage(hdd).free // 1024
+                result = subprocess.run([str(exe), mode, str(root)], capture_output=True, timeout=20, env=env)
+                self.assertEqual(result.returncode, expected, (mode, result.stdout, result.stderr))
+                self.assertEqual(before, {p.relative_to(base): p.read_bytes() for p in base.rglob('*') if p.is_file()})
+                self.assertEqual(dirs, {p.relative_to(base) for p in base.rglob('*') if p.is_dir()})
+                match = re.search(rb'\[data-space-kb\] (\d+)', result.stdout)
+                if match:
+                    self.assertLess(abs(int(match[1]) - free), 16384)
+            check('fs_data_missing')
+            check('fs_data_escape')
+            check('fs_data_permit', 86)
+            data = hdd / 'game/TEST00001'
+            data.mkdir(parents=True)
+            check('fs_data_missing')  # An empty directory is not installed game data.
+            (data / 'PARAM.SFO').write_bytes(sfo('GD'))
+            check('fs_data_present')
+            check('fs_data_size', 86)
+            (data / 'PARAM.SFO').write_bytes(sfo('DG'))
+            check('fs_data_broken')
+            (data / 'PARAM.SFO').write_bytes(b'\0PSF' + bytes(16))
+            check('fs_data_broken')

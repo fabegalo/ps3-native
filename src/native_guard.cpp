@@ -124,10 +124,11 @@ extern "C" void ps3_native_hle_gate(uint32_t nid, ppu_context* ctx) {
                                     "cellSpursAttributeEnableSpuPrintfIfAvailable",
                                     "cellSpursAttributeSetSpuThreadGroupType",
                                     "cellSysutilRegisterCallback", "cellSysutilUnregisterCallback", "cellSysutilCheckCallback",
+                                    "cellSysutilGetSystemParamInt",
                                     "cellRtcGetCurrentTick", "cellRtcGetCurrentClockLocalTime", "cellRtcGetDayOfWeek",
                                     "cellPadInit", "cellPadEnd",
                                     "sceNpInit", "sceNpTerm", "sceNpManagerGetStatus",
-                                    "cellGameBootCheck", "cellGameContentPermit",
+                                    "cellGameBootCheck", "cellGameContentPermit", "cellGameDataCheck",
                                     "cellGameGetParamString",
                                     "sys_mmapper_allocate_memory", "sys_mmapper_map_memory",
                                     "sys_ppu_thread_create", "sys_ppu_thread_exit", "sys_ppu_thread_once",
@@ -164,7 +165,7 @@ extern "C" void ps3_native_hle_gate(uint32_t nid, ppu_context* ctx) {
             static const struct { uint16_t id; const char* symbol; } providers[] = {
                 {CELL_SYSMODULE_GCM_SYS, "cellGcmGetConfiguration"},
                 {CELL_SYSMODULE_AUDIO, "cellAudioInit"},
-                {CELL_SYSMODULE_NET, "sys_net_initialize_network"},
+                {CELL_SYSMODULE_NET, "sys_net_initialize_network_ex"},
                 {CELL_SYSMODULE_NETCTL, "cellNetCtlInit"},
                 {CELL_SYSMODULE_IO, "cellPadInit"},
                 {CELL_SYSMODULE_PNGDEC, "cellPngDecCreate"},
@@ -240,6 +241,8 @@ extern "C" void ps3_native_syscall_gate(ppu_context* ctx) {
         guest_backed((uint32_t)ctx->gpr[4], 32) &&
         vm_read32((uint32_t)ctx->gpr[4] + 4) == 0x200) return;
     if (number == 91) return;
+    if (number >= 100 && number <= 104) return;
+    if (number == 403) return;
     if (number == 130) return;
     if (number == 138) return;
     if (number == 251) return;

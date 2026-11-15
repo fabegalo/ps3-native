@@ -157,6 +157,10 @@ void game_boot(ppu_context* ctx) {
         (CellGameContentSize*)(uintptr_t)(u32)ctx->gpr[5], (char*)(uintptr_t)(u32)ctx->gpr[6]);
     ctx->gpr[3] = (uint64_t)(int64_t)rc;
 }
+void system_param(ppu_context* ctx) {
+    if (ctx->gpr[4] > UINT32_MAX) { ctx->gpr[3] = (u64)(s64)CELL_SYSUTIL_ERROR_VALUE; return; }
+    ctx->gpr[3] = (u64)(s64)cellSysutilGetSystemParamInt((s32)ctx->gpr[3], (u32)ctx->gpr[4]);
+}
 void game_permit(ppu_context* ctx) {
     if (cellGame_get_hdd_title_id()) {
         std::fprintf(stderr, "[native-blocked] HDD content permission needs an audited writable mount\n");
@@ -164,6 +168,50 @@ void game_permit(ppu_context* ctx) {
     }
     ctx->gpr[3] = (uint64_t)(int64_t)cellGameContentPermit((char*)(uintptr_t)(u32)ctx->gpr[3],
         (char*)(uintptr_t)(u32)ctx->gpr[4]);
+}
+void game_data(ppu_context* ctx) {
+    const auto type = (u32)ctx->gpr[3];
+    auto invalid = [&] { ctx->gpr[3] = (u64)(s64)CELL_GAME_ERROR_PARAM; };
+    if (type < 1 || type > 3 || ctx->gpr[4] > UINT32_MAX || ctx->gpr[5] > UINT32_MAX ||
+        (ctx->gpr[5] && !ps3_native_guest_range_backed((u32)ctx->gpr[5], 12))) { invalid(); return; }
+    if (type != 3) {
+        std::fprintf(stderr, "[native-blocked] unreviewed content-check type\n");
+        std::fflush(stderr); ps3_native_stop();
+    }
+    std::string name;
+    for (u32 i = 0; i < CELL_GAME_DIRNAME_SIZE; ++i) {
+        const u64 a = ctx->gpr[4] + i;
+        if (a > UINT32_MAX || !ps3_native_guest_range_backed((u32)a, 1)) { invalid(); return; }
+        const char c = (char)vm_read8(a);
+        if (!c) break;
+        name += c;
+    }
+    if (name.empty() || name.size() >= CELL_GAME_DIRNAME_SIZE || name == "." || name == ".." ||
+        name.find_first_of("/\\:") != std::string::npos) { invalid(); return; }
+    namespace fs = std::filesystem;
+    fs::path hdd;
+#ifdef _WIN32
+    if (const auto* configured = _wgetenv(L"PS3_HDD0_ROOT")) hdd = configured;
+#else
+    if (const auto* configured = std::getenv("PS3_HDD0_ROOT")) hdd = fs::u8path(configured);
+#endif
+    if (hdd.empty()) {
+        std::fprintf(stderr, "[native-blocked] content check requires an explicit HDD mount\n");
+        std::fflush(stderr); ps3_native_stop();
+    }
+    std::error_code ec;
+    auto root = fs::weakly_canonical(hdd, ec);
+    if (ec) { ctx->gpr[3] = (u64)(s64)CELL_GAME_ERROR_INTERNAL; return; }
+    fs::path target;
+    try { target = fs::weakly_canonical(root / "game" / fs::u8path(name) / "PARAM.SFO", ec); }
+    catch (const fs::filesystem_error&) { invalid(); return; }
+    if (ec) { ctx->gpr[3] = (u64)(s64)CELL_GAME_ERROR_INTERNAL; return; }
+    auto component = target.begin();
+    for (const auto& part : root) {
+        if (component == target.end() || *component++ != part) { invalid(); return; }
+    }
+    ctx->gpr[3] = (u64)(s64)cellGameDataCheck(type, (const char*)(uintptr_t)(u32)ctx->gpr[4],
+                                         (CellGameContentSize*)(uintptr_t)(u32)ctx->gpr[5]);
 }
 void game_string(ppu_context* ctx) {
     ctx->gpr[3] = (uint64_t)(int64_t)cellGameGetParamString((s32)ctx->gpr[3],
@@ -291,7 +339,9 @@ struct RegisterAdapters {
         ps3_hle_register_ctx(ps3_compute_nid("sceNpTerm"), "sceNpTerm", np_term);
         ps3_hle_register_ctx(ps3_compute_nid("sceNpManagerGetStatus"), "sceNpManagerGetStatus", np_status);
         ps3_hle_register_ctx(ps3_compute_nid("cellGameBootCheck"), "cellGameBootCheck", game_boot);
+        ps3_hle_register_ctx(ps3_compute_nid("cellSysutilGetSystemParamInt"), "cellSysutilGetSystemParamInt", system_param);
         ps3_hle_register_ctx(ps3_compute_nid("cellGameContentPermit"), "cellGameContentPermit", game_permit);
+        ps3_hle_register_ctx(ps3_compute_nid("cellGameDataCheck"), "cellGameDataCheck", game_data);
         ps3_hle_register_ctx(ps3_compute_nid("cellGameGetParamString"), "cellGameGetParamString", game_string);
         ps3_hle_register_ctx(ps3_compute_nid("cellGcmGetConfiguration"), "cellGcmGetConfiguration", gcm_config);
         ps3_hle_register_ctx(ps3_compute_nid("cellGcmGetControlRegister"), "cellGcmGetControlRegister", gcm_control);

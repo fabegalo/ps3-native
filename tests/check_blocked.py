@@ -1,7 +1,8 @@
 import subprocess
 import sys
+import os
 
-for mode in ('hle', 'ppu', 'indirect', 'syscall', 'unaudited_syscall', 'spu', 'fs_not_ready',
+for mode in ('hle', 'ppu', 'indirect', 'syscall', 'unaudited_syscall', 'mutex_shared', 'mutex_adaptive', 'mutex_contended', 'tty_channel', 'language_other', 'spu', 'fs_not_ready',
              'spu_indirect', 'spu_missing', 'spu_missing_async', 'spu_missing_job', 'sysutil_no_dispatcher',
              'provider_not_registered', 'gcm_unaudited', 'tile_compressed', 'io_unbacked',
              'callback_missing', 'callback_ct_missing', 'thread_flags', 'thread_exit_unowned', 'raw_spu_unreviewed',
@@ -10,6 +11,19 @@ for mode in ('hle', 'ppu', 'indirect', 'syscall', 'unaudited_syscall', 'spu', 'f
     result = subprocess.run([sys.argv[1], mode], capture_output=True, timeout=15)
     if result.returncode != 86 or b'[native-blocked]' not in result.stderr:
         raise AssertionError((mode, result.returncode, result.stderr[-2000:]))
+result = subprocess.run([sys.argv[1], 'tty'], capture_output=True, timeout=15)
+payload = bytes(i % 251 for i in range(0x4011))
+if result.returncode or result.stdout.count(payload) != 1:
+    raise AssertionError(('TTY actual bytes/count, binary data, invalid pointers', result.returncode, len(result.stdout)))
+for code, expected in (('pt-br', 17), ('en-gb', 18), ('zh-t', 10), ('ja', 0), ('19', 19)):
+    result = subprocess.run([sys.argv[1], 'language'], capture_output=True, timeout=15,
+                            env=dict(os.environ, PS3_LANG=code))
+    if result.returncode or f'[language-value] {expected}'.encode() not in result.stdout:
+        raise AssertionError(('system language', code, result.returncode, result.stdout, result.stderr))
+result = subprocess.run([sys.argv[1], 'language'], capture_output=True, timeout=15,
+                        env=dict(os.environ, PS3_LANG='unsupported'))
+if result.returncode != 86 or b'[native-blocked]' not in result.stderr:
+    raise AssertionError(('unmapped system language', result.returncode, result.stderr))
 result = subprocess.run([sys.argv[2], 'unsupported'], capture_output=True, timeout=15)
 if result.returncode != 86 or b'[native-blocked] unsupported SPU instruction' not in result.stderr:
     raise AssertionError(('SPU unsupported instruction', result.returncode, result.stderr[-2000:]))

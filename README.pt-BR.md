@@ -209,8 +209,16 @@ zero amostras ocluídas e 256 após limpeza parcial de profundidade. Flips prepa
 retornam os índices originais da fila e aguardam a submissão GPU. O backend atual
 para explicitamente se houver mais de um quadro preparado em voo, até que as
 superfícies de exibição sejam preservadas separadamente. Uma janela aberta ainda
-não comprova um frame do jogo ou menu. A última parada retail é o destino PPU
-não preparado `0x0169AA08`.
+não comprova um frame do jogo ou menu. El Chavo agora imprime
+`FIOS 1.3.5 initialized`, consulta a ausência de instalação sem escrever e lê
+português do Brasil do idioma da interface do host. A última parada é
+`cellGameCreateGameData` (`0x42A2E133`): instalação gravável e recuperação precisam
+do contrato de persistência aprovado. Frames originais continuam sem verificação.
+O TTY preserva bytes binários e quantidades reais. A consulta somente de leitura
+valida caminhos, categoria SFO e buffers; diretórios vazios não são instalações.
+Metadados de tamanho de dados existentes e permissão HDD continuam bloqueados.
+O idioma usa valores suportados da configuração/host; outras preferências e
+idiomas sem mapeamento param explicitamente.
 
 As 47 imagens SPU ELF descobertas no jogo, duas ELF embutidas no firmware e dois
 payloads brutos verificados estão compilados localmente: 51 registros com hashes
@@ -219,9 +227,15 @@ constantes em quatro payloads; todos os dados carregados são preservados. Isso
 comprova preparação, sem certificar fluxo completo, ISA, frames ou gameplay.
 
 O novo **God of War Collection (BCUS98229, 02.00)** tem catálogo somente de leitura
-e quatro ELF PPU extraídos localmente e validados estruturalmente. O AOT PPU do
-EBOOT inicial foi gerado; boot nativo e transições seletor/jogos ainda não foram
-testados. Originais e resultados proprietários derivados permanecem fora do Git.
+e quatro ELF PPU extraídos localmente e validados estruturalmente. O EBOOT inicial
+tem 9.951 funções PPU compiladas localmente e 12 programas SPU registrados,
+incluindo o firmware SPURS original. O boot nativo cria os handlers SPURS e para
+em `sys_net_initialize_network_ex` (`0x139A9E9B`): o retorno zero existente não
+inicializa a rede. Nenhum frame, transição para o seletor ou gameplay foi
+verificado. Originais e derivados proprietários permanecem fora do Git.
+Criação/destruição de mutexes do kernel, locks sem disputa, recursão e erros de
+try-lock têm regressões sintéticas; esperas disputadas param explicitamente até
+implementar a ordem FIFO/prioridade dos waiters guest.
 Disponibilidade de módulo e execução de cada API são verificadas separadamente.
 Layouts de atributos/vídeo, quota e backing do mapper, esperas/callbacks e
 metadados de boot em disco têm regressões sintéticas; tiles comprimidos param.
