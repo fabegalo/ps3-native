@@ -51,6 +51,9 @@ int main(int argc, char** argv) {
             if (ctx.gpr[3]._u32[0] != (cycle == 1 ? 9u : 7u) || ctx.status != SPU_STATUS_STOPPED_BY_STOP) return 25;
         }
         puts("SPU AOT variants: original lifted caller, warm-cache swaps and native results verified");
+        ctx.pc = 0x104; ctx.status = SPU_STATUS_RUNNING;
+        spu_run_with_halt(spu_indirect_branch, &ctx);
+        if (ctx.status != SPU_STATUS_STOPPED_BY_STOP || ctx.gpr[3]._u32[0] != 7u) return 26;
         vm_shutdown(); return 0;
     }
     const uint8_t input[16] = {0,0,0,41, 0,0,0,9, 0,0,0,99, 0,0,0,0};

@@ -25,9 +25,22 @@ result = subprocess.run([sys.argv[1], 'language'], capture_output=True, timeout=
 if result.returncode != 86 or b'[native-blocked]' not in result.stderr:
     raise AssertionError(('unmapped system language', result.returncode, result.stderr))
 result = subprocess.run([sys.argv[2], 'unsupported'], capture_output=True, timeout=15)
+for button, expected in (('cross', 1), ('circle', 0), ('invalid', None), (None, None)):
+    environment = dict(os.environ)
+    environment.pop('PS3_ENTER_BUTTON', None)
+    if button is not None: environment['PS3_ENTER_BUTTON'] = button
+    preference = subprocess.run([sys.argv[1], 'enter_button'], capture_output=True, timeout=15, env=environment)
+    if expected is None:
+        if preference.returncode != 86 or b'enter button requires' not in preference.stderr:
+            raise AssertionError(('missing/invalid enter preference', button, preference.returncode, preference.stderr))
+    elif preference.returncode or f'[language-value] {expected}'.encode() not in preference.stdout:
+        raise AssertionError(('enter preference', button, preference.returncode, preference.stdout, preference.stderr))
 if result.returncode != 86 or b'[native-blocked] unsupported SPU instruction' not in result.stderr:
     raise AssertionError(('SPU unsupported instruction', result.returncode, result.stderr[-2000:]))
 print('Verified HLE, direct/indirect PPU, LV2 and SPU interpreter/instruction fail-closed paths')
+result = subprocess.run([sys.argv[5], 'device_missing'], capture_output=True, timeout=15)
+if result.returncode != 86 or b'audio output cannot consume a complete block' not in result.stderr:
+    raise AssertionError(('missing audio device', result.returncode, result.stderr[-2000:]))
 for mode, expected in (('variant_mutation', b'SPU AOT variant mismatch'), ('variant_unowned', b'unprepared SPU target='),
                        ('variant_unbound', b'SPU AOT variant owner is not bound')):
     result = subprocess.run([sys.argv[2], mode], capture_output=True, timeout=15)

@@ -247,8 +247,11 @@ e uma porta guest de oito canais é aberta. O kernel WWS original agora trata
 interrupções DMA usando suas rotinas de preservação/restauração em LS 0x3FEC0.
 As variantes compiladas offline conferem os 320 bytes reais e o vínculo ao dono
 residente a cada chamada, inclusive com cache ativo; bytes desconhecidos param.
-O boot agora alcança `cellAudioPortStart`, ainda bloqueado até auditar a mistura
-de oito canais e o ritmo de consumo. Não há interpretação.
+A preparação compartilhada também compila entradas de retorno de chamadas para
+retomar tarefas SPU. A porta de oito canais inicia com mistura estéreo verificada
+e consumo real no host. SCREAM inicializa e o boot lê/descomprime dados, depois
+consulta o botão de confirmação do sistema. Use `run ... --enter-button cross`
+ou `circle` explicitamente; nenhuma preferência é inventada. Não há interpretação.
 Nenhum frame, transição para o seletor ou gameplay foi verificado.
 Originais e derivados proprietários permanecem fora do Git.
 Criação/destruição de mutexes do kernel, locks sem disputa, recursão e erros de

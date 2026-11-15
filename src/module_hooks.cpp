@@ -37,6 +37,9 @@ extern "C" int cellAudioOutputProbe(void);
 extern "C" s32 cellAudioInit(void);
 extern "C" s32 cellAudioPortOpen(const void*, u32*);
 extern "C" s32 cellAudioGetPortConfig(u32, void*);
+extern "C" s32 cellAudioPortStart(u32);
+extern "C" s32 cellAudioPortStop(u32);
+extern "C" s32 cellAudioPortClose(u32);
 extern "C" s32 sceNpTrophyInit(void*, u32, u32, u64);
 extern "C" s32 sceNpTrophyTerm(void);
 extern "C" s32 cellAudioOutGetSoundAvailability(u32, u32, u32, u32);
@@ -75,6 +78,9 @@ void audio_configure(ppu_context* ctx) {
         (void*)(uintptr_t)ctx->gpr[5], (u32)ctx->gpr[6]);
 }
 void audio_initialize(ppu_context* ctx) { ctx->gpr[3] = (u64)(s64)cellAudioInit(); }
+void audio_port_start(ppu_context* ctx) { ctx->gpr[3] = (u64)(s64)cellAudioPortStart((u32)ctx->gpr[3]); }
+void audio_port_stop(ppu_context* ctx) { ctx->gpr[3] = (u64)(s64)cellAudioPortStop((u32)ctx->gpr[3]); }
+void audio_port_close(ppu_context* ctx) { ctx->gpr[3] = (u64)(s64)cellAudioPortClose((u32)ctx->gpr[3]); }
 void audio_port_open(ppu_context* ctx) {
     if (ctx->gpr[3] > UINT32_MAX || ctx->gpr[4] > UINT32_MAX ||
         !ps3_native_guest_range_backed((u32)ctx->gpr[3], 32) ||
@@ -388,6 +394,9 @@ struct RegisterAdapters {
         ps3_hle_register_ctx(ps3_compute_nid("sceNpTrophyInit"), "sceNpTrophyInit", trophy_initialize);
         ps3_hle_register_ctx(ps3_compute_nid("cellAudioPortOpen"), "cellAudioPortOpen", audio_port_open);
         ps3_hle_register_ctx(ps3_compute_nid("cellAudioGetPortConfig"), "cellAudioGetPortConfig", audio_port_config);
+        ps3_hle_register_ctx(ps3_compute_nid("cellAudioPortStart"), "cellAudioPortStart", audio_port_start);
+        ps3_hle_register_ctx(ps3_compute_nid("cellAudioPortStop"), "cellAudioPortStop", audio_port_stop);
+        ps3_hle_register_ctx(ps3_compute_nid("cellAudioPortClose"), "cellAudioPortClose", audio_port_close);
         ps3_hle_register_ctx(ps3_compute_nid("sceNpTrophyTerm"), "sceNpTrophyTerm", trophy_terminate);
         ps3_hle_register_ctx(ps3_compute_nid("sys_prx_get_module_id_by_name"), "sys_prx_get_module_id_by_name", module_by_name);
         ps3_hle_register_ctx(ps3_compute_nid("_sys_memset"), "_sys_memset", memory_set);

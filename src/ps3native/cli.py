@@ -37,6 +37,8 @@ def main(argv=None):
     for command in ('inspect', 'import', 'prepare', 'run'):
         p = sub.add_parser(command)
         p.add_argument('source', nargs='?', type=Path)
+        if command == 'run':
+            p.add_argument('--enter-button', choices=['cross', 'circle'], help='Explicit confirmation-button preference')
         if command in ('prepare', 'run'):
             p.add_argument('--fixture', choices=['ppu', 'spu'])
             p.add_argument('--build-dir', type=Path, default=ROOT / 'build')
@@ -97,7 +99,7 @@ def main(argv=None):
         elif args.command == 'run':
             receipt_path = args.build_dir / 'module/receipt.json'
             if receipt_path.is_file() and json.loads(receipt_path.read_text(encoding='utf-8'))['original_id'] == result['id']:
-                result = run(ROOT, result, args.build_dir.resolve())
+                result = run(ROOT, result, args.build_dir.resolve(), enter_button=args.enter_button)
                 print(json.dumps(result, ensure_ascii=True, indent=2))
                 return result['exit'] if not result['stop'] else 3
             result['blocker'] = 'No hash-bound native module prepared for this input revision.'

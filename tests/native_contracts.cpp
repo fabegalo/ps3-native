@@ -193,30 +193,49 @@ int main(int argc, char** argv) {
             vm_write32(output, 0xA5A5A5A5);
             audio.gpr[4] = output; call(audio, "cellAudioPortOpen", param);
             if ((u32)audio.gpr[3] != (u32)CELL_AUDIO_ERROR_PORT_FULL || vm_read32(output) != 0xA5A5A5A5) return 8;
-            for (u32 port = 0; port < 8; ++port) if (cellAudioPortClose(port)) return 9;
+            call(audio, "cellAudioPortStart", 0);
+            if (audio.gpr[3]) return 11;
+            audio.gpr[4] = config; call(audio, "cellAudioGetPortConfig", 0);
+            if (audio.gpr[3] || vm_read32(config + 4) != 2) return 12;
+            const u32 read_index = vm_read32(config);
+            const auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(500);
+            while (!vm_read64(read_index) && std::chrono::steady_clock::now() < deadline)
+                std::this_thread::sleep_for(std::chrono::milliseconds(2));
+            if (!vm_read64(read_index) || vm_read64(read_index) >= 8) return 13;
+            call(audio, "cellAudioPortStop", 0);
+            if (audio.gpr[3]) return 14;
+            const u64 stopped_index = vm_read64(read_index);
+            std::this_thread::sleep_for(std::chrono::milliseconds(20));
+            if (vm_read64(read_index) != stopped_index) return 15;
+            for (u32 port = 0; port < 8; ++port) {
+                call(audio, "cellAudioPortClose", port);
+                if (audio.gpr[3]) return 9;
+            }
             if (ps3_native_guest_range_backed(first_buffer, 4)) return 10;
             std::this_thread::sleep_for(std::chrono::milliseconds(20));
             if (cellAudioQuit() || (u32)cellAudioQuit() != (u32)CELL_AUDIO_ERROR_NOT_INIT) return 3;
         }
         vm_shutdown();
-        std::puts("Verified real host audio lifecycle and eight guest ports twice; no game PCM supplied");
+        std::puts("Verified real host audio consumption/start/stop and eight guest ports twice; no game PCM supplied");
         return 0;
     }
     ppu_context ctx{};
     ctx.gpr[1] = 0xD00FFFF0;
-    if (argc == 2 && (!strcmp(argv[1], "language") || !strcmp(argv[1], "language_other"))) {
+    if (argc == 2 && (!strcmp(argv[1], "language") || !strcmp(argv[1], "language_other") || !strcmp(argv[1], "enter_button"))) {
         if (vm_init()) return 1;
         g_ppu_main_stack_addr = 0xD0100000; g_ppu_main_stack_size = 0x20000;
         const u32 output = 0xD0101004;
         for (u32 a = output - 4; a <= output + 4; a += 4) vm_write32(a, 0xA5A5A5A5);
         ctx.gpr[4] = output;
-        call(ctx, "cellSysutilGetSystemParamInt", !strcmp(argv[1], "language_other") ? 0x116 : 0x111);
+        const bool button = !strcmp(argv[1], "enter_button");
+        const u32 preference = button ? 0x112 : !strcmp(argv[1], "language_other") ? 0x116 : 0x111;
+        call(ctx, "cellSysutilGetSystemParamInt", preference);
         const auto language = vm_read32(output);
-        if (ctx.gpr[3] || language > 19 || vm_read32(output - 4) != 0xA5A5A5A5 ||
+        if (ctx.gpr[3] || language > (button ? 1u : 19u) || vm_read32(output - 4) != 0xA5A5A5A5 ||
             vm_read32(output + 4) != 0xA5A5A5A5) return 1;
         std::printf("[language-value] %u\n", language);
         for (const u64 bad : {0ull, 0xFFFFFFFEull, 0x1D0101004ull}) {
-            ctx.gpr[4] = bad; call(ctx, "cellSysutilGetSystemParamInt", 0x111);
+            ctx.gpr[4] = bad; call(ctx, "cellSysutilGetSystemParamInt", preference);
             if ((u32)ctx.gpr[3] != (u32)CELL_SYSUTIL_ERROR_VALUE || vm_read32(output) != language) return 2;
         }
         vm_shutdown(); return 0;

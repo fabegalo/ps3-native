@@ -46,7 +46,9 @@ def bind(root, original, elf, generation, build):
     return receipt
 
 
-def run(root, original, build, seconds=20):
+def run(root, original, build, seconds=20, *, enter_button=None):
+    if enter_button is not None and enter_button not in ('cross', 'circle'):
+        raise ValueError('Enter button must be cross or circle')
     _, lock = dependency(root)
     receipt = json.loads((build / 'module/receipt.json').read_text(encoding='utf-8'))
     if receipt.get('schema') != 2:
@@ -65,6 +67,7 @@ def run(root, original, build, seconds=20):
     env = os.environ.copy()
     # Diagnostic overrides in the upstream must not silently change guest behavior.
     env = {k: v for k, v in env.items() if not k.upper().startswith(('YDKJ_', 'PPU_', 'SPU_', 'SPURS_', 'PS3_', 'LBP_', 'GH3_', 'FS_', 'RSX_', 'GCM_', 'PSNR_', 'A2O_', 'SYS_HEAP_', 'TTY_'))}
+    if enter_button is not None: env['PS3_ENTER_BUTTON'] = enter_button
     source = Path(original['source'])
     vfs = source.parent if source.name == 'PS3_GAME' or source.is_file() else source
     env.update(PS3_VFS_ROOT=str(vfs), PS3_HDD0_ROOT=str(state / 'dev_hdd0'),

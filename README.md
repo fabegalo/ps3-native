@@ -242,8 +242,11 @@ now start; the host stereo mixer starts and an eight-channel guest port opens.
 The original WWS kernel now handles DMA interrupts using its register save/restore
 routines at LS 0x3FEC0. Offline-compiled variants check all 320 actual bytes and
 resident ownership on every call, including cache hits; unknown bytes stop.
-Startup now reaches the gated `cellAudioPortStart`, whose eight-channel mixing
-and consumption timing still require audit. No interpreter is used.
+The shared preparation also compiles call-return entries for resumed SPU tasks.
+The eight-channel audio port starts with verified stereo mixing and real host
+consumption. SCREAM initializes and startup reads/decompresses data, then requests
+the system confirmation-button preference. Pass `run ... --enter-button cross`
+or `circle` explicitly; no preference is invented. No interpreter is used.
 No game frame, selector transition or gameplay is verified. Original and derived
 proprietary files remain outside Git.
 Kernel mutex creation/destruction, uncontended locks, recursion and try-lock

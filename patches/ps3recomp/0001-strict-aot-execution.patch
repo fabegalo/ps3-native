@@ -5245,7 +5245,7 @@
  from pathlib import Path
  import shutil
  import struct
-@@ -40,6 +41,49 @@
+@@ -40,6 +41,51 @@
  
  
  class Pipeline(unittest.TestCase):
@@ -5268,6 +5268,8 @@
 +        self.assertEqual(result.returncode, 0, result.stderr)
 +        self.assertTrue(self.manifest()['complete'])
 +        self.assertEqual(len(self.manifest()['code_variants']), 2)
++        prepared_owner = next(p for p in self.manifest()['programs'] if p['sha256'] == digest(owner))
++        self.assertIn(0x104, [s for s, _ in prepared_owner['diagnostics']['functions']])
 +        registry = (self.output / 'spu_workloads.c').read_text()
 +        self.assertIn('memcmp(ctx->ls', registry)
 +        for blob in (first, second):
@@ -5295,7 +5297,7 @@
      def setUp(self):
          self.temp = tempfile.TemporaryDirectory()
          self.addCleanup(self.temp.cleanup)
-@@ -69,12 +113,14 @@
+@@ -69,12 +115,14 @@
          workload = workload[workload.index('uint64_t spu_workload_fingerprint('):
                              workload.index('/* ---- dispatch')]
          (self.root / 'workload.c').write_text('#include "spu_workload.h"\n#include <stdio.h>\n#include <string.h>\n' + workload)
@@ -5314,7 +5316,7 @@
          return runtime
  
      def test_exact_dedup_and_same_address_isolation(self):
-@@ -112,6 +158,44 @@
+@@ -112,6 +160,44 @@
          registered = next(p for p in report['programs'] if p['status'] == 'registered')
          source = (self.output / registered['name'] / 'spu_recomp.c').read_text()
          self.assertNotIn('TODO spu', source)
@@ -5359,7 +5361,7 @@
  
      def test_fresh_rerun_cannot_register_stale_code(self):
          first = self.run_pipeline(('input.bin', elf(7)))
-@@ -273,11 +357,16 @@
+@@ -273,11 +359,16 @@
                       f'assert(spu_lookup(0x100, id{i}) == f{i});',
                       # Each context contains a 256 KB local store. Keep the
                       # four fixtures off Windows' default 1 MB main stack.
@@ -5378,7 +5380,7 @@
              'extern void spu_register_all(void);\n'
              'extern spu_lifted_entry_fn spu_lookup(uint32_t, int);\n'
              'SPU_THREAD_LOCAL void (*g_spu_trampoline_fn)(spu_context*);\n'
-@@ -302,7 +391,8 @@
+@@ -302,7 +393,8 @@
          self.assertEqual(configured.returncode, 0, configured.stderr + configured.stdout)
          built = subprocess.run([cmake, '--build', str(build)], capture_output=True, text=True)
          self.assertEqual(built.returncode, 0, built.stderr + built.stdout)
@@ -5579,7 +5581,15 @@
                  functions, (offset, base, size) = detect_functions(blob, verbose=False)
                  bounds = sorted({(max(s, a), min(e, b)) for s, e in functions for a, b in ranges
                                   if max(s, a) < min(e, b)})
-@@ -210,7 +242,8 @@
+@@ -195,6 +227,7 @@
+                            '--report', str(outdir / 'lift.json'), '--output', str(outdir)]
+                 if extra.get(name):
+                     command += ['--extra-funcs', ','.join(hex(a) for a in extra[name])]
++                command += ['--return-entries']
+                 if getattr(args, 'merge_chunks', False):
+                     command += ['--merge-chunks']
+                 result = subprocess.run(command, capture_output=True, text=True)
+@@ -210,7 +243,8 @@
                      raise ValueError('lifter did not generate the ELF entry')
                  if any(not any(a <= s < e <= b for a, b in ranges) for s, e in diagnostics['functions']):
                      raise ValueError('generated function extends beyond executable ranges')
@@ -5589,7 +5599,7 @@
                      raise ValueError('direct branch/call targets lack generated function entries')
                  for filename in ['spu_recomp.c', 'spu_recomp.h']:
                      if not (outdir / filename).is_file():
-@@ -228,6 +261,35 @@
+@@ -228,6 +262,35 @@
              imgs.append((name, prefix, int(program['fingerprint'], 16), info['entry']))
              image_ids[name] = program['image_id']
              text_fps[name] = int(program['text_fingerprint'], 16)
@@ -5625,7 +5635,7 @@
          # Default runtime capacity is 256 registrations, including text aliases.
          if sum(len({fp, text_fps[name]}) for name, _, fp, _ in imgs) > 256:
              report['errors'].append('generated registrations exceed default runtime capacity (256)')
-@@ -240,7 +302,7 @@
+@@ -240,7 +303,7 @@
          if usable:
              registry_args = type('RegistryArgs', (), dict(out=str(stage / registry.name), title='discovered SPU programs',
                                                          register_fn=args.register_fn, constructor=args.constructor))()
@@ -6789,7 +6799,7 @@
  {
 +#ifdef PS3_NATIVE_STRICT
 +    extern int ps3_native_guest_range_backed(uint32_t, uint32_t);
-+    if (id != CELL_SYSUTIL_SYSTEMPARAM_ID_LANG) {
++    if (id != CELL_SYSUTIL_SYSTEMPARAM_ID_LANG && id != CELL_SYSUTIL_SYSTEMPARAM_ID_ENTER_BUTTON_ASSIGN) {
 +        extern void ps3_native_stop(void);
 +        fprintf(stderr, "[native-blocked] system preference requires audit id=0x%X\n", id);
 +        fflush(stderr); ps3_native_stop();
@@ -6798,7 +6808,28 @@
 +#endif
      if (!value_ea)
          return CELL_SYSUTIL_ERROR_VALUE;
-@@ -450,5 +470,12 @@
+@@ -424,6 +444,20 @@
+         break;
+     case CELL_SYSUTIL_SYSTEMPARAM_ID_ENTER_BUTTON_ASSIGN:
++#ifdef PS3_NATIVE_STRICT
++    {
++        const char* configured = getenv("PS3_ENTER_BUTTON");
++        if (configured && !strcmp(configured, "cross")) v = CELL_SYSUTIL_ENTER_BUTTON_ASSIGN_CROSS;
++        else if (configured && !strcmp(configured, "circle")) v = CELL_SYSUTIL_ENTER_BUTTON_ASSIGN_CIRCLE;
++        else {
++            extern void ps3_native_stop(void);
++            fprintf(stderr, "[native-blocked] enter button requires an explicit cross/circle preference\n");
++            fflush(stderr); ps3_native_stop();
++        }
++        break;
++    }
++#else
+         v = CELL_SYSUTIL_ENTER_BUTTON_ASSIGN_CROSS;
+         break;
++#endif
+     case CELL_SYSUTIL_SYSTEMPARAM_ID_DATE_FORMAT:    v = 0; break; /* YYYYMMDD */
+     case CELL_SYSUTIL_SYSTEMPARAM_ID_TIME_FORMAT:    v = 0; break; /* 24-hour */
+@@ -450,5 +484,12 @@
      }
  
 +#ifdef PS3_NATIVE_STRICT
@@ -7165,7 +7196,59 @@
  
 --- a/libs/audio/cellAudio.c
 +++ b/libs/audio/cellAudio.c
-@@ -238,6 +238,8 @@
+@@ -31,6 +31,16 @@
+                                             uint64_t data2,  uint64_t data3);
+ extern uint32_t sys_event_find_queue_by_key(uint64_t key);
+ extern uint32_t sys_event_queue_create_direct(uint64_t key, int32_t size);
++
++static void audio_clear_buffer(u32 address, u32 size)
++{
++#ifdef PS3_NATIVE_STRICT
++    extern void ppu_memset_coherent(u32, int, u32);
++    ppu_memset_coherent(address, 0, size);
++#else
++    memset(vm_base + address, 0, size);
++#endif
++}
+ 
+ /* ---------------------------------------------------------------------------
+  * Backend selection
+@@ -161,6 +171,15 @@
+ /* Output mix buffer (stereo, one block worth) */
+ static float s_mix_buffer[CELL_AUDIO_BLOCK_SAMPLES * 2];
+ 
++#ifdef PS3_NATIVE_STRICT
++static _Noreturn void audio_output_failed(void)
++{
++    extern void ps3_native_stop(void);
++    fprintf(stderr, "[native-blocked] audio output cannot consume a complete block\n");
++    fflush(stderr); ps3_native_stop();
++}
++#endif
++
+ /* ---------------------------------------------------------------------------
+  * Host audio output backend
+  * -----------------------------------------------------------------------*/
+@@ -207,9 +226,15 @@
+ static void audio_backend_submit(const float* stereo_samples, u32 num_samples)
+ {
+     if (s_sdl_audio_dev) {
+-        SDL_QueueAudio(s_sdl_audio_dev, stereo_samples,
+-                       num_samples * 2 * sizeof(float));
+-    }
++        int result = SDL_QueueAudio(s_sdl_audio_dev, stereo_samples,
++                                   num_samples * 2 * sizeof(float));
++#ifdef PS3_NATIVE_STRICT
++        if (result) audio_output_failed();
++#endif
++    }
++#ifdef PS3_NATIVE_STRICT
++    else audio_output_failed();
++#endif
+ }
+ 
+ /* SDL queues without bound: keep about four blocks ahead of the device. */
+@@ -238,6 +263,8 @@
  static IAudioRenderClient*  s_wasapi_render = NULL;
  static HANDLE               s_wasapi_event  = NULL;
  static UINT32               s_wasapi_buf_frames = 0;
@@ -7174,7 +7257,7 @@
  
  static int audio_backend_init(void)
  {
-@@ -248,6 +250,10 @@
+@@ -248,6 +275,10 @@
          printf("[cellAudio] CoInitializeEx failed: 0x%08lX\n", hr);
          return -1;
      }
@@ -7185,7 +7268,7 @@
  
      IMMDeviceEnumerator* enumerator = NULL;
      hr = CoCreateInstance(&CLSID_MMDeviceEnumerator, NULL, CLSCTX_ALL,
-@@ -326,10 +332,12 @@
+@@ -326,10 +357,12 @@
          CloseHandle(s_wasapi_event);
          s_wasapi_event = NULL;
      } else {
@@ -7202,7 +7285,7 @@
  
      hr = s_wasapi_client->lpVtbl->GetService(
          s_wasapi_client, &IID_IAudioRenderClient, (void**)&s_wasapi_render);
-@@ -340,12 +348,20 @@
+@@ -340,12 +373,20 @@
          return -1;
      }
  
@@ -7224,7 +7307,7 @@
      if (s_wasapi_client) {
          s_wasapi_client->lpVtbl->Stop(s_wasapi_client);
      }
-@@ -361,6 +377,7 @@
+@@ -361,17 +402,29 @@
          CloseHandle(s_wasapi_event);
          s_wasapi_event = NULL;
      }
@@ -7232,7 +7315,48 @@
  }
  
  static void audio_backend_submit(const float* stereo_samples, u32 num_samples)
-@@ -417,6 +434,52 @@
+ {
+-    if (!s_wasapi_render) return;
++    if (!s_wasapi_render) {
++#ifdef PS3_NATIVE_STRICT
++        audio_output_failed();
++#endif
++        return;
++    }
+ 
+     UINT32 padding = 0;
+-    s_wasapi_client->lpVtbl->GetCurrentPadding(s_wasapi_client, &padding);
++    HRESULT padding_result = s_wasapi_client->lpVtbl->GetCurrentPadding(s_wasapi_client, &padding);
++#ifdef PS3_NATIVE_STRICT
++    if (FAILED(padding_result) || padding > s_wasapi_buf_frames) audio_output_failed();
++#endif
+ 
+     UINT32 available = s_wasapi_buf_frames - padding;
+     if (num_samples > available) {
++#ifdef PS3_NATIVE_STRICT
++        audio_output_failed();
++#endif
+         g_audio_dropped += num_samples - available;
+         num_samples = available;
+     }
+@@ -387,9 +440,13 @@
+         static int mute = -1;
+         if (mute < 0) mute = getenv("PS3_MUTE") ? 1 : 0;
+         memcpy(buf, stereo_samples, num_samples * 2 * sizeof(float));
+-        s_wasapi_render->lpVtbl->ReleaseBuffer(s_wasapi_render, num_samples,
+-                                               mute ? AUDCLNT_BUFFERFLAGS_SILENT : 0);
+-    }
++        hr = s_wasapi_render->lpVtbl->ReleaseBuffer(s_wasapi_render, num_samples,
++                                                  mute ? AUDCLNT_BUFFERFLAGS_SILENT : 0);
++    }
++#ifdef PS3_NATIVE_STRICT
++    else audio_output_failed();
++    if (FAILED(hr)) audio_output_failed();
++#endif
+ }
+ 
+ /* Frames the device can take right now; -1 with no device open. */
+@@ -417,6 +474,52 @@
  
  
  #endif /* AUDIO_BACKEND_WASAPI */
@@ -7285,25 +7409,86 @@
  
  /* ---------------------------------------------------------------------------
   * Mixing
-@@ -621,7 +684,7 @@
+@@ -468,7 +571,7 @@
+         u32 nch    = (u32)port->param.nChannel;
+         u32 nblock = (u32)port->param.nBlock;
+         float level = port->param.level;
+-        if (level <= 0.0f) level = 1.0f;
++        if (level < 0.0f) level = 0.0f;
+         if (level > 1.0f) level = 1.0f;
+ 
+         /* Read one block at the current read_index */
+@@ -516,16 +619,14 @@
+                 left = right = ld_be_f32(&src[s]) * level;
+             }
+ 
+-            /* If 7.1, mix center and other channels into stereo */
++            /* PS3 channel order is FL FR C LFE SL SR RL RR. The stereo
++             * reference matrix excludes LFE and attenuates front/other lanes. */
+             if (nch == 8) {
+-                float center = ld_be_f32(&src[s * 8 + 2]) * level * 0.707f;
+-                float lfe    = ld_be_f32(&src[s * 8 + 3]) * level * 0.5f;
+-                float rl     = ld_be_f32(&src[s * 8 + 4]) * level * 0.5f;
+-                float rr     = ld_be_f32(&src[s * 8 + 5]) * level * 0.5f;
+-                float sl     = ld_be_f32(&src[s * 8 + 6]) * level * 0.3f;
+-                float sr     = ld_be_f32(&src[s * 8 + 7]) * level * 0.3f;
+-                left  += center + lfe + rl + sl;
+-                right += center + lfe + rr + sr;
++                float common = ld_be_f32(&src[s * 8 + 2]) * level * 0.5f;
++                left = left * 0.707f + common + level * 0.5f *
++                    (ld_be_f32(&src[s * 8 + 4]) + ld_be_f32(&src[s * 8 + 6]));
++                right = right * 0.707f + common + level * 0.5f *
++                    (ld_be_f32(&src[s * 8 + 5]) + ld_be_f32(&src[s * 8 + 7]));
+             }
+ 
+             s_mix_buffer[s * 2 + 0] += left;
+@@ -535,7 +636,8 @@
+         /* Firmware clears a ring-buffer block after consuming it. Besides
+          * preventing stale PCM from replaying when a producer stalls, the
+          * cleared block is an observable consumption signal for producers. */
+-        memset(src, 0, CELL_AUDIO_BLOCK_SAMPLES * nch * sizeof(float));
++        audio_clear_buffer((u32)port->port_addr + block_offset * sizeof(float),
++                           CELL_AUDIO_BLOCK_SAMPLES * nch * sizeof(float));
+ 
+         /* Keep the monotonic counter for tags/timestamps, but publish the
+          * ring slot to the guest. SurMixer multiplies this value by the block
+@@ -621,8 +723,11 @@
       * With no device, pace on the performance counter instead. */
      LARGE_INTEGER qf, q0; QueryPerformanceFrequency(&qf); QueryPerformanceCounter(&q0);
      unsigned long long blocks = 0;
 -    while (s_mix_thread_running) {
 +    while (__atomic_load_n(&s_mix_thread_running, __ATOMIC_ACQUIRE)) {
          const int room = audio_backend_room();
++#ifdef PS3_NATIVE_STRICT
++        if (room < 0) audio_output_failed();
++#endif
          if (room >= 0 && room < CELL_AUDIO_BLOCK_SAMPLES) { audio_backend_wait(); continue; }
  #if AUDIO_BACKEND_WASAPI
-@@ -684,7 +747,7 @@
+         /* Device queue under half a block: it is about to play silence (an
+@@ -684,7 +789,12 @@
      printf("[cellAudio] Mixing thread started\n");
  
      unsigned long blocks = 0; float peak = 0.0f;
 -    while (s_mix_thread_running) {
 +    while (__atomic_load_n(&s_mix_thread_running, __ATOMIC_ACQUIRE)) {
++        const int room = audio_backend_room();
++#ifdef PS3_NATIVE_STRICT
++        if (room < 0) audio_output_failed();
++#endif
++        if (room >= 0 && room < CELL_AUDIO_BLOCK_SAMPLES) { audio_backend_wait(); continue; }
          audio_mix_one_block();
          audio_dump_mix();
          audio_backend_submit(s_mix_buffer, CELL_AUDIO_BLOCK_SAMPLES);
-@@ -711,18 +774,18 @@
+@@ -697,7 +807,7 @@
+           } }
+ 
+         u32 queued = audio_backend_queued_samples();
+-        if (queued > CELL_AUDIO_BLOCK_SAMPLES * 4) {
++        if (queued >= CELL_AUDIO_BLOCK_SAMPLES * 4) {
+             usleep(5000);
+         } else {
+             usleep(2000);
+@@ -711,18 +821,18 @@
  
  static int audio_start_mix_thread(void)
  {
@@ -7325,7 +7510,7 @@
          return -1;
      }
      s_mix_thread_live = 1;
-@@ -732,10 +795,18 @@
+@@ -732,10 +842,18 @@
  
  static void audio_stop_mix_thread(void)
  {
@@ -7345,7 +7530,7 @@
          CloseHandle(s_mix_thread);
          s_mix_thread = NULL;
      }
-@@ -764,6 +835,11 @@
+@@ -764,6 +882,11 @@
       * waiting on work we cannot yet complete; failing here lets a title take its
       * silent path and keep going. Diagnostic first, workaround second. */
      if (getenv("PS3_NO_AUDIO")) {
@@ -7357,7 +7542,7 @@
          printf("[cellAudio] PS3_NO_AUDIO -- reporting audio unavailable\n");
          return (s32)CELL_AUDIO_ERROR_NOT_INIT;
      }
-@@ -777,6 +853,10 @@
+@@ -777,6 +900,10 @@
      mutex_init(&s_audio_mutex);
  
      if (audio_backend_init() < 0) {
@@ -7368,7 +7553,7 @@
          printf("[cellAudio] WARNING: Audio backend init failed, continuing silently\n");
          /* Don't fail -- games should still run without audio */
      }
-@@ -792,10 +872,15 @@
+@@ -792,10 +919,15 @@
        s_audio_start_us = (u64)ts.tv_sec * 1000000ULL + (u64)ts.tv_nsec / 1000ULL; }
  #endif
      if (audio_start_mix_thread() < 0) {
@@ -7384,7 +7569,7 @@
      return CELL_OK;
  }
  
-@@ -867,6 +952,9 @@
+@@ -867,6 +999,9 @@
      memset(&port->param, 0, sizeof(port->param));
      port->param.nChannel = nch;
      port->param.nBlock   = nblk;
@@ -7394,12 +7579,19 @@
      port->read_index  = 0;
      port->write_index = 0;
  
-@@ -900,6 +988,22 @@
+@@ -890,7 +1025,7 @@
+     }
  
-     mutex_unlock(&s_audio_mutex);
+     port->buffer = (float*)(vm_base + guest_buf);     /* host view of guest buffer */
+-    memset(port->buffer, 0, port->buf_size);
++    audio_clear_buffer(guest_buf, port->buf_size);
+     vm_write64(guest_ridx, 0);                        /* read index counter (u64, see below) */
+ 
+     port->port_addr     = guest_buf;
+@@ -902,6 +1037,22 @@
      return CELL_OK;
-+}
-+
+ }
+ 
 +int cellAudioGuestRangeBacked(u32 address, u32 size)
 +{
 +    if (!s_audio_initialized || !size) return 0;
@@ -7414,9 +7606,70 @@
 +    }
 +    mutex_unlock(&s_audio_mutex);
 +    return backed;
- }
- 
++}
++
  s32 cellAudioPortClose(u32 portNum)
+ {
+     printf("[cellAudio] PortClose(port=%u)\n", portNum);
+@@ -910,7 +1061,7 @@
+         return CELL_AUDIO_ERROR_NOT_INIT;
+ 
+     if (portNum >= CELL_AUDIO_PORT_MAX)
+-        return CELL_AUDIO_ERROR_PORT_NOT_OPEN;
++        return CELL_AUDIO_ERROR_PARAM;
+ 
+     mutex_lock(&s_audio_mutex);
+ 
+@@ -938,13 +1089,19 @@
+     if (!s_audio_initialized)
+         return CELL_AUDIO_ERROR_NOT_INIT;
+ 
+-    if (portNum >= CELL_AUDIO_PORT_MAX || !s_ports[portNum].in_use)
++    if (portNum >= CELL_AUDIO_PORT_MAX)
++        return CELL_AUDIO_ERROR_PARAM;
++
++    mutex_lock(&s_audio_mutex);
++    if (!s_ports[portNum].in_use) {
++        mutex_unlock(&s_audio_mutex);
+         return CELL_AUDIO_ERROR_PORT_NOT_OPEN;
+-
+-    if (s_ports[portNum].running)
++    }
++    if (s_ports[portNum].running) {
++        mutex_unlock(&s_audio_mutex);
+         return CELL_AUDIO_ERROR_PORT_ALREADY_RUN;
+-
+-    mutex_lock(&s_audio_mutex);
++    }
++    audio_clear_buffer((u32)s_ports[portNum].port_addr, s_ports[portNum].buf_size);
+     s_ports[portNum].running = 1;
+     mutex_unlock(&s_audio_mutex);
+ 
+@@ -958,13 +1115,18 @@
+     if (!s_audio_initialized)
+         return CELL_AUDIO_ERROR_NOT_INIT;
+ 
+-    if (portNum >= CELL_AUDIO_PORT_MAX || !s_ports[portNum].in_use)
+-        return CELL_AUDIO_ERROR_PORT_NOT_OPEN;
+-
+-    if (!s_ports[portNum].running)
++    if (portNum >= CELL_AUDIO_PORT_MAX)
++        return CELL_AUDIO_ERROR_PARAM;
++
++    mutex_lock(&s_audio_mutex);
++    if (!s_ports[portNum].in_use) {
++        mutex_unlock(&s_audio_mutex);
+         return CELL_AUDIO_ERROR_PORT_NOT_RUN;
+-
+-    mutex_lock(&s_audio_mutex);
++    }
++    if (!s_ports[portNum].running) {
++        mutex_unlock(&s_audio_mutex);
++        return CELL_AUDIO_ERROR_PORT_NOT_RUN;
++    }
+     s_ports[portNum].running = 0;
+     mutex_unlock(&s_audio_mutex);
+ 
 --- a/libs/misc/cellAvconfExt.c
 +++ b/libs/misc/cellAvconfExt.c
 @@ -27,6 +27,13 @@
