@@ -1,4 +1,5 @@
 #include <cstdio>
+#include <cstring>
 #include "ppu_recomp.h"
 #include "ps3emu/nid.h"
 #include "cellSysmodule.h"
@@ -13,17 +14,53 @@
 #include <chrono>
 #include "../network/sceNp.h"
 #include "cellSpurs.h"
+#include "native_lle.h"
 extern "C" s32 _cellSpursAttributeInitialize(CellSpursAttribute*, u32, u32, s32, s32, s32, u8);
 extern "C" void ps3_hle_register_ctx(uint32_t, const char*, void (*)(ppu_context*));
 extern "C" [[noreturn]] void ps3_native_stop(void);
 extern "C" int sys_memory_range_backed(uint32_t, uint32_t);
 extern "C" int ps3_sysprx_heap_range_backed(uint32_t, uint32_t);
+extern "C" __attribute__((weak)) const NativeLleModule* ps3_native_firmware_definition(void) { return nullptr; }
 extern "C" s32 sys_ppu_thread_once(u32, u32);
 extern "C" s32 _sys_spu_printf_initialize(u32, u32, u32, u32);
 extern "C" s32 _sys_spu_printf_finalize(void);
+extern "C" void* _sys_memset(void*, s32, u32);
+extern "C" void* _sys_memcpy(void*, const void*, u32);
 // Standalone CPU harnesses have no presentation backend.
 extern "C" __attribute__((weak)) int ppu_host_video_state(void) { return 0; }
 namespace {
+void memory_set(ppu_context* ctx) {
+    ctx->gpr[3] = (u32)(uintptr_t)_sys_memset((void*)(uintptr_t)(u32)ctx->gpr[3], (s32)ctx->gpr[4], (u32)ctx->gpr[5]);
+}
+void memory_copy(ppu_context* ctx) {
+    ctx->gpr[3] = (u32)(uintptr_t)_sys_memcpy((void*)(uintptr_t)(u32)ctx->gpr[3],
+        (const void*)(uintptr_t)(u32)ctx->gpr[4], (u32)ctx->gpr[5]);
+}
+void string_copy(ppu_context* ctx) {
+    const auto src = (u32)ctx->gpr[4];
+    const auto size = (u32)std::strlen(reinterpret_cast<const char*>(vm_base + src)) + 1;
+    ctx->gpr[3] = (u32)(uintptr_t)_sys_memcpy((void*)(uintptr_t)(u32)ctx->gpr[3],
+        (const void*)(uintptr_t)src, size);
+}
+void string_length(ppu_context* ctx) {
+    ctx->gpr[3] = std::strlen(reinterpret_cast<const char*>(vm_base + (u32)ctx->gpr[3]));
+}
+void string_append(ppu_context* ctx) {
+    const auto dst = (u32)ctx->gpr[3], src = (u32)ctx->gpr[4];
+    const auto prefix = (u32)std::strlen(reinterpret_cast<const char*>(vm_base + dst));
+    const auto size = (u32)std::strlen(reinterpret_cast<const char*>(vm_base + src)) + 1;
+    _sys_memcpy((void*)(uintptr_t)(dst + prefix), (const void*)(uintptr_t)src, size);
+    ctx->gpr[3] = dst;
+}
+void string_append_bounded(ppu_context* ctx) {
+    const auto dst = (u32)ctx->gpr[3], src = (u32)ctx->gpr[4];
+    const auto prefix = (u32)std::strlen(reinterpret_cast<const char*>(vm_base + dst));
+    u32 size = 0;
+    while (size < ctx->gpr[5] && vm_base[src + size]) ++size;
+    if (size) _sys_memcpy((void*)(uintptr_t)(dst + prefix), (const void*)(uintptr_t)src, size);
+    _sys_memset((void*)(uintptr_t)(dst + prefix + size), 0, 1);
+    ctx->gpr[3] = dst;
+}
 void spu_printf_initialize(ppu_context* ctx) {
     ctx->gpr[3] = (uint64_t)(int64_t)_sys_spu_printf_initialize(
         (u32)ctx->gpr[3], (u32)ctx->gpr[4], (u32)ctx->gpr[5], (u32)ctx->gpr[6]);
@@ -168,6 +205,12 @@ void spurs_group_type(ppu_context* ctx) {
 // Typed HLE adapters only; no original PRX is loaded by this registration.
 struct RegisterAdapters {
     RegisterAdapters() {
+        ps3_hle_register_ctx(ps3_compute_nid("_sys_memset"), "_sys_memset", memory_set);
+        ps3_hle_register_ctx(ps3_compute_nid("_sys_memcpy"), "_sys_memcpy", memory_copy);
+        ps3_hle_register_ctx(ps3_compute_nid("_sys_strcpy"), "_sys_strcpy", string_copy);
+        ps3_hle_register_ctx(ps3_compute_nid("_sys_strlen"), "_sys_strlen", string_length);
+        ps3_hle_register_ctx(ps3_compute_nid("_sys_strcat"), "_sys_strcat", string_append);
+        ps3_hle_register_ctx(ps3_compute_nid("_sys_strncat"), "_sys_strncat", string_append_bounded);
         ps3_hle_register_ctx(ps3_compute_nid("_sys_spu_printf_initialize"), "_sys_spu_printf_initialize", spu_printf_initialize);
         ps3_hle_register_ctx(ps3_compute_nid("_sys_spu_printf_finalize"), "_sys_spu_printf_finalize", spu_printf_finalize);
         ps3_hle_register_ctx(ps3_compute_nid("sys_ppu_thread_once"), "sys_ppu_thread_once", thread_once);
@@ -221,5 +264,12 @@ extern "C" void ps3_load_prx_modules(void) {
 #endif
     auto path = (root / "PS3_GAME/PARAM.SFO").u8string();
     cellGame_init_from_paramsfo(reinterpret_cast<const char*>(path.c_str()));
-    std::fprintf(stderr, "[native] no original PRX modules prepared; unaudited firmware calls will stop\n");
+    if (const auto* module = ps3_native_firmware_definition()) {
+        if (!ps3_native_lle_load(module)) {
+            std::fprintf(stderr, "[native-blocked] original PRX image overlaps existing memory or has invalid AOT bindings\n");
+            std::fflush(stderr); ps3_native_stop();
+        }
+    } else {
+        std::fprintf(stderr, "[native] no original PRX modules prepared; unaudited firmware calls will stop\n");
+    }
 }

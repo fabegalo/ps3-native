@@ -160,7 +160,7 @@ o teste permanece obrigatório em uma máquina local com GPU apropriada.
 
 ## Validação e próximo bloqueio real
 
-Windows x64 Release local, Clang 22.1.8, CMake 3.31.6 e Python 3.14.8:
+Windows x64 Release local, Clang 22.1.8, CMake 3.31.6 e Python 3.13.17:
 
 - PPU: ELF PPC64 próprio → análise OPD/lifter upstream → compilação nativa →
   loader/dispatch upstream → resultado big-endian **42**. Controle com resultado
@@ -192,16 +192,21 @@ a saída D3D12 real em 1280×720, mapeia 10 MiB de memória principal no IO RSX,
 registra três framebuffers e executa uma fence por label e um comando de limpeza
 de tela no FIFO RSX. O código original cria as threads `FlipPump` e
 `_SPU_printf_server`, uma fila de eventos e uma porta conectada.
-A parada atual é `cellSpursInitializeWithAttribute` (NID `0xAA6269A8`). Destinos
-PPU restantes e serviços não auditados param explicitamente. A janela do backend
+A `libsre.prx` original do firmware 4.93, autorizada pelo mantenedor, agora
+fornece `cellSpurs`: 440 funções PPU e 149 exports compilados e separados do HLE.
+O inicializador original cria 17 semáforos, importa a imagem SPU com entrada
+`0x818` e reserva um grupo exclusivo de cinco SPUs. A parada atual é
+`sys_spu_thread_initialize` (LV2 172); nenhuma thread SPU original executou ainda.
+Destinos PPU restantes e serviços não auditados param explicitamente.
+A janela do backend
 aberta ainda não comprova um frame do jogo, menu ou gameplay.
-A descoberta offline encontrou 47 imagens SPU embutidas: 45 geradas sem
+A descoberta offline encontrou 47 imagens SPU do jogo: 45 geradas sem
 instruções pendentes reportadas; duas rejeitadas porque faixas executáveis incluem
-dados decodificados como instruções. Os 45 registros suportados agora estão
-compilados no módulo nativo local, com hashes de entrada, ferramentas e saídas
-verificados. A cobertura continua parcial: imagens desconhecidas, instruções
-pendentes e seleção SPURS não auditada param explicitamente. A execução do
-inicializador SPURS permanece bloqueada.
+dados decodificados como instruções. As duas imagens SPU embutidas no firmware
+também foram geradas. Os 47 registros suportados estão compilados no módulo
+nativo local, com hashes de entrada, ferramentas e saídas verificados. A cobertura
+continua parcial: imagens desconhecidas, instruções pendentes e seleção SPURS
+não auditada param explicitamente.
 Disponibilidade de módulo e execução de cada API são verificadas separadamente.
 Layouts de atributos/vídeo, quota e backing do mapper, esperas/callbacks e
 metadados de boot em disco têm regressões sintéticas; tiles comprimidos param.
@@ -215,8 +220,8 @@ ficam desativados na execução estrita. Paradas fatais dispensam o teardown gue
 
 **Próxima tarefa:** concluir CRT/construtores originais através das paradas
 diagnósticas, ampliar destinos indiretos preparados e auditar serviços alcançados
-com regressões reais. Concluir binding PRX e registro AOT SPU antes de habilitar
-seus chamadores. A lista HLE auditada e as barreiras param onde o suporte termina;
+com regressões reais. Validar ciclo de vida das threads SPU, identidade das imagens e invalidação
+por escrita de código antes de habilitar os workers SPURS originais. A lista HLE auditada e as barreiras param onde o suporte termina;
 completude de produção e ABI ampla continuam sem comprovação. Hooks upstream
 por título não provam compatibilidade genérica.
 
@@ -238,6 +243,19 @@ relocada, funções, imports/exports → `ppu_lifter.py --raw --base` → módul
 compilado. O exemplo SPURS não comprova boot da XMB. Essas saídas devem ficar
 locais, ignoradas pelo Git e separadas do HLE, com hashes originais, revisão do
 firmware, base/relocações e propriedade explícita de NIDs. Não redistribuí-las.
+
+`src/ps3native/firmware.py` valida um PRX já descriptografado, usa as ferramentas
+upstream fixadas de relocação/lifting e gera um recibo AOT vinculado por hashes.
+Informe a pasta desse recibo em `PS3_NATIVE_FIRMWARE_DIR` na configuração CMake
+existente. Apenas a biblioteca escolhida fornece os exports; exports originais
+ausentes não caem silenciosamente no HLE. Módulos que exigem inicialização por
+module-start são rejeitados. Preparação e runtime rejeitam sobreposições e áreas
+reservadas de scratch/TLS. Uma fixture PRX própria verifica stack/TOC/TLS, cache,
+adulteração de exports e rejeição de fallback. A extração/descriptografia local
+usa RPCS3 somente como ferramenta offline; a execução guest usa ps3recomp.
+Escritas em bloco e strings invalidam reservas PPU/SPU existentes. Imports SPU
+diretos validam ELF e publicam registros COPY/FILL/INFO reais; imports protegidos
+continuam bloqueados. A recepção espera eventos reais e retorna registradores r4–r7.
 
 A VSH/XMB também exige extração autenticada do firmware, grafo completo de
 módulos e contratos do loader, dev_flash/fontes/ícones, serviços LV2,

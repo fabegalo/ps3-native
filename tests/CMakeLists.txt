@@ -2,16 +2,17 @@ set(gen "${CMAKE_CURRENT_BINARY_DIR}/generated")
 file(GLOB tools "${PS3RECOMP_DIR}/tools/*.py")
 add_custom_command(OUTPUT "${gen}/ppu_recomp.c" "${gen}/ppu_recomp.h" "${gen}/ppu.elf"
     "${gen}/spu_recomp.c" "${gen}/spu_recomp.h"
+    "${gen}/lle_bridge.cpp" "${gen}/lle_recomp.cpp"
     COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/generate_fixtures.py" "${PROJECT_SOURCE_DIR}" "${gen}"
-    DEPENDS generate_fixtures.py ${tools})
+    DEPENDS generate_fixtures.py lle_fixture.py "${PROJECT_SOURCE_DIR}/src/ps3native/firmware.py" ${tools})
 set(scaffold "${PS3RECOMP_DIR}/runtime/ppu/ppu_loader.cpp"
     "${PS3RECOMP_DIR}/runtime/ppu/ppu_hle.cpp"
     "${PS3RECOMP_DIR}/runtime/ppu/ppu_fs.cpp"
     "${PS3RECOMP_DIR}/runtime/ppu/ppu_sysprx.cpp")
 set_source_files_properties("${gen}/ppu_recomp.c" PROPERTIES LANGUAGE CXX)
-add_library(fixture_ppu OBJECT ${scaffold} "${gen}/ppu_recomp.c" "${PROJECT_SOURCE_DIR}/src/native_guard.cpp" "${PROJECT_SOURCE_DIR}/src/module_hooks.cpp")
+add_library(fixture_ppu OBJECT ${scaffold} "${gen}/ppu_recomp.c" "${PROJECT_SOURCE_DIR}/src/native_guard.cpp" "${PROJECT_SOURCE_DIR}/src/module_hooks.cpp" "${PROJECT_SOURCE_DIR}/src/native_lle.cpp")
 target_compile_definitions(fixture_ppu PRIVATE PS3_NATIVE_STRICT)
-target_include_directories(fixture_ppu PUBLIC "${gen}" "${PS3RECOMP_DIR}/include" "${PS3RECOMP_DIR}/libs/system" "${PS3RECOMP_DIR}/libs/spurs"
+target_include_directories(fixture_ppu PUBLIC "${PROJECT_SOURCE_DIR}/src" "${gen}" "${PS3RECOMP_DIR}/include" "${PS3RECOMP_DIR}/libs/system" "${PS3RECOMP_DIR}/libs/spurs"
     "${PS3RECOMP_DIR}/runtime/ppu" "${PS3RECOMP_DIR}/runtime/spu"
     "${PS3RECOMP_DIR}/runtime/memory" "${PS3RECOMP_DIR}/runtime/syscalls"
     "${PS3RECOMP_DIR}/runtime/platform" "${PS3RECOMP_DIR}/libs/video")
@@ -21,17 +22,23 @@ target_link_libraries(ps3-native-ppu PRIVATE fixture_ppu)
 add_executable(ps3-native-spu spu_main.c "${gen}/spu_recomp.c")
 target_compile_definitions(ps3-native-spu PRIVATE PS3_NATIVE_STRICT)
 target_link_libraries(ps3-native-spu PRIVATE fixture_ppu)
+add_executable(ps3-native-lle lle_main.cpp "${gen}/lle_bridge.cpp" "${gen}/lle_recomp.cpp")
+target_link_libraries(ps3-native-lle PRIVATE fixture_ppu)
+target_compile_definitions(ps3-native-lle PRIVATE PS3_NATIVE_STRICT)
 set_target_properties(ps3-native-spu PROPERTIES LINKER_LANGUAGE CXX)
 if(CMAKE_CXX_COMPILER_ID MATCHES "Clang|GNU")
     target_compile_options(fixture_ppu PRIVATE -fwrapv -fno-strict-aliasing)
+    target_compile_options(ps3-native-lle PRIVATE -fwrapv -fno-strict-aliasing)
     if(MSVC)
         target_compile_options(fixture_ppu PRIVATE /clang:-ffp-contract=off)
+        target_compile_options(ps3-native-lle PRIVATE /clang:-ffp-contract=off)
     else()
         target_compile_options(fixture_ppu PRIVATE -ffp-contract=off)
+        target_compile_options(ps3-native-lle PRIVATE -ffp-contract=off)
     endif()
 endif()
 if(WIN32)
-    foreach(target ps3-native-ppu ps3-native-spu)
+    foreach(target ps3-native-ppu ps3-native-spu ps3-native-lle)
         target_link_libraries(${target} PRIVATE dbghelp user32 gdi32 winmm shlwapi synchronization psapi)
     endforeach()
     add_executable(ps3-native-rsx "${PS3RECOMP_DIR}/libs/video/tests/test_live_draw_z16_clear.c"
@@ -58,6 +65,9 @@ if(WIN32)
     target_link_libraries(ps3-native-contracts PRIVATE dbghelp user32 gdi32 winmm shlwapi synchronization psapi)
 endif()
 add_test(NAME runtime.fail_closed COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/check_blocked.py"
-    $<TARGET_FILE:ps3-native-contracts> $<TARGET_FILE:ps3-native-spu>)
+    $<TARGET_FILE:ps3-native-contracts> $<TARGET_FILE:ps3-native-spu> $<TARGET_FILE:ps3-native-lle> "${gen}/ppu.elf")
 add_test(NAME runtime.boot_services COMMAND ps3-native-contracts)
 set_tests_properties(runtime.fail_closed runtime.boot_services PROPERTIES TIMEOUT 30)
+add_test(NAME runtime.lle.aot COMMAND ps3-native-lle "${gen}/ppu.elf")
+add_test(NAME runtime.lle.overlap COMMAND ps3-native-lle "${gen}/ppu.elf" overlap)
+set_tests_properties(runtime.lle.aot runtime.lle.overlap PROPERTIES TIMEOUT 30)

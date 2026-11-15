@@ -2,20 +2,37 @@ file(GLOB lifted CONFIGURE_DEPENDS "${PS3_NATIVE_RECOMP_DIR}/ppu_recomp*.c" "${P
 if(NOT lifted OR NOT EXISTS "${PS3_NATIVE_RECOMP_DIR}/ppu_recomp.h")
     message(FATAL_ERROR "Local AOT output is missing")
 endif()
+
 set_source_files_properties(${lifted} PROPERTIES LANGUAGE CXX)
 set(nids "${CMAKE_CURRENT_BINARY_DIR}/module/ppu_hle_nids.cpp")
 file(GLOB_RECURSE hle_sources CONFIGURE_DEPENDS "${PS3RECOMP_DIR}/libs/*.c")
 add_custom_command(OUTPUT "${nids}" COMMAND "${Python3_EXECUTABLE}" "${PS3RECOMP_DIR}/tools/gen_hle_nids.py"
     --out "${nids}" --all DEPENDS ${hle_sources} "${PS3RECOMP_DIR}/tools/gen_hle_nids.py")
-add_executable(ps3-native-module ${lifted} "${nids}" src/native_guard.cpp src/module_hooks.cpp
+add_executable(ps3-native-module ${lifted} "${nids}" src/native_guard.cpp src/module_hooks.cpp src/native_lle.cpp
     "${PS3RECOMP_DIR}/templates/project/main.cpp"
     "${PS3RECOMP_DIR}/runtime/ppu/ppu_loader.cpp" "${PS3RECOMP_DIR}/runtime/ppu/ppu_hle.cpp"
     "${PS3RECOMP_DIR}/runtime/ppu/ppu_fs.cpp" "${PS3RECOMP_DIR}/runtime/ppu/ppu_sysprx.cpp")
 target_include_directories(ps3-native-module PRIVATE "${PS3_NATIVE_RECOMP_DIR}"
+    "${PROJECT_SOURCE_DIR}/src"
     "${PS3RECOMP_DIR}/include" "${PS3RECOMP_DIR}/runtime/ppu" "${PS3RECOMP_DIR}/runtime/spu"
     "${PS3RECOMP_DIR}/runtime/platform" "${PS3RECOMP_DIR}/runtime/memory" "${PS3RECOMP_DIR}/libs/spurs"
     "${PS3RECOMP_DIR}/runtime/syscalls" "${PS3RECOMP_DIR}/libs/video" "${PS3RECOMP_DIR}/libs/system")
 target_compile_definitions(ps3-native-module PRIVATE PS3_NATIVE_STRICT)
+
+set(PS3_NATIVE_FIRMWARE_DIR "" CACHE PATH "Verified original PRX AOT generation")
+if(PS3_NATIVE_FIRMWARE_DIR)
+    execute_process(COMMAND "${Python3_EXECUTABLE}" -c
+        "import sys; from pathlib import Path; sys.path.insert(0, sys.argv[1]); from ps3native.firmware import firmware_artifacts; firmware_artifacts(Path(sys.argv[2]), Path(sys.argv[3]))"
+        "${PROJECT_SOURCE_DIR}/src" "${PROJECT_SOURCE_DIR}" "${PS3_NATIVE_FIRMWARE_DIR}"
+        RESULT_VARIABLE firmware_rc)
+    if(NOT firmware_rc EQUAL 0)
+        message(FATAL_ERROR "Original PRX preparation verification failed")
+    endif()
+    set(firmware_source "${PS3_NATIVE_FIRMWARE_DIR}/lift/ppu_recomp.c")
+    set_source_files_properties("${firmware_source}" PROPERTIES LANGUAGE CXX)
+    target_sources(ps3-native-module PRIVATE "${firmware_source}" "${PS3_NATIVE_FIRMWARE_DIR}/bundle.cpp")
+    set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS "${PS3_NATIVE_FIRMWARE_DIR}/receipt.json")
+endif()
 
 set(PS3_NATIVE_SPU_DIR "" CACHE PATH "Verified local SPU AOT generation")
 if(PS3_NATIVE_SPU_DIR)

@@ -159,7 +159,7 @@ test remains mandatory on an appropriate local GPU host.
 
 ## Validation and the next real blocker
 
-Local Windows x64 Release, Clang 22.1.8, CMake 3.31.6, Python 3.14.8:
+Local Windows x64 Release, Clang 22.1.8, CMake 3.31.6, Python 3.13.17:
 
 - PPU: own PPC64 ELF → upstream OPD analysis/lifter → native compilation →
   upstream ELF loader/dispatch → big-endian result **42**. Wrong-result control fails.
@@ -189,15 +189,19 @@ sign-in. It initializes GCM, opens the real D3D12 1280×720 output, maps 10 MiB
 of main memory into RSX IO, registers three display buffers and executes an RSX
 FIFO label fence and a screen-clear command. Original startup creates the
 `FlipPump` and `_SPU_printf_server` threads, an event queue and a connected port.
-The current strict stop is `cellSpursInitializeWithAttribute` (NID `0xAA6269A8`).
+The authorized original firmware 4.93 `libsre.prx` now supplies `cellSpurs`:
+440 PPU functions and 149 exports are compiled and bound separately from HLE.
+Its original initializer creates 17 semaphores, imports the SPU image at entry
+`0x818` and reserves an exclusive group of five SPUs. The current strict stop is
+`sys_spu_thread_initialize` (LV2 172); no original SPU thread has executed yet.
 Remaining PPU targets and unaudited services stop explicitly.
 An open backend window is not a verified game frame, menu or gameplay.
-Offline discovery found 47 embedded SPU images: 45 generated without reported
+Offline discovery found 47 game SPU images: 45 generated without reported
 unsupported instructions; two failed because executable ranges include data
-decoded as instructions. The 45 supported registrations are now compiled into
-the local native module with verified input/tool/output hashes. This remains
-partial coverage: unknown images, unsupported instructions and unaudited SPURS
-workload selection stop explicitly. SPURS initialization execution remains gated.
+decoded as instructions. The two embedded firmware SPU images also generated.
+All 47 supported registrations are compiled into the local native module with
+verified input/tool/output hashes. This remains partial coverage: unknown images,
+unsupported instructions and unaudited SPURS workload selection stop explicitly.
 Module availability and per-API execution approval are separate. Attribute and
 video layouts, live mapper quota/backing, real waits/callbacks and disc boot
 metadata have focused synthetic regressions; compressed tiles remain blocked.
@@ -211,7 +215,8 @@ are disabled in strict execution. Fatal diagnostics exit without guest teardown.
 
 **Next task:** finish original CRT/static initialization through strict stops,
 expand prepared indirect targets and audit reached services with real regressions.
-Complete PRX binding and SPU AOT image registration before enabling their callers.
+Validate SPU thread lifecycle, image identity and code-write invalidation before
+enabling original SPURS workers.
 The HLE allowlist and runtime guards stop where coverage ends; production
 completeness and broad ABI coverage remain unproven. Existing title-specific
 upstream hooks are not generic compatibility.
@@ -234,6 +239,19 @@ functions, imports and exports → `ppu_lifter.py --raw --base` → compiled mod
 Its SPURS example is not proof of XMB boot. Keep such outputs in ignored local
 storage, separate from HLE, preserving original module hashes, firmware revision,
 base/relocations and explicit NID ownership. Never distribute derived output.
+
+`src/ps3native/firmware.py` validates an already decrypted PRX, uses the pinned
+upstream relocation/lifter tools and emits a hash-bound AOT receipt. Pass that
+receipt directory as `PS3_NATIVE_FIRMWARE_DIR` in the existing CMake configuration.
+Only the explicitly selected library owns its exports; missing original exports
+cannot silently fall back to HLE. Modules requiring a module-start contract are
+rejected. Preparation and runtime reject image overlaps and reserved scratch/TLS
+areas. Own synthetic PRX tests verify stack/TOC/TLS preservation, cached-artifact
+tampering, export mutation and missing-export rejection. Local original extraction
+and decryption use RPCS3 only as an offline tool; guest execution uses ps3recomp.
+Bulk memory/string writes invalidate existing PPU/SPU reservations. Direct SPU
+imports validate the ELF and publish real COPY/FILL/INFO records; protected imports
+remain gated. Event receives wait for real events and return registers r4–r7.
 
 VSH/XMB additionally needs authenticated firmware extraction, its complete module
 graph and loader contracts, dev_flash resources/fonts/icons, LV2 services,

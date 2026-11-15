@@ -3,6 +3,7 @@
 #include "vm.h"
 #include "spu_interp.h"
 #include "spu_workload.h"
+#include "spu_coherency.h"
 #include "cellSysutil.h"
 #include "cellGcmSys.h"
 #include "cellSpurs.h"
@@ -40,10 +41,13 @@ uint64_t ppu_thread_register_main(void);
 uint64_t ppu_thread_register_main_priority(int32_t);
 int lv2_try_syscall(ppu_context*);
 s32 sys_ppu_thread_once(u32, u32);
+int sys_event_queue_push_by_id(uint32_t, uint64_t, uint64_t, uint64_t, uint64_t);
 void cellGcm_rsx_process_fifo(void);
 int cellGcm_take_flip_pending(void);
 unsigned cellGcm_flip_request_count(void);
 u32 ps3_spu_printf_callback(u32);
+void ppu_resv_register(ppu_context*);
+int ppu_stwcx32(uint64_t, uint32_t, uint32_t);
 }
 static unsigned callbacks;
 static unsigned gcm_callbacks;
@@ -180,7 +184,26 @@ int main(int argc, char** argv) {
             ctx.gpr[1] = 0xD00FFFF0; call(ctx, "sys_ppu_thread_exit", 0);
         }
         if (!strcmp(argv[1], "raw_spu_unreviewed")) { ctx.gpr[11] = 160; lv2_syscall(&ctx); }
+        if (!strcmp(argv[1], "spu_image_protected")) {
+            ctx.gpr[5] = 0; call(ctx, "sys_spu_image_import", 0);
+        }
         if (!strcmp(argv[1], "once_invalid")) call(ctx, "sys_ppu_thread_once", 0x40000000);
+        if (!strcmp(argv[1], "memory_unbacked")) {
+            ctx.gpr[4] = 0; ctx.gpr[5] = 16; call(ctx, "_sys_memset", 0x40000000);
+        }
+        if (!strcmp(argv[1], "memory_overlap") || !strcmp(argv[1], "string_unterminated")) {
+            if (vm_init()) return 1;
+            lv2_init_syscalls();
+            ctx.gpr[11] = 348; ctx.gpr[3] = 0x10000; ctx.gpr[4] = 0x200; ctx.gpr[5] = 0x30000;
+            lv2_syscall(&ctx);
+            if (ctx.gpr[3]) return 1;
+            auto address = vm_read32(0x30000);
+            if (!strcmp(argv[1], "string_unterminated")) {
+                std::memset(vm_base + address, 0xA5, 0x10000);
+                ctx.gpr[4] = address; call(ctx, "_sys_strcpy", address + 16);
+            }
+            ctx.gpr[4] = address; ctx.gpr[5] = 16; call(ctx, "_sys_memcpy", address + 1);
+        }
         if (!strcmp(argv[1], "spurs_missing_policy")) {
             // Internal negative control; this does not enable the guest SPURS initializer.
             if (vm_init()) return 1;
@@ -253,6 +276,19 @@ int main(int argc, char** argv) {
     if ((int64_t)ctx.gpr[3] >= 0 || vm_read32(0x33000) != 2) return 34;
     call(ctx, "_cellSpursAttributeInitialize", 0);
     if ((int64_t)ctx.gpr[3] >= 0) return 35;
+    struct LockLineCase { uint32_t address; uint64_t flags; uint32_t result; };
+    const LockLineCase lock_lines[] = {
+        {0x10000, 2, 0}, {0x10000000, 3, 0}, {0x20000000, 1, 0},
+        {0x10000, 0, 0x80010002}, {0x10000, 4, 0x80010002},
+        {0x10000, 0x100000002ull, 0x80010002},
+        {0xD0000000, 2, 0x80010009}, {0xF0000000, 1, 0x80010009},
+        {0xF0000000, 2, 0}, {0x90000000, 2, 0x80010002},
+    };
+    for (const auto& check : lock_lines) {
+        ctx.gpr[11] = 14; ctx.gpr[3] = check.address; ctx.gpr[4] = check.flags;
+        lv2_syscall(&ctx);
+        if ((uint32_t)ctx.gpr[3] != check.result) return 141;
+    }
     ctx.gpr[11] = 147; lv2_syscall(&ctx);
     if (ctx.gpr[3] != 79800000) return 11;
     auto wall_before = std::chrono::duration_cast<std::chrono::seconds>(std::chrono::system_clock::now().time_since_epoch()).count();
@@ -314,6 +350,49 @@ int main(int argc, char** argv) {
     if (ctx.gpr[3] || vm_read32(reserved_a) || vm_read32(reserved_a + 0xFFFFC)) return 83;
     vm_write32(reserved_a, 0xAABBCCDD);
     if (vm_read32(reserved_a) != 0xAABBCCDD) return 84;
+    const auto semaphore_attr = reserved_a + 0x4000, semaphore_output = reserved_a + 0x4100;
+    std::memset(vm_base + semaphore_attr, 0, 32);
+    vm_write32(semaphore_attr, 2); vm_write32(semaphore_attr + 4, 0x200);
+    vm_write32(semaphore_output, 0xA5A5A5A5);
+    ctx.gpr[11] = 90; ctx.gpr[3] = semaphore_output; ctx.gpr[4] = semaphore_attr;
+    ctx.gpr[5] = 2; ctx.gpr[6] = 1; lv2_syscall(&ctx);
+    if ((uint32_t)ctx.gpr[3] != 0x80010002 || vm_read32(semaphore_output) != 0xA5A5A5A5) return 142;
+    ctx.gpr[3] = semaphore_output; ctx.gpr[5] = 0; vm_write32(semaphore_attr, 3); lv2_syscall(&ctx);
+    if ((uint32_t)ctx.gpr[3] != 0x80010002 || vm_read32(semaphore_output) != 0xA5A5A5A5) return 143;
+    ctx.gpr[3] = semaphore_output; vm_write32(semaphore_attr, 2); lv2_syscall(&ctx);
+    const auto semaphore_id = vm_read32(semaphore_output);
+    if (ctx.gpr[3] || !semaphore_id || semaphore_id == 0xA5A5A5A5) return 144;
+    ctx.gpr[11] = 91; ctx.gpr[3] = semaphore_id; lv2_syscall(&ctx);
+    if (ctx.gpr[3]) return 145;
+    ctx.gpr[3] = semaphore_id; lv2_syscall(&ctx);
+    if ((uint32_t)ctx.gpr[3] != 0x80010005) return 146;
+    const auto image_source = reserved_a + 0x6000, image_output = reserved_a + 0x6200;
+    std::memset(vm_base + image_source, 0, 256);
+    std::memcpy(vm_base + image_source, "\177ELF\1\2\1", 7);
+    vm_write32(image_source + 16, 0x00020017); vm_write32(image_source + 20, 1);
+    vm_write32(image_source + 24, 0x100); vm_write32(image_source + 28, 52);
+    vm_write32(image_source + 40, 0x00340020); vm_write32(image_source + 44, 0x00010000);
+    vm_write32(image_source + 52, 1); vm_write32(image_source + 56, 128);
+    vm_write32(image_source + 60, 0x100); vm_write32(image_source + 68, 4);
+    vm_write32(image_source + 72, 8); vm_write32(image_source + 76, 5);
+    vm_write32(image_source + 80, 16); vm_write32(image_source + 128, 0x2000);
+    std::memset(vm_base + image_output, 0xA5, 16);
+    ctx.gpr[4] = image_source; ctx.gpr[5] = 1;
+    vm_write32(image_source + 68, 9);
+    call(ctx, "sys_spu_image_import", image_output);
+    if ((uint32_t)ctx.gpr[3] != 0x80010007 || vm_read32(image_output) != 0xA5A5A5A5) return 149;
+    vm_write32(image_source + 68, 4); vm_write32(image_source + 56, 0xFFFFFFFC);
+    call(ctx, "sys_spu_image_import", image_output);
+    if ((uint32_t)ctx.gpr[3] != 0x80010007 || vm_read32(image_output) != 0xA5A5A5A5) return 150;
+    vm_write32(image_source + 56, 128);
+    call(ctx, "sys_spu_image_import", image_output);
+    const auto image_segments = vm_read32(image_output + 8);
+    if (ctx.gpr[3] || vm_read32(image_output) != 0 || vm_read32(image_output + 4) != 0x100 ||
+        vm_read32(image_output + 12) != 2 || !image_segments || vm_read32(image_segments) != 1 ||
+        vm_read32(image_segments + 4) != 0x100 || vm_read32(image_segments + 8) != 4 ||
+        vm_read32(image_segments + 16) != image_source + 128 || vm_read32(image_segments + 20) ||
+        vm_read32(image_segments + 24) != 2 || vm_read32(image_segments + 28) != 0x104 ||
+        vm_read32(image_segments + 32) != 4 || vm_read32(image_segments + 40)) return 151;
     ctx.gpr[4] = 0x400; ctx.gpr[5] = 0x35104;
     vm_write32(0x35104, 0xA5A5A5A5);
     call(ctx, "sys_mmapper_allocate_memory", 0x123);
@@ -480,6 +559,23 @@ int main(int argc, char** argv) {
     ctx.gpr[11] = 161; ctx.gpr[3] = raw_id; if (!lv2_try_syscall(&ctx) || ctx.gpr[3]) return 104;
     ctx.gpr[11] = 169; ctx.gpr[3] = 6; ctx.gpr[4] = 0; lv2_syscall(&ctx);
     if (ctx.gpr[3]) return 105;
+    const auto group_attr = reserved_a + 0x7000, group_output = reserved_a + 0x7100;
+    vm_write32(group_attr, 0); vm_write32(group_attr + 4, 0); vm_write32(group_attr + 8, 0x18);
+    auto create_group = [&](uint32_t count) {
+        ctx.gpr[11] = 170; ctx.gpr[3] = group_output; ctx.gpr[4] = count;
+        ctx.gpr[5] = 127; ctx.gpr[6] = group_attr; lv2_syscall(&ctx);
+        return (uint32_t)ctx.gpr[3];
+    };
+    vm_write32(group_output, 0xA5A5A5A5); vm_write32(group_attr, 129);
+    if (create_group(5) != 0x80010002 || vm_read32(group_output) != 0xA5A5A5A5) return 154;
+    vm_write32(group_attr, 0);
+    if (create_group(5) || !vm_read32(group_output) || vm_read32(group_output) == 0xA5A5A5A5) return 155;
+    const auto first_spu_group = vm_read32(group_output);
+    vm_write32(group_output, 0xA5A5A5A5);
+    if (create_group(2) != 0x8001000A || vm_read32(group_output) != 0xA5A5A5A5) return 156;
+    if (create_group(1) || vm_read32(group_output) == first_spu_group) return 157;
+    ctx.gpr[11] = 169; ctx.gpr[3] = 6; ctx.gpr[4] = 1; lv2_syscall(&ctx);
+    if ((uint32_t)ctx.gpr[3] != 0x8001000A) return 158;
     const auto once_opd = reserved_a + 0x2000, once_control = once_opd + 0x20;
     vm_write32(once_opd, 0x12480); vm_write32(once_opd + 4, 0);
     vm_write32(once_control, 0);
@@ -538,6 +634,28 @@ int main(int argc, char** argv) {
     if (ctx.gpr[3]) return 118;
     ctx.gpr[3] = event_port; lv2_syscall(&ctx);
     if ((int64_t)ctx.gpr[3] >= 0) return 119;
+    // A raw receive returns four registers and never writes its dummy buffer.
+    std::memset(vm_base + event_output + 8, 0xA5, 32);
+    const auto event_clock = std::chrono::steady_clock::now();
+    ctx.gpr[11] = 130; ctx.gpr[3] = first_queue; ctx.gpr[4] = event_output + 8;
+    ctx.gpr[5] = 200; lv2_syscall(&ctx);
+    if ((uint32_t)ctx.gpr[3] != 0x8001000B ||
+        std::chrono::steady_clock::now() - event_clock < std::chrono::microseconds(200)) return 147;
+    std::atomic<bool> receive_entered{false}, receive_finished{false};
+    ppu_context receiver{};
+    receiver.gpr[11] = 130; receiver.gpr[3] = first_queue; receiver.gpr[4] = event_output + 8;
+    receiver.thread_id = 18;
+    std::thread receive_thread([&] {
+        receive_entered.store(true); lv2_syscall(&receiver); receive_finished.store(true);
+    });
+    while (!receive_entered.load()) std::this_thread::yield();
+    std::this_thread::sleep_for(std::chrono::milliseconds(10));
+    const bool premature_receive = receive_finished.load();
+    const auto pushed = sys_event_queue_push_by_id(first_queue, 0x123456789ABCDEF0ull, 2, 3, 4);
+    receive_thread.join();
+    if (pushed || premature_receive || receiver.gpr[3] || receiver.gpr[4] != 0x123456789ABCDEF0ull ||
+        receiver.gpr[5] != 2 || receiver.gpr[6] != 3 || receiver.gpr[7] != 4 ||
+        vm_read64(event_output + 8) != 0xA5A5A5A5A5A5A5A5ull) return 148;
     const auto command_start = vm_read32(gcm_context + 8);
     const auto control = (u32)(uintptr_t)cellGcmGetControlRegister();
     const auto previous_put = vm_read32(control), previous_flips = cellGcm_flip_request_count();
@@ -574,6 +692,41 @@ int main(int argc, char** argv) {
     vm_write32(0x33028, 0x40000040);
     ctx.gpr[4] = 0x18; call(ctx, "cellSpursAttributeSetSpuThreadGroupType", 0x33000);
     if ((int64_t)ctx.gpr[3] >= 0 || vm_read32(0x33028) != 0x40000040) return 131;
+    const auto bulk = reserved_a + 0x3078, bulk_source = reserved_a + 0x3200;
+    std::memcpy(vm_base + bulk_source, "own-string", 11);
+    vm_write8(bulk - 1, 0x12); vm_write8(bulk + 11, 0x34);
+    ctx.gpr[4] = bulk_source; call(ctx, "_sys_strcpy", bulk);
+    if (ctx.gpr[3] != bulk || std::memcmp(vm_base + bulk, "own-string", 11) ||
+        vm_read8(bulk - 1) != 0x12 || vm_read8(bulk + 11) != 0x34) return 152;
+    std::memcpy(vm_base + bulk_source, "-tail", 6); vm_write8(bulk + 16, 0x56);
+    ctx.gpr[4] = bulk_source; call(ctx, "_sys_strcat", bulk);
+    if (ctx.gpr[3] != bulk || std::memcmp(vm_base + bulk, "own-string-tail", 16) ||
+        vm_read8(bulk - 1) != 0x12 || vm_read8(bulk + 16) != 0x56) return 153;
+    std::memcpy(vm_base + bulk_source, "XYZ", 3); vm_write8(bulk + 18, 0x78);
+    ctx.gpr[4] = bulk_source; ctx.gpr[5] = 2; call(ctx, "_sys_strncat", bulk);
+    if (ctx.gpr[3] != bulk || std::memcmp(vm_base + bulk, "own-string-tailXY", 18) ||
+        vm_read8(bulk + 18) != 0x78) return 159;
+    call(ctx, "_sys_strlen", bulk);
+    if (ctx.gpr[3] != 17) return 160;
+    vm_write8(bulk - 1, 0x12); vm_write8(bulk + 32, 0x34);
+    static ppu_context reserved_ppu{};
+    reserved_ppu.reserve_addr = (bulk & ~127u) + 128 + 80;
+    ppu_resv_register(&reserved_ppu);
+    static spu_context reserved_spu{};
+    reserved_spu.resv_ea = bulk & ~127u; reserved_spu.resv_valid = 1;
+    spu_lockline_lock(); spu_coh_reserve(&reserved_spu, bulk); spu_lockline_unlock();
+    ctx.gpr[4] = 0xA5; ctx.gpr[5] = 32; call(ctx, "_sys_memset", bulk);
+    if (ctx.gpr[3] != bulk || vm_read8(bulk - 1) != 0x12 || vm_read8(bulk + 32) != 0x34 ||
+        reserved_ppu.reserve_addr <= UINT32_MAX || reserved_spu.resv_valid || !(reserved_spu.event_status & SPU_EVENT_LR)) return 132;
+    for (unsigned i = 0; i < 32; ++i) if (vm_read8(bulk + i) != 0xA5) return 133;
+    g_active_ctx = &reserved_ppu;
+    if (ppu_stwcx32((bulk & ~127u) + 128 + 80, 0, 1)) return 134;
+    g_active_ctx = nullptr;
+    spu_coh_unregister(&reserved_spu);
+    std::memset(vm_base + bulk_source, 0x5A, 32);
+    ctx.gpr[4] = bulk_source; ctx.gpr[5] = 32; call(ctx, "_sys_memcpy", bulk);
+    if (ctx.gpr[3] != bulk || std::memcmp(vm_base + bulk, vm_base + bulk_source, 32) ||
+        vm_read8(bulk - 1) != 0x12 || vm_read8(bulk + 32) != 0x34) return 135;
     vm_shutdown();
     std::puts("Verified first-callback retention, real mutual exclusion and monotonic clock");
     return 0;

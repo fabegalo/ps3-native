@@ -8,20 +8,20 @@
     "patches": [
       {
         "path": "patches/ps3recomp/0001-strict-aot-execution.patch",
-        "sha256": "32d9be3f9464850bc688d21226501189144d8926fc7813319aef1c0cf1ea161a",
+        "sha256": "36fb4c86bbc456872935667f3ab8f9a76524967cfa97321d08c85918ceaf366e",
         "source_hash_normalization": "LF",
         "files": {
           "runtime/ppu/ppu_hle.cpp": {
             "before": "2cf78005d8e4ed3806efdae21c3010c7ce4eb7d0ada45ed572d1309a3619cfc1",
-            "after": "749a0ba468d8726f4c7d4796b3263949b2e9a5808d79089a4ac43e48e8119a4a"
+            "after": "1bfd59178e2c3e22cdbb9e85c22f4da61104dd2380709454cb538749a20a6f1c"
           },
           "runtime/ppu/ppu_loader.cpp": {
             "before": "3790c09cd3f40458bd64d25fb9b5fb062fbdd0593d5eb27f1f312b3d514eb534",
-            "after": "74ccf966e93bc381f075c30b00ae437e011483d39e0af20e22a8aa4a7eed8fec"
+            "after": "e1c8c4525b43f776f2cdb1b70e155872deee565122ff277a60a988bf43deff41"
           },
           "runtime/ppu/ppu_sysprx.cpp": {
             "before": "aa768c1660855d4b077d48e4384df2509285da002e33e17d5dc7355f8789ba6d",
-            "after": "92f179f388f0cdb18edb6cac9f9a83c40f581fabfa207b3d10d0d82fa33fc005"
+            "after": "983df638bc4d42f9b66c1714b1b6d37b24166dd0dcc022c651ecd0279916fcc5"
           },
           "runtime/spu/spu_interp.c": {
             "before": "5267ee5c452d56ac7f803fa4373d6ca4017d9fc06be28f2759e0adfc1faf9501",
@@ -33,7 +33,7 @@
           },
           "runtime/syscalls/sys_ppu_thread.c": {
             "before": "644c49fa1d7114796666e34de28369c55710eb1b09e88da4d7995baac937f095",
-            "after": "eb527833cd2ed3570d3a39c11f59043ca3279a098eb93d4981c81dbd40565575"
+            "after": "a3ad76e50cdaecc2367a3bb81380233d0515d577f945059e937d6ae31082e407"
           },
           "libs/filesystem/edat.c": {
             "before": "3d72cf6398fcb134a753173bbfe29976f97642faff7bbfbb8fb52307ceb8dea2",
@@ -77,7 +77,7 @@
           },
           "libs/system/sysPrxForUser.c": {
             "before": "efd803007b0d2dadb45882d76cf05ed47c83d3f51642aead66c8e50c7dfe48b5",
-            "after": "c32d0dbdb1ca5137c55b385d961446f8592fbcc1d9b69e7acc1919954d3aae34"
+            "after": "8879811fd7723b3d7fe4f15347afd5cd984b257e5ff1615d23d81d4d5019cf50"
           },
           "libs/video/cellVideoOut.c": {
             "before": "6733218d202e0d3dfb22c20e6f91e3e5c5e4c206104d1ce94482e5b8bdad346d",
@@ -105,15 +105,23 @@
           },
           "runtime/syscalls/lv2_register.c": {
             "before": "a390011acdfd30c44ecb63c05b516e847adb96104f17b4e2af15e64da4fd1b38",
-            "after": "275090ebabef36abad7f65dd034d5d40b802b4c5afb4184d9a329cb907f4febf"
+            "after": "9720e264a0c36b0e44859e8b794c4919bebe5e9ec35c7c1dfcd2d37767f7c320"
           },
           "runtime/syscalls/sys_event.c": {
             "before": "5e44684dfca647dd8ce5cc70ecdfb394b17711ef09902520c5a482ced1da6f89",
-            "after": "74ccc7c77daefa9cdeb8b70810ff17b74b1816357fb3284091e6dd116df15446"
+            "after": "5dde67b1343ab9ae13098f0522124cc752f55dc8061dcffd3572a4f036025427"
           },
           "runtime/spu/spu_helpers.h": {
             "before": "ee7a28871bd1639f7da1800fc0d89c18562a71bad4b3c45ddb0a2dae0b059d2b",
             "after": "95bdc9892d50a8d5b66d6a6e861aa6def22b5cc718084812e2bf015cc1783be6"
+          },
+          "runtime/host/host_stubs.c": {
+            "before": "3dc9906d5d7d0c3c935c818e9c273fa512d2e4784485cfeb28dcbc48d3d09202",
+            "after": "e22361b84bef3f2110a33a42aa95b6b48d0f372ef983614ebaf8c57741cdfdc6"
+          },
+          "runtime/syscalls/sys_semaphore.c": {
+            "before": "2e0a554d761374cf06105dfe64f528badf451c1cb688ab5284cd19c32adca216",
+            "after": "410b2a99f15bbc6cc80dcb80d7781134868b20a030d41f662b178e639d6f0463"
           }
         }
       }

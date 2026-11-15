@@ -10,6 +10,7 @@ from ps3native.catalog import digest
 from ps3native.dependency import dependency
 from ps3native.boot_subset import pointer_table_seeds, select_boot
 from ps3native.preparation import spu_artifacts
+from ps3native.firmware import firmware_artifacts
 
 
 def bind(root, original, elf, generation, build):
@@ -23,14 +24,16 @@ def bind(root, original, elf, generation, build):
         raise ValueError('Build is configured for a different AOT generation')
     spu = re.search(r'^PS3_NATIVE_SPU_DIR:PATH=(.+)$', cache, re.M)
     spu_files = spu_artifacts(root, Path(spu[1]), elf) if spu else {}
+    firmware = re.search(r'^PS3_NATIVE_FIRMWARE_DIR:PATH=(.+)$', cache, re.M)
+    firmware_files = firmware_artifacts(root, Path(firmware[1])) if firmware else {}
     receipt = {'schema': 2, 'diagnostic_only': True, 'original_id': original['id'],
                'original_source': original['source'], 'elf': str(elf.resolve()), 'elf_sha256': digest(elf),
                'binary': str(exe.resolve()), 'binary_sha256': digest(exe),
                'upstream': lock, 'cmake_cache_sha256': digest(build / 'CMakeCache.txt'),
-               'generation': {**{str(p.resolve()): digest(p) for p in generation.glob('ppu_recomp*.*')}, **spu_files},
+               'generation': {**{str(p.resolve()): digest(p) for p in generation.glob('ppu_recomp*.*')}, **spu_files, **firmware_files},
                'guard_sha256': digest(root / 'src/native_guard.cpp'),
                'own_sources': {str(p): digest(root / p) for p in
-                               ('src/module_hooks.cpp', 'src/native_stop.cpp', 'cmake/NativeModule.cmake', 'CMakeLists.txt', 'src/ps3native/codegen.py')}}
+                               ('src/module_hooks.cpp', 'src/native_stop.cpp', 'src/native_lle.cpp', 'src/native_lle.h', 'src/ps3native/firmware.py', 'cmake/NativeModule.cmake', 'CMakeLists.txt', 'src/ps3native/codegen.py')}}
     target = build / 'module/receipt.json'
     target.parent.mkdir(parents=True, exist_ok=True)
     temporary = target.with_suffix('.pending')

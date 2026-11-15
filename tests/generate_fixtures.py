@@ -59,3 +59,12 @@ artifacts = {name: hashlib.sha256((out / name).read_bytes()).hexdigest() for nam
              ('ppu.elf', 'ppu_recomp.c', 'ppu_recomp.h', 'spu.bin', 'spu_recomp.c', 'spu_recomp.h')}
 (out / 'fixture.json').write_text(json.dumps({'provenance': 'ps3-native synthetic',
                                              'ppu_result': 42, 'artifacts': artifacts}), encoding='utf-8')
+
+sys.path.insert(0, str(root / 'src'))
+from lle_fixture import own_prx
+from ps3native.firmware import prepare_prx
+prx = out / 'own.prx'
+prx.write_bytes(own_prx())
+prepared = prepare_prx(root, prx, out / 'lle-cache', 0x08000000, 'ownSynthetic')
+(out / 'lle_bridge.cpp').write_text('#include "' + (prepared / 'bundle.cpp').as_posix() + '"\n')
+(out / 'lle_recomp.cpp').write_text('#include "' + (prepared / 'lift/ppu_recomp.c').as_posix() + '"\n')

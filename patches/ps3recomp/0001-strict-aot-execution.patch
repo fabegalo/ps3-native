@@ -24,22 +24,24 @@
      enum { CELL_ERROR_ERROR = (int)0x8001003Fu };  /* generic CELL failure */
      static int s_fake = -1;
      if (s_fake < 0) {
-@@ -279,8 +285,14 @@
+@@ -279,8 +285,16 @@
      for (int j = 0; j < ht_used; j++) ht_n[j] = 0;
  }
  extern "C" uint32_t ppu_prof_resolve_host(void* ra);
 +#ifdef PS3_NATIVE_STRICT
 +extern "C" void ps3_native_hle_gate(uint32_t nid, ppu_context* ctx);
++extern "C" int ps3_native_lle_dispatch(uint32_t nid, ppu_context* ctx);
 +#endif
  extern "C" void ps3_hle_call(uint32_t nid, ppu_context* ctx)
  {
 +#ifdef PS3_NATIVE_STRICT
++    if (ps3_native_lle_dispatch(nid, ctx)) return;
 +    ps3_native_hle_gate(nid, ctx);
 +#endif
      if (const hle_fast_fn f = hle_fast(nid))
          if (f(ctx)) return;
  
-@@ -752,6 +764,9 @@
+@@ -752,6 +766,9 @@
  
      ps3_nid_entry* e = hs->tab_i >= 0 ? &g_hle_nids.entries[hs->tab_i] : nullptr;
      if (!e || !e->handler) {
@@ -56,7 +58,59 @@
  /*
   * ps3recomp - PPU runtime loader
   *
-@@ -2889,6 +2890,12 @@
+@@ -998,6 +999,51 @@
+ static inline volatile LONG* resv_slot(uint64_t ea) { return &g_resv_locks[((uint32_t)ea >> 4) & (PPU_RESV_LOCKS - 1)]; }
+ static inline void resv_lock(volatile LONG* L)   { while (_InterlockedExchange(L, 1)) { while (*L) YieldProcessor(); } }
+ static inline void resv_unlock(volatile LONG* L) { _InterlockedExchange(L, 0); }
++#ifdef PS3_NATIVE_STRICT
++/* Bulk libc writes share the conditional-store shards and SPU lock-line lock.
++ * Invalidate touched granules even when the bytes written equal their old value. */
++static void ppu_bulk_store(uint32_t dst, uint32_t src, uint32_t size, int fill, bool copy)
++{
++    if (!size) return;
++    const uint64_t end = (uint64_t)dst + size;
++    if (end > 0x100000000ull || (copy && (uint64_t)src + size > 0x100000000ull)) {
++        fprintf(stderr, "[native-blocked] bulk store exceeds guest memory\n");
++        fflush(stderr); ps3_native_stop();
++    }
++    bool shards[PPU_RESV_LOCKS] = {};
++    const uint32_t first = dst & ~127u;
++    const uint64_t last = (end - 1) & ~127ull;
++    if (last - first >= PPU_RESV_LOCKS * 16u) {
++        for (unsigned i = 0; i < PPU_RESV_LOCKS; ++i) shards[i] = true;
++    }
++    else for (uint64_t line = first; line <= last; line += 128)
++        for (unsigned word = 0; word < 128; word += 16)
++            shards[((line + word) >> 4) & (PPU_RESV_LOCKS - 1)] = true;
++    for (unsigned i = 0; i < PPU_RESV_LOCKS; ++i) if (shards[i]) resv_lock(g_resv_locks + i);
++    spu_lockline_lock();
++    if (copy) memcpy(vm_base + dst, vm_base + src, size);
++    else memset(vm_base + dst, fill, size);
++    long n = g_resv_ctx_n; if (n > PPU_RESV_MAX) n = PPU_RESV_MAX;
++    for (long i = 0; i < n; ++i) {
++        ppu_context* c = g_resv_ctxs[i];
++        if (c && c->reserve_addr < PPU_RESV_INVALID) {
++            const uint64_t line = (uint32_t)c->reserve_addr & ~127u;
++            if (first <= line && line <= last) c->reserve_addr = PPU_RESV_INVALID;
++        }
++    }
++    for (uint64_t line = first; line <= last; line += 128) spu_coh_notify_write((uint32_t)line);
++    spu_lockline_unlock();
++    for (unsigned i = PPU_RESV_LOCKS; i-- > 0;) if (shards[i]) resv_unlock(g_resv_locks + i);
++}
++extern "C" void ppu_memset_coherent(uint32_t dst, int value, uint32_t size)
++{
++    ppu_bulk_store(dst, 0, size, value, false);
++}
++extern "C" void ppu_memcpy_coherent(uint32_t dst, uint32_t src, uint32_t size)
++{
++    ppu_bulk_store(dst, src, size, 0, true);
++}
++#endif
+ static inline void ppu_resv_break(uint64_t addr)   /* MUST hold g_resv_lock */
+ {
+     uint64_t a = (uint32_t)addr;   /* match the inline guard: reserve_addr holds (uint32_t)ea */
+@@ -2889,6 +2935,12 @@
      }
  
      ppu_fn fn = ppu_lookup_icall(addr);
@@ -69,7 +123,7 @@
      if (!fn) {
          /* OPD-swap clobber fixup: a malformed memcpy (game func_0036FA74) writes
           * some handler/vtable OPDs as {TOC, func} (code & toc SWAPPED), so lifted
-@@ -3202,6 +3209,10 @@
+@@ -3202,6 +3254,10 @@
   * continue (the result is undefined, but it won't crash the link). */
  extern "C" void ppu_unlifted_stub(uint64_t addr, ppu_context* ctx)
  {
@@ -80,7 +134,7 @@
      (void)ctx;
      static int logged = 0;
      if (logged < 20) {
-@@ -3237,8 +3248,14 @@
+@@ -3237,8 +3293,14 @@
  #define PS3_SC_INFLIGHT_MAX 64
  extern "C" uint32_t g_sc_inflight[PS3_SC_INFLIGHT_MAX] = { 0 };
  
@@ -95,7 +149,7 @@
      /* One-shot: PPU_GUARD_EA=<hex> arms the page guard on that address without
       * waiting for a store watch to fire. Armed here because lv2_syscall runs
       * early and unconditionally; used to measure how far a guest block clear
-@@ -3312,11 +3329,10 @@
+@@ -3312,11 +3374,10 @@
      switch (num) {
      case 352: {   /* sys_memory_get_user_memory_size(sys_memory_info_t* info)
                     * info = { u32 total_user_memory; u32 available_user_memory } */
@@ -111,7 +165,7 @@
      }
      case 330: {   /* sys_mmapper_allocate_address(u64 size, u64 flags,
                     * u64 alignment, u32* alloc_addr) -> reserve guest VA range */
-@@ -3527,6 +3543,10 @@
+@@ -3527,6 +3588,10 @@
                  return;
              }
          }
@@ -122,7 +176,25 @@
          static int logged = 0;
          if (logged < 30) {
              fprintf(stderr, "[ppu] lv2_syscall %llu (stub)\n", (unsigned long long)num);
-@@ -3817,6 +3837,9 @@
+@@ -3558,6 +3623,17 @@
+  * allocations. BSS is owned too, even though it has no file-backed bytes. */
+ struct ppu_image_range { uint64_t begin, end; };
+ static std::vector<ppu_image_range> g_ppu_image_ranges;
++extern "C" int ppu_register_image_region(uint32_t address, uint32_t size)
++{
++    const uint64_t end = (uint64_t)address + size;
++    // Keep original PRX images below compatibility scratch, TLS and the entry stack.
++    if (!size || address < VM_MAIN_MEM_BASE || end > 0x0D000000u) return 0;
++    for (const auto& r : g_ppu_image_ranges)
++        if (address < r.end && r.begin < end) return 0;
++    if (vm_commit(address, size) != 0) return 0;
++    g_ppu_image_ranges.push_back({address, end});
++    return 1;
++}
+ extern "C" void sys_memory_set_image_query(uint64_t (*query)(uint64_t, uint64_t));
+ 
+ static uint64_t ppu_image_overlap_end(uint64_t addr, uint64_t end)
+@@ -3817,6 +3893,9 @@
      uint32_t off  = __atomic_fetch_add(&s_bump, total, __ATOMIC_RELAXED);
      uint32_t base = PPU_TLS_IMG + total + off;  /* main block occupies the first */
      if (base + total > lim) {                   /* out of room: share, as before */
@@ -132,7 +204,7 @@
          static int s_warned = 0;
          if (!__atomic_exchange_n(&s_warned, 1, __ATOMIC_RELAXED))
              fprintf(stderr, "[ppu] TLS window full after %u thread blocks: later "
-@@ -3840,6 +3863,9 @@
+@@ -3840,6 +3919,9 @@
      if (!fn) {
          fprintf(stderr, "[ppu] thread entry 0x%08X (cia=0x%08X) not registered\n",
                  code, (uint32_t)ctx->cia);
@@ -142,7 +214,7 @@
          return;
      }
      g_active_ctx = ctx;
-@@ -3936,11 +3962,17 @@
+@@ -3936,11 +4018,17 @@
              s_hi = s_lo + VM_CB_STACK_SIZE;
          } else {
              /* Out of slots: share the last one, and say so. */
@@ -160,7 +232,7 @@
      }
      if (active) {
          uint32_t sp = (uint32_t)active->gpr[1];
-@@ -3959,6 +3991,12 @@
+@@ -3959,6 +4047,12 @@
      uint32_t code = 0, toc = 0;
      ppu_opd_resolve(opd_addr, &code, &toc);
      ppu_fn fn = ppu_lookup(code);
@@ -173,7 +245,7 @@
      if (!fn) {  /* OPD code clobbered? fall back to a captured fixup */
          for (int i = 0; i < s_opd_fixup_n; i++)
              if (s_opd_fixups[i].opd == opd_addr) {
-@@ -3981,7 +4019,13 @@
+@@ -3981,7 +4075,13 @@
      ctx.gpr[2]  = toc;
      ctx.gpr[3]  = a0; ctx.gpr[4] = a1; ctx.gpr[5] = a2; ctx.gpr[6] = a3;
      ctx.gpr[7]  = a4; ctx.gpr[8] = a5; ctx.gpr[9] = a6; ctx.gpr[10] = a7;
@@ -188,7 +260,7 @@
      ctx.cia     = code;
      /* Save/restore g_active_ctx: this scratch ctx lives on the stack, so leaving
       * g_active_ctx pointing at it after we return leaves a DANGLING pointer once the
-@@ -4027,7 +4071,12 @@
+@@ -4027,7 +4127,12 @@
      *result = 0;
      if (!code) return 0;
      ppu_fn fn = ppu_lookup(code);
@@ -202,7 +274,7 @@
  
      ppu_context ctx;
      memset(&ctx, 0, sizeof(ctx));
-@@ -4035,7 +4084,12 @@
+@@ -4035,7 +4140,12 @@
      ctx.gpr[2]  = toc;
      ctx.gpr[3]  = a0; ctx.gpr[4] = a1; ctx.gpr[5] = a2; ctx.gpr[6] = a3;
      ctx.gpr[7]  = a4; ctx.gpr[8] = a5; ctx.gpr[9] = a6; ctx.gpr[10] = a7;
@@ -218,7 +290,15 @@
       * so a dangling g_active_ctx after return corrupts the crash handler / diagnostics. */
 --- a/runtime/ppu/ppu_sysprx.cpp
 +++ b/runtime/ppu/ppu_sysprx.cpp
-@@ -461,10 +461,14 @@
+@@ -17,6 +17,7 @@
+ #include <stdio.h>
+ #include <stdlib.h>
+ #include <string.h>
++#include <mutex>
+ /* win32_compat.h is <windows.h> on Windows (CRITICAL_SECTION for the real
+  * lwmutex exclusion) and the POSIX shims elsewhere -- Sleep, DWORD, QPC. */
+ #include "../platform/win32_compat.h"
+@@ -461,10 +462,14 @@
   * search_and_map just needs a non-zero id to track. */
  /* id -> size so sys_mmapper_search_and_map (lv2 337) can lay blocks out
   * without overlap. Ids are dense from 0x1000. */
@@ -233,7 +313,7 @@
      uint32_t i = mem_id - 0x1000u;
      return (i < 256) ? s_mm_sizes[i] : 0;
  }
-@@ -478,14 +482,13 @@
+@@ -478,14 +483,13 @@
  
  static void sys_mmapper_allocate_memory(ppu_context* ctx)
  {
@@ -255,7 +335,7 @@
  }
  /* sys_mmapper_allocate_memory_from_container(u32 size, u32 container, u64 flags,
   * vm::ptr<u32> mem_id) -> id in *r6. flОw's CRT uses this for its heap/mutex pool;
-@@ -504,6 +507,17 @@
+@@ -504,6 +508,17 @@
  
  /* A handful of CRT helpers the early boot tends to hit; accept and continue. */
  static void crt_ok(ppu_context* ctx) { ctx->gpr[3] = 0; }
@@ -273,7 +353,7 @@
  static void sys_lwmutex_destroy_counted(ppu_context* ctx)
  {
      { static long long _n=0; _n++;
-@@ -543,16 +557,11 @@
+@@ -543,16 +558,11 @@
      unsigned int cmdSize, unsigned int ioSize, unsigned int ioAddress,
      CellGcmGuestAlloc galloc, CellGcmGuestWrite32 gwrite32);
  
@@ -293,7 +373,7 @@
  }
  static void gcm_guest_write32(unsigned int addr, unsigned int val) { vm_write32(addr, val); }
  
-@@ -584,8 +593,8 @@
+@@ -584,8 +594,8 @@
      uint32_t ioAddr  = (uint32_t)ctx->gpr[6];
      fprintf(stderr, "[HLE] _cellGcmInitBody(ctx_out=0x%08X, cmdSize=0x%X, ioSize=0x%X, ioAddr=0x%X)\n",
              ctx_out, cmdSize, ioSize, ioAddr);
@@ -304,7 +384,45 @@
  }
  
  /* --- sys_net offline model ---------------------------------------------
-@@ -962,8 +971,8 @@
+@@ -678,18 +688,22 @@
+  * its entry. */
+ #define SPU_IMG_SRC_MAX 32
+ static struct { uint32_t img, src; } s_spu_img_src[SPU_IMG_SRC_MAX];
+-
+-extern "C" void ps3_spu_image_record(uint32_t img_ea, uint32_t src_ea)
+-{
+-    if (!img_ea || !src_ea) return;
++static std::mutex s_spu_img_lock;
++
++extern "C" int ps3_spu_image_record(uint32_t img_ea, uint32_t src_ea)
++{
++    if (!img_ea || !src_ea) return 0;
++    std::lock_guard<std::mutex> lock(s_spu_img_lock);
+     for (int i = 0; i < SPU_IMG_SRC_MAX; i++)
+         if (s_spu_img_src[i].img == img_ea || s_spu_img_src[i].img == 0) {
+-            s_spu_img_src[i].img = img_ea; s_spu_img_src[i].src = src_ea; return;
++            s_spu_img_src[i].img = img_ea; s_spu_img_src[i].src = src_ea; return 1;
+         }
++    return 0;
+ }
+ 
+ extern "C" uint32_t ps3_spu_image_source_ea(uint32_t img_ea)
+ {
++    std::lock_guard<std::mutex> lock(s_spu_img_lock);
+     for (int i = 0; i < SPU_IMG_SRC_MAX; i++)
+         if (s_spu_img_src[i].img == img_ea) return s_spu_img_src[i].src;
+     return 0;
+@@ -923,7 +937,9 @@
+ extern "C" void ppu_sysprx_register(void)
+ {
+     ps3_hle_register_ctx(0x15BAE46Bu, "_cellGcmInitBody", hle_cellGcmInitBody);
++#ifndef PS3_NATIVE_STRICT
+     ps3_hle_register_ctx(0xEBE5F72Fu, "_sys_spu_image_import", hle_sys_spu_image_import);
++#endif
+ 
+     /* PS3_NET_ONLINE: real host sockets (libs/network/sysNet.c). Registered
+      * first because the first registration of a NID wins, so these shadow the
+@@ -962,8 +978,8 @@
      ps3_hle_register_ctx(ps3_compute_nid("sys_time_get_system_time"), "sys_time_get_system_time", sys_time_get_system_time);
      ps3_hle_register_ctx(ps3_compute_nid("sys_process_is_stack"),     "sys_process_is_stack",     sys_process_is_stack);
      /* Atexit registration: nothing to do at boot, just succeed. */
@@ -315,7 +433,7 @@
  
      /* Lightweight mutex family (guards global/singleton init in the CRT). */
      ps3_hle_register_ctx(ps3_compute_nid("sys_lwmutex_create"),  "sys_lwmutex_create",  sys_lwmutex_create);
-@@ -994,7 +1003,7 @@
+@@ -994,7 +1010,7 @@
      ps3_hle_register_ctx(ps3_compute_nid("sys_ppu_thread_exit"),        "sys_ppu_thread_exit",        hle_ppu_thread_exit);
      ps3_hle_register_ctx(ps3_compute_nid("sys_mmapper_allocate_memory"), "sys_mmapper_allocate_memory", sys_mmapper_allocate_memory);
      ps3_hle_register_ctx(ps3_compute_nid("sys_mmapper_allocate_memory_from_container"), "sys_mmapper_allocate_memory_from_container", sys_mmapper_allocate_memory_from_container);
@@ -465,7 +583,29 @@
  /*
   * ps3recomp - PPU thread management syscalls (implementation)
   */
-@@ -459,6 +460,11 @@
+@@ -354,6 +355,21 @@
+     return id;
+ }
+ 
++int ppu_thread_stack_range_backed(uint32_t address, uint32_t size)
++{
++    uint64_t end = (uint64_t)address + size;
++    if (!size || end > 0x100000000ull) return 0;
++    int backed = 0;
++    table_lock();
++    for (unsigned i = 0; i < PPU_THREAD_MAX; ++i) {
++        const ppu_thread_info* t = &g_ppu_threads[i];
++        if (t->state != PPU_THREAD_STATE_FREE && t->stack_size && address >= t->stack_addr &&
++            end <= (uint64_t)t->stack_addr + t->stack_size) { backed = 1; break; }
++    }
++    table_unlock();
++    return backed;
++}
++
+ /* Fill in the main thread's stack fields after the boot harness has chosen
+  * where the stack lives. register_main() memset()s the whole struct, so
+  * without this sys_ppu_thread_get_stack_information(49) finds tid 1 in the
+@@ -459,6 +475,11 @@
      uint32_t stack_size   = LV2_ARG_U32(ctx, 4);
      uint64_t flags        = LV2_ARG_U64(ctx, 5);
      uint32_t name_addr    = LV2_ARG_PTR(ctx, 6);
@@ -477,7 +617,7 @@
  
      if (stack_size == 0) stack_size = VM_PPU_STACK_SIZE;
      if (stack_size < 0x4000) stack_size = 0x4000; /* 16 KB minimum */
-@@ -645,6 +651,11 @@
+@@ -645,6 +666,11 @@
   * -----------------------------------------------------------------------*/
  int64_t sys_ppu_thread_exit(ppu_context* ctx)
  {
@@ -489,7 +629,7 @@
      uint64_t status = LV2_ARG_U64(ctx, 0);
      uint64_t tid = ctx->thread_id;
      fprintf(stderr, "[SYS] sys_ppu_thread_exit(tid=%llu status=%llu)\n",
-@@ -691,6 +702,7 @@
+@@ -691,6 +717,7 @@
  {
      uint64_t tid          = LV2_ARG_U64(ctx, 0);
      uint32_t status_addr  = LV2_ARG_PTR(ctx, 1);
@@ -497,7 +637,7 @@
      { static int n=0; if(PS3_LOG_FIRST(n, 30)) fprintf(stderr,"[WAIT] ppu_thread_join(tid=%llu)\n", (unsigned long long)tid); }
      ppu_thread_note_block(ctx->thread_id);   /* PS3_PRIO_START */
  
-@@ -726,6 +738,9 @@
+@@ -726,6 +753,9 @@
       * pthread_join does below. Bounded, so that a thread kept running past its
       * exit (PS3_NO_THREAD_EXIT_UNWIND=1) cannot hang the joiner. */
      if (t->host_thread && WaitForSingleObject(t->host_thread, 5000) == WAIT_TIMEOUT) {
@@ -507,7 +647,7 @@
          static int s_warned = 0;
          if (s_warned++ < 4)
              fprintf(stderr, "[SYS] ppu_thread_join(tid=%llu): host thread still running 5 s "
-@@ -1268,6 +1283,7 @@
+@@ -1268,6 +1298,7 @@
  {
      uint64_t tid       = LV2_ARG_U64(ctx, 0);
      uint32_t prio_addr = LV2_ARG_PTR(ctx, 1);
@@ -515,7 +655,7 @@
  
      table_lock();
      ppu_thread_info* t = find_thread(tid);
-@@ -1278,24 +1294,9 @@
+@@ -1278,24 +1309,9 @@
          return (int64_t)(int32_t)CELL_ESRCH;
      }
      if (!t) {
@@ -542,7 +682,7 @@
      }
  
      if (prio_addr != 0) {
-@@ -1426,6 +1427,7 @@
+@@ -1426,6 +1442,7 @@
  int64_t sys_ppu_thread_get_stack_information(ppu_context* ctx)
  {
      uint32_t out_addr = LV2_ARG_PTR(ctx, 0);
@@ -1307,7 +1447,33 @@
  
  /* Reset all lwmutex/lwcond state — call before CRT redirect to game main */
  void sys_lwmutex_reset_all(void)
-@@ -455,44 +480,33 @@
+@@ -380,15 +405,25 @@
+ 
+ void* _sys_memset(void* dst, s32 val, u32 size)
+ {
++#ifdef PS3_NATIVE_STRICT
++    extern void ppu_memset_coherent(u32, int, u32);
++    ppu_memset_coherent((u32)(uintptr_t)dst, val, size);
++#else
+     void* d = yz_g2h(dst);
+     if (d) memset(d, val, size);
++#endif
+     return dst;
+ }
+ 
+ void* _sys_memcpy(void* dst, const void* src, u32 size)
+ {
++#ifdef PS3_NATIVE_STRICT
++    extern void ppu_memcpy_coherent(u32, u32, u32);
++    ppu_memcpy_coherent((u32)(uintptr_t)dst, (u32)(uintptr_t)src, size);
++#else
+     void* d = yz_g2h(dst); const void* s = yz_g2h(src);
+     if (d && s) memcpy(d, s, size);
++#endif
+     return dst;
+ }
+ 
+@@ -455,44 +490,33 @@
      return CELL_EAGAIN;
  }
  
@@ -1376,7 +1542,7 @@
  }
  
  s32 sys_lwmutex_create(sys_lwmutex_t_hle* lwmutex, const sys_lwmutex_attribute_t* attr)
-@@ -867,6 +881,14 @@
+@@ -867,6 +891,14 @@
  static u32 s_heap_bump = 0;
  static u32 s_heap_bin[YZ_BINS];          /* guest EA of each free list head */
  
@@ -1391,7 +1557,7 @@
  static u32 yz_bin_for(u32 need)
  {
      u32 b = 4;                            /* 16 bytes minimum */
-@@ -877,6 +899,7 @@
+@@ -877,6 +909,7 @@
  static u32 yz_heap_alloc(u32 size, u32 align)
  {
      if (align < 16) align = 16;
@@ -1399,7 +1565,7 @@
      /* Anything larger than the window can never fit, and letting it through
       * wrapped `need` (size + align + 16 in 32 bits) to a tiny bin: a block far
       * smaller than the caller asked for. */
-@@ -896,6 +919,7 @@
+@@ -896,6 +929,7 @@
           * YZ_HEAP_END and hand out an address outside the window. */
          if ((1u << b) > YZ_HEAP_END - s_heap_bump) { slot_unlock(); return 0; }
          raw = s_heap_bump;
@@ -1703,39 +1869,104 @@
  
 --- a/runtime/syscalls/lv2_register.c
 +++ b/runtime/syscalls/lv2_register.c
-@@ -363,6 +363,7 @@
+@@ -347,7 +347,9 @@
+     int      state;
+     uint32_t num_threads;
+     uint32_t thread_indices[8];  /* table index into s_spu_threads */
+-    char     name[32];
++    char     name[128];
++    int32_t  priority;
++    int32_t  type;
+     int32_t  exit_status;        /* final ppu-side status the group reports */
+     uint32_t cause;              /* how the group ended */
+     /* Event queue connected via sys_spu_thread_group_connect_event[_all_threads].
+@@ -363,6 +365,19 @@
  static uint32_t     s_spu_next_group_id  = 0x1000;
  static uint32_t     s_spu_next_thread_id = 0x2000;
  static int          s_spu_initialized    = 0;
 +static uint32_t     s_spu_managed_limit = 6;
++#ifdef PS3_NATIVE_STRICT
++extern int ps3_native_guest_range_backed(uint32_t, uint32_t);
++#ifdef _WIN32
++static SRWLOCK s_spu_group_lock = SRWLOCK_INIT;
++#define group_lock() AcquireSRWLockExclusive(&s_spu_group_lock)
++#define group_unlock() ReleaseSRWLockExclusive(&s_spu_group_lock)
++#else
++static pthread_mutex_t s_spu_group_lock = PTHREAD_MUTEX_INITIALIZER;
++#define group_lock() pthread_mutex_lock(&s_spu_group_lock)
++#define group_unlock() pthread_mutex_unlock(&s_spu_group_lock)
++#endif
++#endif
  
  static spu_group_t* spu_find_group(uint32_t id)
  {
-@@ -494,6 +495,14 @@
+@@ -494,7 +509,31 @@
      uint32_t nrawspu = (uint32_t)ctx->gpr[4];
      fprintf(stderr, "[SPU] initialize(nspu=%u, nrawspu=%u)\n", nspu, nrawspu);
      fflush(stderr);
 +    if (nrawspu > 5) return (int64_t)(int32_t)CELL_EINVAL;
++#ifdef PS3_NATIVE_STRICT
++    group_lock();
++    uint32_t occupied = 0;
++    for (int i = 0; i < MAX_SPU_GROUPS; ++i)
++        if (s_spu_groups[i].in_use && (s_spu_groups[i].type & 8)) occupied += s_spu_groups[i].num_threads;
++    if (occupied > 6 - nrawspu) { group_unlock(); return (int64_t)(int32_t)CELL_EBUSY; }
++#else
 +    for (int i = 0; i < MAX_SPU_GROUPS; ++i)
 +        if (s_spu_groups[i].in_use && s_spu_groups[i].state == SPU_GROUP_STATE_RUNNING &&
 +            s_spu_groups[i].num_threads > 6 - nrawspu) return (int64_t)(int32_t)CELL_EBUSY;
++#endif
 +    extern int32_t spu_raw_configure_limit(uint32_t);
 +    int32_t result = spu_raw_configure_limit(nrawspu);
-+    if (result) return result;
++    if (result) {
++#ifdef PS3_NATIVE_STRICT
++        group_unlock();
++#endif
++        return result;
++    }
 +    s_spu_managed_limit = 6 - nrawspu;
      s_spu_initialized = 1;
++#ifdef PS3_NATIVE_STRICT
++    group_unlock();
++#endif
      ctx->gpr[3] = 0;
      return 0;
-@@ -516,6 +525,8 @@
+ }
+@@ -516,6 +555,33 @@
      int32_t  prio     = (int32_t)ctx->gpr[5];
      uint32_t attr_ea  = (uint32_t)ctx->gpr[6];
      fprintf(stderr, "[SPU] thread_group_create(num=%u prio=%d)\n", num, prio);
 +    if (!s_spu_initialized) return (int64_t)(int32_t)CELL_ESTAT;
 +    if (!num || num > s_spu_managed_limit) return (int64_t)(int32_t)CELL_EINVAL;
++
++#ifdef PS3_NATIVE_STRICT
++    if (!ps3_native_guest_range_backed(out_ea, 4) || !ps3_native_guest_range_backed(attr_ea, 12))
++        return (int64_t)(int32_t)CELL_EFAULT;
++    const uint32_t nsize = vm_read_be32(attr_ea), name = vm_read_be32(attr_ea + 4);
++    const uint32_t type = vm_read_be32(attr_ea + 8);
++    /* Only exclusive non-context groups have an audited physical-resource contract here. */
++    if (type != 0x18 || nsize > 128) return (int64_t)(int32_t)CELL_EINVAL;
++    if (nsize > 1 && !ps3_native_guest_range_backed(name, nsize - 1)) return (int64_t)(int32_t)CELL_EFAULT;
++    group_lock();
++    uint32_t occupied = 0;
++    for (int i = 0; i < MAX_SPU_GROUPS; ++i)
++        if (s_spu_groups[i].in_use && (s_spu_groups[i].type & 8)) occupied += s_spu_groups[i].num_threads;
++    if (occupied > s_spu_managed_limit - num) {
++        group_unlock(); return (int64_t)(int32_t)CELL_EBUSY;
++    }
++    spu_group_t* g = spu_alloc_group();
++    if (!g) { group_unlock(); return (int64_t)(int32_t)CELL_EAGAIN; }
++    g->num_threads = num; g->priority = prio; g->type = (int32_t)type;
++    if (nsize > 1) memcpy(g->name, vm_base + name, nsize - 1);
++    vm_write_be32(out_ea, g->id);
++    fprintf(stderr, "[SPU] exclusive group_create id=0x%X num=%u priority=%d name=%.127s\n", g->id, num, prio, g->name);
++    group_unlock();
++    return CELL_OK;
++#else
  
      spu_group_t* g = spu_alloc_group();
      if (!g) {
-@@ -524,7 +535,6 @@
+@@ -524,7 +590,6 @@
          ctx->gpr[3] = (uint64_t)(int64_t)(int32_t)CELL_EAGAIN;
          return (int64_t)ctx->gpr[3];
      }
@@ -1743,6 +1974,134 @@
      g->num_threads = num;
  
      int32_t  gtype   = 0;
+@@ -550,6 +615,7 @@
+     fflush(stderr);
+     ctx->gpr[3] = 0;
+     return 0;
++#endif
+ }
+ 
+ /* HLE SPURS kernel (YDKJ_SPURSKERNEL): libsre hands its 5 cellSpurs SPU threads
+@@ -2044,8 +2110,99 @@
+  * sys_spu_segment{ int type; u32 ls_start; int size; u64 src_pa; }  (0x18, src@0x10)
+  * PT_LOAD -> COPY segment (src_pa = src + p_offset); a memsz>filesz tail -> a
+  * FILL(0) segment, exactly as the SDK counts them. */
++
++#ifdef PS3_NATIVE_STRICT
++extern int ps3_native_guest_range_backed(uint32_t, uint32_t);
++extern void* _sys_malloc(uint32_t);
++extern int32_t _sys_free(void*);
++extern int ps3_spu_image_record(uint32_t, uint32_t);
++/* Parse a direct user image before publishing any guest descriptor or segment. */
++static int64_t spu_image_import_direct(ppu_context* ctx)
++{
++    const uint32_t img = (uint32_t)ctx->gpr[3], src = (uint32_t)ctx->gpr[4];
++    if (!ps3_native_guest_range_backed(img, 16) || !ps3_native_guest_range_backed(src, 52))
++        return (int64_t)(int32_t)CELL_EFAULT;
++    const uint8_t* e = vm_base + src;
++    if (memcmp(e, "\177ELF\1\2\1", 7) || vm_read_be16(src + 16) != 2 ||
++        vm_read_be16(src + 18) != 23 || vm_read_be32(src + 20) != 1 || vm_read_be16(src + 40) != 52)
++        return (int64_t)(int32_t)CELL_ENOEXEC;
++    const uint32_t phoff = vm_read_be32(src + 28), entry = vm_read_be32(src + 24);
++    const uint32_t phnum = vm_read_be16(src + 44), phwidth = vm_read_be16(src + 42);
++    if (!phnum || phnum > 128 || phwidth != 32 || entry >= 0x40000 || (entry & 3) ||
++        (uint64_t)phoff + phnum * 32 > 0x100000 ||
++        !ps3_native_guest_range_backed(src, phoff + phnum * 32))
++        return (int64_t)(int32_t)CELL_ENOEXEC;
++    uint32_t extent = phoff + phnum * 32, count = 0;
++    uint32_t records[32][6] = {{0}};
++    int executable_entry = 0;
++    for (uint32_t i = 0; i < phnum; ++i) {
++        const uint32_t p = src + phoff + i * 32;
++        const uint32_t kind = vm_read_be32(p), off = vm_read_be32(p + 4), ls = vm_read_be32(p + 8);
++        const uint32_t fs = vm_read_be32(p + 16), ms = vm_read_be32(p + 20);
++        if ((kind != 1 && kind != 4) || (uint64_t)off + fs > 0x100000)
++            return (int64_t)(int32_t)CELL_ENOEXEC;
++        if (off + fs > extent) extent = off + fs;
++        if (kind == 4) {
++            if (fs < 52 || count == 32) return (int64_t)(int32_t)CELL_ENOEXEC;
++            records[count][0] = 4; records[count][2] = 32; records[count++][4] = src + off + 20;
++            continue;
++        }
++        if (fs > ms || (uint64_t)ls + ms > 0x40000)
++            return (int64_t)(int32_t)CELL_ENOEXEC;
++        if ((vm_read_be32(p + 24) & 1) && entry >= ls && entry - ls < fs) executable_entry = 1;
++        if (fs) {
++            if (count == 32) return (int64_t)(int32_t)CELL_ENOEXEC;
++            records[count][0] = 1; records[count][1] = ls; records[count][2] = fs;
++            records[count++][4] = src + off;
++        }
++        if (ms > fs) {
++            if (count == 32) return (int64_t)(int32_t)CELL_ENOEXEC;
++            records[count][0] = 2; records[count][1] = ls + fs; records[count++][2] = ms - fs;
++        }
++    }
++    const uint32_t shoff = vm_read_be32(src + 32), shnum = vm_read_be16(src + 48), shwidth = vm_read_be16(src + 46);
++    if ((shnum && shwidth != 40) || (uint64_t)shoff + shnum * shwidth > 0x100000)
++        return (int64_t)(int32_t)CELL_ENOEXEC;
++    if (shoff + shnum * shwidth > extent) extent = shoff + shnum * shwidth;
++    if (!executable_entry || !count || !ps3_native_guest_range_backed(src, extent))
++        return (int64_t)(int32_t)CELL_ENOEXEC;
++    for (uint32_t i = 0; i < shnum; ++i) {
++        const uint32_t sh = src + shoff + i * shwidth;
++        const uint32_t off = vm_read_be32(sh + 16), size = vm_read_be32(sh + 20);
++        if (vm_read_be32(sh + 4) == 8) continue;
++        if ((uint64_t)off + size > 0x100000) return (int64_t)(int32_t)CELL_ENOEXEC;
++        if (off + size > extent) extent = off + size;
++    }
++    if (!ps3_native_guest_range_backed(src, extent)) return (int64_t)(int32_t)CELL_ENOEXEC;
++    if ((uint64_t)img < (uint64_t)src + extent && (uint64_t)src < (uint64_t)img + 16)
++        return (int64_t)(int32_t)CELL_EINVAL;
++    const uint32_t segs = (uint32_t)(uintptr_t)_sys_malloc(count * 24);
++    if (!segs) return (int64_t)(int32_t)CELL_ENOMEM;
++    for (uint32_t i = 0; i < count; ++i)
++        for (uint32_t word = 0; word < 6; ++word)
++            vm_write_be32(segs + i * 24 + word * 4, records[i][word]);
++    if (!ps3_spu_image_record(img, src)) {
++        _sys_free((void*)(uintptr_t)segs);
++        return (int64_t)(int32_t)CELL_ENOMEM;
++    }
++    vm_write_be32(img, 0); vm_write_be32(img + 4, entry);
++    vm_write_be32(img + 8, segs); vm_write_be32(img + 12, count);
++    group_lock();
++    spu_raw_note_image(src, entry);
++    group_unlock();
++    fprintf(stderr, "[SPU] direct image_import img=0x%08X src=0x%08X entry=0x%05X segments=%u\n", img, src, entry, count);
++    return CELL_OK;
++}
++#endif
++
+ static int64_t sys_spu_image_import_handler(ppu_context* ctx)
+ {
++#ifdef PS3_NATIVE_STRICT
++    extern void ps3_native_stop(void);
++    fprintf(stderr, "[native-blocked] protected kernel SPU image import requires audit\n");
++    fflush(stderr); ps3_native_stop();
++    return (int64_t)(int32_t)CELL_ENOSYS;
++#else
+     extern uint8_t* vm_base;
+     uint32_t img_ea = (uint32_t)ctx->gpr[3];
+     uint32_t src_ea = (uint32_t)ctx->gpr[4];
+@@ -2180,6 +2337,7 @@
+     fflush(stderr);
+     ctx->gpr[3] = 0;
+     return 0;
++#endif
+ }
+ 
+ /* sys_spu_image_open(*img, *path) — load an SPU ELF from the VFS, parse its
+@@ -2677,7 +2835,11 @@
+ 
+ #define LV2_HLE_BRIDGE(fn_name, handler)                                       static void fn_name(ppu_context* ctx) { (void)handler(ctx); }
+ 
++#ifdef PS3_NATIVE_STRICT
++static void hle_sys_spu_image_import(ppu_context* ctx) { ctx->gpr[3] = (uint64_t)spu_image_import_direct(ctx); }
++#else
+ LV2_HLE_BRIDGE(hle_sys_spu_image_import, sys_spu_image_import_handler)
++#endif
+ LV2_HLE_BRIDGE(hle_sys_spu_image_open,   sys_spu_image_open_handler)
+ 
+ void lv2_init_syscalls(void)
 --- a/runtime/syscalls/sys_event.c
 +++ b/runtime/syscalls/sys_event.c
 @@ -7,6 +7,7 @@
@@ -1812,7 +2171,78 @@
  
      int slot = -1;
      for (int i = 0; i < SYS_EVENT_QUEUE_MAX; i++) {
-@@ -909,6 +918,9 @@
+@@ -423,6 +432,9 @@
+         return (int64_t)(int32_t)CELL_ESRCH;
+     }
+ 
++    if (q->type != SYS_PPU_QUEUE) return (int64_t)(int32_t)CELL_EINVAL;
++
++#ifndef PS3_NATIVE_STRICT
+     /* SPURS bring-up: when a PPU thread is about to block forever for SPU
+      * completion (libsre created the taskset correctly but never started its SPU
+      * kernel), drive the title's REAL lifted SPU task runtime (image 22 @guest
+@@ -532,6 +544,8 @@
+         spu_dispatch_frame_by_queue(queue_id, 0);
+     }
+ 
++#endif
++
+ #ifdef _WIN32
+     EnterCriticalSection(&q->lock);
+     if (!q->active) {                   /* destroyed since the unlocked test */
+@@ -542,6 +556,7 @@
+      * for its EBUSY / FORCE decision and to know when we are out. */
+     q->waiters++;
+ 
++#ifndef PS3_NATIVE_STRICT
+     /* EVT_RECV_KICK=<qid>:<ms>: an infinite wait on that queue that sees
+      * nothing for <ms> gets the last event pushed to the queue re-delivered.
+      * For a completion queue whose producer intermittently loses a wakeup:
+@@ -570,6 +585,7 @@
+             }
+         }
+     }
++#endif
+     if (timeout_us == 0) {
+         while (q->count == 0 && q->active && !q->cancelled) {
+             SleepConditionVariableCS(&q->not_empty, &q->lock, INFINITE);
+@@ -578,19 +594,6 @@
+             q->waiters--;
+             LeaveCriticalSection(&q->lock);
+             return (int64_t)(int32_t)CELL_ECANCELED;
+-        }
+-    } else if (timeout_us < 1000) {
+-        /* Sub-millisecond timeout = the title's non-blocking event poll (it polls
+-         * queues 2 & 3 every frame with a 30us timeout). Windows' ~15.6ms timer
+-         * granularity inflates even a 1ms SleepConditionVariableCS to ~15ms, so a
+-         * naive floor-to-1ms throttled the game's per-frame poll loop ~500x
+-         * (each frame ate ~30ms in two polls). Honor the intent: check once and
+-         * return ETIMEDOUT immediately if empty -- same result the game already
+-         * handles, just without the bogus 15ms stall. */
+-        if (q->count == 0 || !q->active) {
+-            q->waiters--;
+-            LeaveCriticalSection(&q->lock);
+-            return (int64_t)(int32_t)CELL_ETIMEDOUT;
+         }
+     } else {
+         /* Wait to an absolute deadline. A fixed `timeout_us / 1000` per wait
+@@ -708,6 +711,7 @@
+         (unsigned long long)evt.source, (unsigned long long)evt.data1,
+         (unsigned long long)evt.data2); }
+ 
++#ifndef PS3_NATIVE_STRICT
+     /* Also write the (legacy) guest memory buffer in big-endian, for callers that
+      * pass a real sys_event_t* and read from it. */
+     if (event_addr != 0) {
+@@ -717,6 +721,7 @@
+         out[2] = bswap64(evt.data2);
+         out[3] = bswap64(evt.data3);
+     }
++#endif
+     /* Diagnostic: prove the blocked receiver was WOKEN and is returning an event
+      * (vs. staying blocked forever). Distinguishes a wake bug from game logic. */
+     /* Was hardcoded to queue 1, which makes every other queue look silent: the
+@@ -909,6 +914,9 @@
      int32_t  port_type   = LV2_ARG_S32(ctx, 1);
      uint64_t name        = LV2_ARG_U64(ctx, 2);
  
@@ -1822,7 +2252,7 @@
      evt_table_lock();
  
      int slot = -1;
-@@ -985,6 +997,11 @@
+@@ -985,6 +993,11 @@
      if (p->connected_queue != 0) {
          evt_table_unlock();
          return (int64_t)(int32_t)CELL_EISCONN;
@@ -1834,7 +2264,7 @@
      }
  
      p->connected_queue = (int32_t)queue_id;
-@@ -1646,12 +1663,6 @@
+@@ -1646,12 +1659,6 @@
      memset(g_sys_event_ports,  0, sizeof(g_sys_event_ports));
      memset(g_sys_event_flags,  0, sizeof(g_sys_event_flags));
  
@@ -1880,3 +2310,54 @@
      static int warned;
      if (warned < 64) {
          warned++;
+--- a/runtime/host/host_stubs.c
++++ b/runtime/host/host_stubs.c
+@@ -13,6 +13,23 @@
+ #include "../ppu/ppu_context.h"   /* ppu_context, PPU_THREAD_LOCAL */
+ 
+ extern uint8_t* vm_base;
++/* No PPU reservations exist in this GPU-only adapter; retain real SPU write
++ * notification if its backing is used by a coherence fixture. */
++extern void spu_lockline_lock(void);
++extern void spu_lockline_unlock(void);
++extern void spu_coh_notify_write(uint32_t);
++static void host_bulk_store(uint32_t dst, uint32_t src, uint32_t size, int fill, int copy)
++{
++    if (!size) return;
++    spu_lockline_lock();
++    if (copy) memcpy(vm_base + dst, vm_base + src, size);
++    else memset(vm_base + dst, fill, size);
++    uint64_t last = ((uint64_t)dst + size - 1) & ~127ull;
++    for (uint64_t line = dst & ~127u; line <= last; line += 128) spu_coh_notify_write((uint32_t)line);
++    spu_lockline_unlock();
++}
++void ppu_memset_coherent(uint32_t dst, int value, uint32_t size) { host_bulk_store(dst, 0, size, value, 0); }
++void ppu_memcpy_coherent(uint32_t dst, uint32_t src, uint32_t size) { host_bulk_store(dst, src, size, 0, 1); }
+ 
+ /* ppu_loader.cpp - PPU reservation bookkeeping. The ppu_memory.h inlines call
+  * these on every store so lwarx/stwcx reservations can be broken; with no PPU
+@@ -122,5 +139,8 @@
+ uint32_t g_spu_image_ls_start = 0;
+ uint32_t g_spu_image_span = 0;
+ void ppu_dump_bctrl_ring(uint32_t a, const char* tag) { (void)a; (void)tag; }
+-uint32_t ps3_spu_image_source_ea(uint32_t img_ea) { return img_ea; }
++/* A GPU-only host has no PPU image catalog; imports must fail their backing check. */
++uint32_t ps3_spu_image_source_ea(uint32_t img_ea) { (void)img_ea; return 0; }
++int ps3_spu_image_record(uint32_t img, uint32_t src) { (void)img; (void)src; return 0; }
++int ps3_native_guest_range_backed(uint32_t addr, uint32_t size) { (void)addr; (void)size; return 0; }
+ 
+--- a/runtime/syscalls/sys_semaphore.c
++++ b/runtime/syscalls/sys_semaphore.c
+@@ -222,7 +222,12 @@
+     int32_t  initial      = LV2_ARG_S32(ctx, 2);
+     int32_t  max_val      = LV2_ARG_S32(ctx, 3);
+ 
++    if (!id_out_addr || !attr_addr)
++        return (int64_t)(int32_t)CELL_EFAULT;
+     if (max_val <= 0 || initial < 0 || initial > max_val)
++        return (int64_t)(int32_t)CELL_EINVAL;
++    const uint32_t protocol = read_be32(attr_addr);
++    if (protocol != 1 && protocol != 2)
+         return (int64_t)(int32_t)CELL_EINVAL;
+ 
+     sem_table_lock();
