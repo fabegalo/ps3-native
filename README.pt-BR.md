@@ -187,13 +187,18 @@ Windows/Linux ARM64, variantes Intel/Apple Silicon e Steam Deck exigem evidênci
 própria; uma matriz de runners não comprova todas as arquiteturas ou execução.
 
 A sessão local de **EL CHAVO KART (BLUS31198, 01.00)** chega ao CRT/construtores
-PPU originais e à ativação do filesystem HLE, depois para explicitamente em
-`CELL_SYSMODULE_SPURS` (0x000A). Nenhum frame, menu ou gameplay foi verificado.
+PPU originais, metadados SFO e pool NP local sem login. Ela inicializa GCM, abre
+a saída D3D12 real em 1280×720, mapeia 10 MiB de memória principal no IO RSX,
+registra três framebuffers e executa uma fence por label no FIFO RSX. Destinos
+PPU restantes e serviços não auditados param explicitamente. A janela do backend
+aberta ainda não comprova um frame do jogo, menu ou gameplay.
 A descoberta offline encontrou 47 imagens SPU embutidas: 45 geradas sem
 instruções pendentes reportadas; duas rejeitadas porque faixas executáveis incluem
 dados decodificados como instruções. O registro incompleto permanece desativado.
-Semântica dos parâmetros SPURS, cobertura de imagens e ABI ainda precisam de
-implementação e validação.
+Execução SPURS e cobertura de imagens ainda precisam de implementação e validação.
+Disponibilidade de módulo e execução de cada API são verificadas separadamente.
+Layouts de atributos/vídeo, quota e backing do mapper, esperas/callbacks e
+metadados de boot em disco têm regressões sintéticas; tiles comprimidos param.
 
 **Próxima tarefa:** concluir CRT/construtores originais através das paradas
 diagnósticas, ampliar destinos indiretos preparados e auditar serviços alcançados

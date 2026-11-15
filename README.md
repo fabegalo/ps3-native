@@ -184,12 +184,18 @@ Windows/Linux ARM64, macOS Intel/Apple Silicon coverage and Steam Deck runtime
 must be reported separately from the CI runner's particular architecture.
 
 The local **EL CHAVO KART (BLUS31198, 01.00)** session reaches the original
-PPU CRT/static constructors and filesystem HLE activation, then stops explicitly
-at `CELL_SYSMODULE_SPURS` (0x000A). No game frame, menu or gameplay is verified.
+PPU CRT/static constructors, original SFO metadata and a local NP pool without
+sign-in. It initializes GCM, opens the real D3D12 1280×720 output, maps 10 MiB
+of main memory into RSX IO, registers three display buffers and executes an RSX
+FIFO label fence. Remaining PPU targets and unaudited services stop explicitly.
+An open backend window is not a verified game frame, menu or gameplay.
 Offline discovery found 47 embedded SPU images: 45 generated without reported
 unsupported instructions; two failed because executable ranges include data
 decoded as instructions. The incomplete registry is not enabled. SPURS argument
-semantics, image coverage and ABI still require implementation and validation.
+execution semantics and image coverage still require implementation and validation.
+Module availability and per-API execution approval are separate. Attribute and
+video layouts, live mapper quota/backing, real waits/callbacks and disc boot
+metadata have focused synthetic regressions; compressed tiles remain blocked.
 
 **Next task:** finish original CRT/static initialization through strict stops,
 expand prepared indirect targets and audit reached services with real regressions.

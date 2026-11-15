@@ -20,6 +20,9 @@
   written patch retains the first callback atomically. The optional official
   portable RPCS3 decrypt tool is local tooling, not a linked/execution dependency;
   no RPCS3 binary, keys, retail ELF or generated retail source is committed.
+  Public `cellSpurs.h/.cpp`, `cellVideoOut.h`, `sceNp.cpp/.h` and
+  `lv2/sys_mmapper.cpp` were consulted for ABI layouts, enums and API contracts.
+  Corrections here are independently written; no RPCS3 implementation is linked.
 - Architecture and maintainer-policy references:
   https://github.com/fabegalo/x360-native ,
   https://github.com/fabegalo/ps2-native ,

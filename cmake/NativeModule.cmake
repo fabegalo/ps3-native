@@ -13,7 +13,7 @@ add_executable(ps3-native-module ${lifted} "${nids}" src/native_guard.cpp src/mo
     "${PS3RECOMP_DIR}/runtime/ppu/ppu_fs.cpp" "${PS3RECOMP_DIR}/runtime/ppu/ppu_sysprx.cpp")
 target_include_directories(ps3-native-module PRIVATE "${PS3_NATIVE_RECOMP_DIR}"
     "${PS3RECOMP_DIR}/include" "${PS3RECOMP_DIR}/runtime/ppu" "${PS3RECOMP_DIR}/runtime/spu"
-    "${PS3RECOMP_DIR}/runtime/platform" "${PS3RECOMP_DIR}/runtime/memory"
+    "${PS3RECOMP_DIR}/runtime/platform" "${PS3RECOMP_DIR}/runtime/memory" "${PS3RECOMP_DIR}/libs/spurs"
     "${PS3RECOMP_DIR}/runtime/syscalls" "${PS3RECOMP_DIR}/libs/video" "${PS3RECOMP_DIR}/libs/system")
 target_compile_definitions(ps3-native-module PRIVATE PS3_NATIVE_STRICT)
 target_compile_options(ps3-native-module PRIVATE -O1 -fwrapv -fno-strict-aliasing)

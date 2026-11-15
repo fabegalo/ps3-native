@@ -11,7 +11,7 @@ set(scaffold "${PS3RECOMP_DIR}/runtime/ppu/ppu_loader.cpp"
 set_source_files_properties("${gen}/ppu_recomp.c" PROPERTIES LANGUAGE CXX)
 add_library(fixture_ppu OBJECT ${scaffold} "${gen}/ppu_recomp.c" "${PROJECT_SOURCE_DIR}/src/native_guard.cpp" "${PROJECT_SOURCE_DIR}/src/module_hooks.cpp")
 target_compile_definitions(fixture_ppu PRIVATE PS3_NATIVE_STRICT)
-target_include_directories(fixture_ppu PUBLIC "${gen}" "${PS3RECOMP_DIR}/include" "${PS3RECOMP_DIR}/libs/system"
+target_include_directories(fixture_ppu PUBLIC "${gen}" "${PS3RECOMP_DIR}/include" "${PS3RECOMP_DIR}/libs/system" "${PS3RECOMP_DIR}/libs/spurs"
     "${PS3RECOMP_DIR}/runtime/ppu" "${PS3RECOMP_DIR}/runtime/spu"
     "${PS3RECOMP_DIR}/runtime/memory" "${PS3RECOMP_DIR}/runtime/syscalls"
     "${PS3RECOMP_DIR}/runtime/platform" "${PS3RECOMP_DIR}/libs/video")
