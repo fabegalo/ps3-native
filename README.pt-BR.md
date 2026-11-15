@@ -1,15 +1,35 @@
+<div align="center">
+
+<img src="docs/assets/ps3-native-banner.svg" alt="Arte conceitual do ps3-native com CELL, SPUs, RSX e execução nativa no PC; não é captura de jogo" width="100%" />
+
 # ps3-native
 
-[English](README.md)
+**Projeto aberto de pesquisa para recompilação estática AOT de software do PlayStation 3, visando jogos originais e a VSH/XMB autêntica.**
 
-Pesquisa de recompilação estática AOT genérica e execução nativa de PlayStation 3,
-baseada no [ps3recomp](https://github.com/sp00nznet/ps3recomp), de Ned Heller /
-sp00nznet. A meta é executar jogos e a **VSH/XMB original**, com o ciclo
-sistema → jogo → sistema. O gerenciador não imita a XMB.
+[![CI](https://img.shields.io/github/actions/workflow/status/fabegalo/ps3-native/ci.yml?branch=main&label=CI)](https://github.com/fabegalo/ps3-native/actions/workflows/ci.yml)
+[![Marco](https://img.shields.io/badge/milestone-M0%20%7C%20bootstrap-555)](#estado-atual)
+[![Experimental](https://img.shields.io/badge/status-experimental-orange)](#estado-atual)
+[![Licença](https://img.shields.io/badge/license-BSD--3--Clause-blue)](LICENSE)
 
-**Base funcional do M0:** fixtures próprias PPU e SPU executam nativamente e um
-teste RSX do upstream verifica pixels em D3D12. O launcher ainda não executa
-jogos comerciais ou a XMB original. Compilação não comprova gameplay.
+[English](README.md) · [Português (Brasil)](README.pt-BR.md) · [Compilação](#compilar-e-verificar) · [Comandos](#contratos-dos-comandos)
+
+</div>
+
+> **Pesquisa experimental, ainda não é um launcher de PS3 com jogos funcionais.** O banner é uma arte conceitual. O M0 valida fixtures sintéticas PPU/SPU AOT e um teste de pixels RSX D3D12 do upstream. Nenhum jogo comercial ou VSH/XMB original executa atualmente pelo caminho genérico deste launcher.
+
+Baseado no [ps3recomp](https://github.com/sp00nznet/ps3recomp), de **Ned Heller / sp00nznet**, e na arquitetura compartilhada de [x360-native](https://github.com/fabegalo/x360-native), [ps2-native](https://github.com/fabegalo/ps2-native) e [xone-native](https://github.com/fabegalo/xone-native). A meta é preservar o ciclo autêntico **sistema → jogo → sistema**; o gerenciador não imita a XMB.
+
+<a id="estado-atual"></a>
+
+## Estado atual
+
+| Área | Já demonstrado | Ainda não demonstrado |
+| --- | --- | --- |
+| PPU / SPU AOT | Programas sintéticos próprios compilados e executados; DMA SPU conferida | Execução genérica de jogos comerciais |
+| Gráficos RSX | Regressão upstream D3D12 de pixels/profundidade validada em GPU local | Títulos jogáveis ou ampla cobertura RSX |
+| Importação / preparação | Inventário somente leitura de jogos e PUP; geração AOT limitada de ELF PPU | Binding completo de módulos e execução nativa genérica |
+| Firmware original | Inspeção de identidade PUP e pesquisa LLE do upstream | Boot VSH/XMB original, navegação e retorno dos jogos |
+| Plataformas | Windows x64 validado localmente; CI Windows, Linux e macOS configurada | Certificação de execução nos demais alvos |
 
 ## Compilar e verificar
 
