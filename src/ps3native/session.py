@@ -9,6 +9,7 @@ import re
 from ps3native.catalog import digest
 from ps3native.dependency import dependency
 from ps3native.boot_subset import pointer_table_seeds, select_boot
+from ps3native.preparation import spu_artifacts
 
 
 def bind(root, original, elf, generation, build):
@@ -20,11 +21,13 @@ def bind(root, original, elf, generation, build):
     configured = re.search(r'^PS3_NATIVE_RECOMP_DIR:PATH=(.*)$', cache, re.M)
     if not configured or Path(configured[1]).resolve() != generation.resolve():
         raise ValueError('Build is configured for a different AOT generation')
+    spu = re.search(r'^PS3_NATIVE_SPU_DIR:PATH=(.+)$', cache, re.M)
+    spu_files = spu_artifacts(root, Path(spu[1]), elf) if spu else {}
     receipt = {'schema': 2, 'diagnostic_only': True, 'original_id': original['id'],
                'original_source': original['source'], 'elf': str(elf.resolve()), 'elf_sha256': digest(elf),
                'binary': str(exe.resolve()), 'binary_sha256': digest(exe),
                'upstream': lock, 'cmake_cache_sha256': digest(build / 'CMakeCache.txt'),
-               'generation': {str(p.resolve()): digest(p) for p in generation.glob('ppu_recomp*.*')},
+               'generation': {**{str(p.resolve()): digest(p) for p in generation.glob('ppu_recomp*.*')}, **spu_files},
                'guard_sha256': digest(root / 'src/native_guard.cpp'),
                'own_sources': {str(p): digest(root / p) for p in
                                ('src/module_hooks.cpp', 'src/native_stop.cpp', 'cmake/NativeModule.cmake', 'CMakeLists.txt', 'src/ps3native/codegen.py')}}

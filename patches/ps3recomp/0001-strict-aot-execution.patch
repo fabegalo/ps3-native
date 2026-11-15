@@ -592,7 +592,18 @@
  /*
   * ps3recomp - SPU channel + indirect-branch runtime glue
   *
-@@ -2858,6 +2859,13 @@
+@@ -2722,6 +2723,10 @@
+             return;
+         }
+         if (ctx->pc == SPURS_PM_SELECT_WORKLOAD_LS) {
++#ifdef PS3_NATIVE_STRICT
++            fprintf(stderr, "[native-blocked] SPURS workload selection requires priority/preemption audit\n");
++            fflush(stderr); ps3_native_stop();
++#endif
+             /* cellSpursModulePoll: report "no contention — keep running".
+              * (The host scheduler admits bounded workers; this service does not preempt.) */
+             unsigned n = ++g_spurs_pm_polls;
+@@ -2858,6 +2863,13 @@
      }
      /* Use the same ownership order as the interpreter's rejoin probe. */
      spu_fn fn = spu_lifted_lookup(ctx, ctx->pc);
@@ -606,7 +617,7 @@
      /* The job returned through the link register we planted: it is finished.
       * Its outermost frame ends in `bi $r0`, and r0 was 0 -- so without this the
       * return landed on LS 0, which is the job's OWN entry, and it ran a second
-@@ -3406,4 +3414,4 @@
+@@ -3406,4 +3418,4 @@
  
  #ifdef __cplusplus
  }
@@ -635,7 +646,14 @@
      static volatile LONG lock;
 --- a/libs/spurs/cellSpurs.c
 +++ b/libs/spurs/cellSpurs.c
-@@ -653,8 +653,10 @@
+@@ -1,3 +1,6 @@
++#ifdef PS3_NATIVE_STRICT
++_Noreturn void ps3_native_stop(void);
++#endif
+ /*
+  * ps3recomp - cellSpurs HLE implementation
+  *
+@@ -653,8 +656,10 @@
      if (!spurs || !attr)
          return CELL_SPURS_CORE_ERROR_NULL_POINTER;
      u32 spurs_ea = (u32)(uintptr_t)spurs;
@@ -648,7 +666,7 @@
                                     SPURS_INST_SIZE);
  }
  
-@@ -668,8 +670,10 @@
+@@ -668,8 +673,10 @@
      u32 spurs_ea = (u32)(uintptr_t)spurs;
      if (spurs_ea & 0x7Fu) return CELL_SPURS_CORE_ERROR_ALIGN;
      if (!spurs_guest_range_valid(spurs_ea, SPURS_INST2_SIZE)) return CELL_SPURS_CORE_ERROR_INVAL;
@@ -661,7 +679,7 @@
                                     SPURS_INST2_SIZE);
  }
  
-@@ -699,21 +703,16 @@
+@@ -699,21 +706,16 @@
                                   s32 spuPriority, s32 ppuPriority,
                                   u8 exitIfNoWork)
  {
@@ -691,7 +709,7 @@
      return CELL_OK;
  }
  
-@@ -726,26 +725,26 @@
+@@ -726,26 +728,26 @@
                                    u32 sdkVersion, s32 nSpus, s32 spuPriority,
                                    s32 ppuPriority, u8 exitIfNoWork)
  {
@@ -732,7 +750,7 @@
  
      return CELL_OK;
  }
-@@ -753,14 +752,28 @@
+@@ -753,14 +755,28 @@
  s32 cellSpursAttributeSetSpuThreadGroupType(CellSpursAttribute* attr,
                                              s32 type)
  {
@@ -762,6 +780,18 @@
      return CELL_OK;
  }
  
+@@ -1944,6 +1960,11 @@
+     else {
+         printf("[cellSpurs] wid=%u PM NOT LIFTED (fp=0x%016llX size=%u) -- workload will not run\n",
+                wid, (unsigned long long)fp, w->sizePm);
++#ifdef PS3_NATIVE_STRICT
++        fprintf(stderr, "[native-blocked] unprepared SPURS policy image fp=0x%016llX size=%u\n",
++                (unsigned long long)fp, w->sizePm);
++        fflush(stderr); ps3_native_stop();
++#endif
+         /* SPU_DUMP_MISS=<dir>: write the PM exactly as fingerprinted, like the
+          * two miss paths in spu_workload.c. This path refused the workload
+          * before either of those ran, so an unlifted PM was never captured. */
 --- a/libs/spurs/cellSpurs.h
 +++ b/libs/spurs/cellSpurs.h
 @@ -94,13 +94,8 @@
@@ -1817,3 +1847,36 @@
  
      /* Event queues */
      lv2_syscall_register(tbl, SYS_EVENT_QUEUE_CREATE,      sys_event_queue_create);
+--- a/runtime/spu/spu_helpers.h
++++ b/runtime/spu/spu_helpers.h
+@@ -16,9 +16,18 @@
+ #include "spu_context.h"
+ #include <string.h>
+ #include <math.h>
++#include <stdio.h>
+ 
+ #ifdef __cplusplus
+ extern "C" {
++#endif
++
++#ifdef PS3_NATIVE_STRICT
++#ifdef __cplusplus
++[[noreturn]] void ps3_native_stop(void);
++#else
++_Noreturn void ps3_native_stop(void);
++#endif
+ #endif
+ 
+ #ifdef _MSC_VER
+@@ -184,6 +193,11 @@
+  * One line per site. */
+ static inline void spu_unsupported(uint32_t pc, const char* mnemonic)
+ {
++#ifdef PS3_NATIVE_STRICT
++    fprintf(stderr, "[native-blocked] unsupported SPU instruction %s at LS 0x%05X\n", mnemonic, pc);
++    fflush(stderr);
++    ps3_native_stop();
++#endif
+     static int warned;
+     if (warned < 64) {
+         warned++;

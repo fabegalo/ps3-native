@@ -197,8 +197,11 @@ PPU restantes e serviços não auditados param explicitamente. A janela do backe
 aberta ainda não comprova um frame do jogo, menu ou gameplay.
 A descoberta offline encontrou 47 imagens SPU embutidas: 45 geradas sem
 instruções pendentes reportadas; duas rejeitadas porque faixas executáveis incluem
-dados decodificados como instruções. O registro incompleto permanece desativado.
-Execução SPURS e cobertura de imagens ainda precisam de implementação e validação.
+dados decodificados como instruções. Os 45 registros suportados agora estão
+compilados no módulo nativo local, com hashes de entrada, ferramentas e saídas
+verificados. A cobertura continua parcial: imagens desconhecidas, instruções
+pendentes e seleção SPURS não auditada param explicitamente. A execução do
+inicializador SPURS permanece bloqueada.
 Disponibilidade de módulo e execução de cada API são verificadas separadamente.
 Layouts de atributos/vídeo, quota e backing do mapper, esperas/callbacks e
 metadados de boot em disco têm regressões sintéticas; tiles comprimidos param.

@@ -16,6 +16,29 @@ target_include_directories(ps3-native-module PRIVATE "${PS3_NATIVE_RECOMP_DIR}"
     "${PS3RECOMP_DIR}/runtime/platform" "${PS3RECOMP_DIR}/runtime/memory" "${PS3RECOMP_DIR}/libs/spurs"
     "${PS3RECOMP_DIR}/runtime/syscalls" "${PS3RECOMP_DIR}/libs/video" "${PS3RECOMP_DIR}/libs/system")
 target_compile_definitions(ps3-native-module PRIVATE PS3_NATIVE_STRICT)
+
+set(PS3_NATIVE_SPU_DIR "" CACHE PATH "Verified local SPU AOT generation")
+if(PS3_NATIVE_SPU_DIR)
+    execute_process(COMMAND "${Python3_EXECUTABLE}" -c
+        "import sys; from pathlib import Path; sys.path.insert(0, sys.argv[1]); from ps3native.preparation import spu_artifacts; spu_artifacts(Path(sys.argv[2]), Path(sys.argv[3]))"
+        "${PROJECT_SOURCE_DIR}/src" "${PROJECT_SOURCE_DIR}" "${PS3_NATIVE_SPU_DIR}"
+        RESULT_VARIABLE spu_rc)
+    if(NOT spu_rc EQUAL 0)
+        message(FATAL_ERROR "SPU preparation verification failed")
+    endif()
+    file(READ "${PS3_NATIVE_SPU_DIR}/inventory.json" spu_inventory)
+    string(JSON spu_count LENGTH "${spu_inventory}" programs)
+    math(EXPR spu_last "${spu_count} - 1")
+    target_sources(ps3-native-module PRIVATE "${PS3_NATIVE_SPU_DIR}/spu_workloads.c")
+    foreach(i RANGE 0 ${spu_last})
+        string(JSON status GET "${spu_inventory}" programs ${i} status)
+        if(status STREQUAL "registered")
+            string(JSON name GET "${spu_inventory}" programs ${i} name)
+            target_sources(ps3-native-module PRIVATE "${PS3_NATIVE_SPU_DIR}/${name}/spu_recomp.c")
+        endif()
+    endforeach()
+    set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS "${PS3_NATIVE_SPU_DIR}/inventory.json")
+endif()
 target_compile_options(ps3-native-module PRIVATE -O1 -fwrapv -fno-strict-aliasing)
 if(MSVC)
     target_compile_options(ps3-native-module PRIVATE /clang:-ffp-contract=off)

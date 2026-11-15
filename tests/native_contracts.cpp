@@ -5,6 +5,7 @@
 #include "spu_workload.h"
 #include "cellSysutil.h"
 #include "cellGcmSys.h"
+#include "cellSpurs.h"
 #include "rsx_tiling.h"
 #include "ps3emu/guest_call.h"
 #include <atomic>
@@ -152,6 +153,10 @@ int main(int argc, char** argv) {
         if (!strcmp(argv[1], "indirect")) { ctx.ctr = 0x12340; ps3_indirect_call(&ctx); }
         if (!strcmp(argv[1], "spu")) { static spu_context spu{}; spu_interp_run(&spu, 0x100); }
         if (!strcmp(argv[1], "spu_indirect")) { static spu_context spu{}; spu.pc = 0x12340; spu_indirect_branch(&spu); }
+        if (!strcmp(argv[1], "spurs_poll")) {
+            static spu_context spu{}; spu.policy_mode = 1; spu.pc = SPURS_PM_SELECT_WORKLOAD_LS;
+            spu_indirect_branch(&spu);
+        }
         const uint8_t unprepared[64] = {1, 2, 3, 4};
         if (!strcmp(argv[1], "spu_missing")) spu_workload_dispatch(unprepared, sizeof(unprepared), 0);
         if (!strcmp(argv[1], "spu_missing_async")) spu_workload_dispatch_async(unprepared, sizeof(unprepared), 0);
@@ -176,6 +181,17 @@ int main(int argc, char** argv) {
         }
         if (!strcmp(argv[1], "raw_spu_unreviewed")) { ctx.gpr[11] = 160; lv2_syscall(&ctx); }
         if (!strcmp(argv[1], "once_invalid")) call(ctx, "sys_ppu_thread_once", 0x40000000);
+        if (!strcmp(argv[1], "spurs_missing_policy")) {
+            // Internal negative control; this does not enable the guest SPURS initializer.
+            if (vm_init()) return 1;
+            auto spurs = (CellSpurs*)(uintptr_t)0x40000;
+            if (cellSpursInitialize(spurs, 1, 100, 1000, 0)) return 1;
+            std::memset(vm_base + 0x42000, 0x5A, 64);
+            std::memset(vm_base + 0x42100, 1, 8);
+            if (cellSpursAddWorkload(spurs, (u32*)(uintptr_t)0x42200,
+                (void*)(uintptr_t)0x42000, 64, 0, (u8*)(uintptr_t)0x42100, 1, 1)) return 1;
+            std::this_thread::sleep_for(std::chrono::seconds(2));
+        }
         return 1; // Every unsupported path must terminate before reaching here.
     }
     if (vm_init() != 0) return 1;

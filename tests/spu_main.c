@@ -8,7 +8,10 @@ uint8_t* vm_base;
 /* Full loader supplies the PPU ownership hooks, even in this SPU-only fixture. */
 static spu_context ctx;
 int main(int argc, char** argv) {
-    (void)argv;
+    if (argc > 1 && !strcmp(argv[1], "unsupported")) {
+        spu_unsupported(0x100, "own-negative-control");
+        return 1;
+    }
     if (vm_init() != 0) return 1;
     const uint8_t input[16] = {0,0,0,41, 0,0,0,9, 0,0,0,99, 0,0,0,0};
     const uint8_t expected[16] = {0,0,0,42, 0,0,0,10, 0,0,0,100, 0,0,0,1};

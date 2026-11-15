@@ -194,8 +194,10 @@ Remaining PPU targets and unaudited services stop explicitly.
 An open backend window is not a verified game frame, menu or gameplay.
 Offline discovery found 47 embedded SPU images: 45 generated without reported
 unsupported instructions; two failed because executable ranges include data
-decoded as instructions. The incomplete registry is not enabled. SPURS argument
-execution semantics and image coverage still require implementation and validation.
+decoded as instructions. The 45 supported registrations are now compiled into
+the local native module with verified input/tool/output hashes. This remains
+partial coverage: unknown images, unsupported instructions and unaudited SPURS
+workload selection stop explicitly. SPURS initialization execution remains gated.
 Module availability and per-API execution approval are separate. Attribute and
 video layouts, live mapper quota/backing, real waits/callbacks and disc boot
 metadata have focused synthetic regressions; compressed tiles remain blocked.

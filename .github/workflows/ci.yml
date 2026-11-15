@@ -36,7 +36,9 @@ jobs:
         run: ctest --test-dir build --output-on-failure -E rsx.d3d12.pixels
       - name: Compile the production runner against our own ELF fixture
         run: |
-          cmake -S . -B build -DPS3_NATIVE_RECOMP_DIR="${{ github.workspace }}/build/tests/generated"
+          python external/ps3recomp/tools/wrap_spu_elf.py build/tests/generated/spu.bin --base 0 --entry 0 --out build/tests/generated/spu.elf
+          python external/ps3recomp/tools/build_spu_workloads.py --input build/tests/generated/ppu.elf --input build/tests/generated/spu.elf --lifted build/tests/spu --out build/tests/spu/spu_workloads.c --constructor --merge-chunks
+          cmake -S . -B build -DPS3_NATIVE_RECOMP_DIR="${{ github.workspace }}/build/tests/generated" -DPS3_NATIVE_SPU_DIR="${{ github.workspace }}/build/tests/spu"
           cmake --build build --target ps3-native-module --parallel 3
       - name: Bind and execute the production runner fixture
         run: |

@@ -7,10 +7,59 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import re
 
 from ps3native.catalog import digest, inventory
 from ps3native.dependency import dependency
 from ps3native.codegen import guard_sources
+
+
+def spu_artifacts(root, directory, elf=None):
+    directory = directory.resolve()
+    manifest = directory / 'inventory.json'
+    report = json.loads(manifest.read_text(encoding='utf-8'))
+    if report.get('schema_version') != 1 or report.get('generator') != 'build_spu_workloads' or report.get('errors'):
+        raise ValueError('Invalid SPU preparation inventory')
+    if not report.get('complete') and not report['provenance']['options'].get('allow_partial'):
+        raise ValueError('Partial SPU registration was not explicitly prepared')
+    tools = root / 'external/ps3recomp/tools'
+    expected_tools = {'spu_program_pipeline.py', 'build_spu_workloads.py', 'spu_elf.py',
+                      'find_spu_functions.py', 'spu_disasm.py', 'spu_lifter.py'}
+    provenance = report['provenance']['tools']
+    if {Path(p).name for p in provenance} != expected_tools or len(provenance) != len(expected_tools):
+        raise ValueError('Incomplete SPU generator provenance')
+    for name, expected in provenance.items():
+        tool = Path(name).resolve()
+        if tool.parent != tools.resolve() or digest(tool) != expected:
+            raise ValueError('SPU generator changed; prepare again')
+    if elf is not None and digest(elf) not in {p['sha256'] for p in report['inputs']}:
+        raise ValueError('SPU preparation belongs to another ELF revision')
+    outputs = dict(report['outputs'])
+    if set(outputs) != {'spu_workloads.c', 'sources.cmake'}:
+        raise ValueError('SPU registration output is missing')
+    registered = 0
+    for program in report['programs']:
+        if program['status'] == 'unsupported':
+            continue
+        if program['status'] != 'registered' or program['diagnostics']['unsupported']:
+            raise ValueError('SPU program has no validated registration')
+        if not re.fullmatch(r'spu_[0-9a-f]{64}', program['name']):
+            raise ValueError('Invalid SPU program path')
+        program_outputs = {name.replace('\\', '/'): value for name, value in program['outputs'].items()}
+        required = {program['name'] + '/' + name for name in ('spu_recomp.c', 'spu_recomp.h', 'image.elf', 'lift.json')}
+        if not required.issubset(program_outputs) or any(not name.startswith(program['name'] + '/') for name in program_outputs):
+            raise ValueError('Incomplete SPU program output manifest')
+        registered += 1
+        outputs.update(program_outputs)
+    if not 0 < registered <= 128:
+        raise ValueError('Invalid SPU registration count')
+    artifacts = {str(manifest): digest(manifest)}
+    for name, expected in outputs.items():
+        path = (directory / name).resolve()
+        if not path.is_relative_to(directory) or digest(path) != expected:
+            raise ValueError('Prepared SPU artifact changed or escaped its directory')
+        artifacts[str(path)] = expected
+    return artifacts
 
 
 def prepare(root, content, cache):
