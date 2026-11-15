@@ -52,6 +52,8 @@ il(3, 0x20)
 wrch(21, 3)
 words.append(0)
 (out / 'spu.bin').write_bytes(struct.pack(f'>{len(words)}I', *words))
+(out / 'spu_bytes.h').write_text('static const unsigned char own_spu_bytes[] = {' +
+    ','.join(str(b) for b in (out / 'spu.bin').read_bytes()) + '};\n')
 run('spu_lifter.py', out / 'spu.bin', '--output', out)
 # Upstream emits checkout-relative includes; generated output lives in our build tree.
 for name in ('spu_recomp.h', 'spu_recomp.c'):
@@ -62,8 +64,8 @@ artifacts = {name: hashlib.sha256((out / name).read_bytes()).hexdigest() for nam
 (out / 'fixture.json').write_text(json.dumps({'provenance': 'ps3-native synthetic',
                                              'ppu_result': 42, 'artifacts': artifacts}), encoding='utf-8')
 
-# Independent LV2 thread: publish exit status 42, then the real thread-exit stop.
-thread_words = [(0x81 << 23) | (42 << 7) | 7, (0x10d << 21) | (28 << 7) | 7, 0x102, 0x40200000]
+# Independent LV2 thread: wait for a mailbox word, publish it as the exit status.
+thread_words = [(0x00d << 21) | (29 << 7) | 7, (0x10d << 21) | (28 << 7) | 7, 0x102, 0x40200000]
 thread = out / 'thread'
 thread.mkdir(exist_ok=True)
 (thread / 'code.bin').write_bytes(struct.pack('>4I', *thread_words))

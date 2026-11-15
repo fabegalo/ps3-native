@@ -194,26 +194,34 @@ de tela no FIFO RSX. O código original cria as threads `FlipPump` e
 `_SPU_printf_server`, uma fila de eventos e uma porta conectada.
 A `libsre.prx` original do firmware 4.93, autorizada pelo mantenedor, agora
 fornece `cellSpurs`: 440 funções PPU e 149 exports compilados e separados do HLE.
-O inicializador original cria 17 semáforos, importa a imagem SPU com entrada
-`0x818`, reserva um grupo exclusivo de cinco SPUs, cria seus objetos de thread
-e inicia suas duas threads PPU de controle. O início nativo do grupo SPU agora
-verifica a imagem AOT exata e os bytes das instruções carregadas, preserva as
-áreas de dados mutáveis e para se código compilado for alterado. Um SPU sintético
-independente executa por LV2 numa thread real, publica RUN e sai com status 42;
-nenhuma instrução SPU original executou ainda. A parada atual é
-`NV4097_GET_REPORT` (ZPASS, offset `0x7FE0`): contagem de amostras, timestamps
-e conclusão ordenada reais da GPU estão pendentes. Valores fixos de visibilidade
-e timestamps inventados na leitura não são aceitos como resultado.
-Destinos PPU restantes e serviços não auditados param explicitamente.
-A janela do backend
-aberta ainda não comprova um frame do jogo, menu ou gameplay.
-A descoberta offline encontrou 47 imagens SPU do jogo: 45 geradas sem
-instruções pendentes reportadas; duas rejeitadas porque faixas executáveis incluem
-dados decodificados como instruções. As duas imagens SPU embutidas no firmware
-também foram geradas. Os 47 registros suportados estão compilados no módulo
-nativo local, com hashes de entrada, ferramentas e saídas verificados. A cobertura
-continua parcial: imagens desconhecidas, instruções pendentes e seleção SPURS
-não auditada param explicitamente.
+Os inicializadores originais criam um grupo exclusivo com cinco SPUs e um grupo
+normal com um worker. Os seis workers nativos entram no código SPU original do
+firmware; o kernel chega a `0x13F4`. O join espera a conclusão real, e regressões
+sintéticas de mailbox/reinício conferem os status de saída 42 e 17. STOP terminal
+encerra a execução SPU pertencente ao engine, sem retomar os chamadores traduzidos.
+Código transferido por DMA é preparado offline, identificado pelo conteúdo completo
+carregado e conferido byte a byte na entrada/retorno das funções. Escritas retiram
+código antigo de circulação; alterações de código ativo e destinos desconhecidos param.
+
+Relatórios ZPASS e timestamps reais da GPU D3D12 agora respeitam a ordem dos comandos
+sem apresentação antecipada. O teste na GPU física confere 4096 amostras visíveis,
+zero amostras ocluídas e 256 após limpeza parcial de profundidade. Flips preparados
+retornam os índices originais da fila e aguardam a submissão GPU. O backend atual
+para explicitamente se houver mais de um quadro preparado em voo, até que as
+superfícies de exibição sejam preservadas separadamente. Uma janela aberta ainda
+não comprova um frame do jogo ou menu. A última parada retail é o destino PPU
+não preparado `0x0169AA08`.
+
+As 47 imagens SPU ELF descobertas no jogo, duas ELF embutidas no firmware e dois
+payloads brutos verificados estão compilados localmente: 51 registros com hashes
+de entrada/ferramentas/saídas. Limites explícitos separam código original de dados
+constantes em quatro payloads; todos os dados carregados são preservados. Isso
+comprova preparação, sem certificar fluxo completo, ISA, frames ou gameplay.
+
+O novo **God of War Collection (BCUS98229, 02.00)** tem catálogo somente de leitura
+e quatro ELF PPU extraídos localmente e validados estruturalmente. O AOT PPU do
+EBOOT inicial foi gerado; boot nativo e transições seletor/jogos ainda não foram
+testados. Originais e resultados proprietários derivados permanecem fora do Git.
 Disponibilidade de módulo e execução de cada API são verificadas separadamente.
 Layouts de atributos/vídeo, quota e backing do mapper, esperas/callbacks e
 metadados de boot em disco têm regressões sintéticas; tiles comprimidos param.
@@ -227,8 +235,8 @@ ficam desativados na execução estrita. Paradas fatais dispensam o teardown gue
 
 **Próxima tarefa:** concluir CRT/construtores originais através das paradas
 diagnósticas, ampliar destinos indiretos preparados e auditar serviços alcançados
-com regressões reais. Validar ciclo de vida das threads SPU, identidade das imagens e invalidação
-por escrita de código antes de habilitar os workers SPURS originais. A lista HLE auditada e as barreiras param onde o suporte termina;
+com regressões reais. Continuar a inicialização original e verificar um frame real do jogo antes de
+anunciar suporte a menu ou gameplay. A lista HLE auditada e as barreiras param onde o suporte termina;
 completude de produção e ABI ampla continuam sem comprovação. Hooks upstream
 por título não provam compatibilidade genérica.
 

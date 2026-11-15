@@ -2,6 +2,7 @@ set(gen "${CMAKE_CURRENT_BINARY_DIR}/generated")
 file(GLOB tools "${PS3RECOMP_DIR}/tools/*.py")
 add_custom_command(OUTPUT "${gen}/ppu_recomp.c" "${gen}/ppu_recomp.h" "${gen}/ppu.elf"
     "${gen}/spu_recomp.c" "${gen}/spu_recomp.h"
+    "${gen}/spu_bytes.h"
     "${gen}/thread/spu_recomp.c" "${gen}/thread/spu_recomp.h"
     "${gen}/lle_bridge.cpp" "${gen}/lle_recomp.cpp"
     COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/generate_fixtures.py" "${PROJECT_SOURCE_DIR}" "${gen}"
@@ -51,6 +52,15 @@ if(WIN32)
     set_target_properties(ps3-native-rsx PROPERTIES LINKER_LANGUAGE CXX)
     add_test(NAME rsx.d3d12.pixels COMMAND ps3-native-rsx)
     set_tests_properties(rsx.d3d12.pixels PROPERTIES TIMEOUT 60 WORKING_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}")
+    add_executable(ps3-native-rsx-reports rsx_reports.c "${PS3RECOMP_DIR}/runtime/host/host_stubs.c")
+    target_compile_definitions(ps3-native-rsx-reports PRIVATE PS3_NATIVE_STRICT)
+    target_include_directories(ps3-native-rsx-reports PRIVATE "${PS3RECOMP_DIR}/include"
+        "${PS3RECOMP_DIR}/libs/video" "${PS3RECOMP_DIR}/runtime" "${PS3RECOMP_DIR}/runtime/memory")
+    target_link_libraries(ps3-native-rsx-reports PRIVATE ps3recomp_runtime d3d12 dxgi d3dcompiler dxguid
+        gdi32 user32 ole32 ws2_32 xinput bcrypt winmm shlwapi synchronization psapi dbghelp)
+    set_target_properties(ps3-native-rsx-reports PROPERTIES LINKER_LANGUAGE CXX)
+    add_test(NAME rsx.d3d12.reports COMMAND ps3-native-rsx-reports)
+    set_tests_properties(rsx.d3d12.reports PROPERTIES TIMEOUT 60 WORKING_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}")
 endif()
 add_test(NAME ppu.aot COMMAND ps3-native-ppu "${gen}/ppu.elf")
 add_test(NAME spu.aot.dma COMMAND ps3-native-spu)
@@ -61,6 +71,7 @@ add_test(NAME spu.aot.dma.negative COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURR
 set_tests_properties(ppu.aot spu.aot.dma PROPERTIES TIMEOUT 30)
 set_tests_properties(ppu.aot.negative spu.aot.dma.negative PROPERTIES TIMEOUT 35)
 add_executable(ps3-native-contracts native_contracts.cpp "${gen}/thread/spu_recomp.c")
+target_include_directories(ps3-native-contracts PRIVATE "${PS3RECOMP_DIR}/libs/input")
 target_compile_definitions(ps3-native-contracts PRIVATE PS3_NATIVE_STRICT)
 target_link_libraries(ps3-native-contracts PRIVATE fixture_ppu)
 if(WIN32)

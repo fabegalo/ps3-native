@@ -20,6 +20,7 @@ extern "C" void ps3_hle_register_ctx(uint32_t, const char*, void (*)(ppu_context
 extern "C" [[noreturn]] void ps3_native_stop(void);
 extern "C" int sys_memory_range_backed(uint32_t, uint32_t);
 extern "C" int ps3_native_guest_range_backed(uint32_t, uint32_t);
+extern "C" void ppu_write_coherent(u32, const void*, u32);
 extern "C" int ps3_sysprx_heap_range_backed(uint32_t, uint32_t);
 extern "C" __attribute__((weak)) const NativeLleModule* ps3_native_firmware_definition(void) { return nullptr; }
 extern "C" s32 sys_ppu_thread_once(u32, u32);
@@ -111,8 +112,38 @@ void sysutil_register(ppu_context* ctx) {
 }
 void sysutil_unregister(ppu_context* ctx) { ctx->gpr[3] = (uint64_t)(int64_t)cellSysutilUnregisterCallback((s32)ctx->gpr[3]); }
 void sysutil_check(ppu_context* ctx) { ctx->gpr[3] = (uint64_t)(int64_t)cellSysutilCheckCallback(); }
+void sysmodule_initialize(ppu_context* ctx) {
+    // The firmware 4.93 export returns success without changing module state.
+    ctx->gpr[3] = (u64)(s64)cellSysmoduleInitialize();
+}
 void rtc_tick(ppu_context* ctx) {
     ctx->gpr[3] = (uint64_t)(int64_t)cellRtcGetCurrentTick((CellRtcTick*)(uintptr_t)(uint32_t)ctx->gpr[3]);
+}
+void rtc_local_time(ppu_context* ctx) {
+    const auto address = ctx->gpr[3];
+    if (address > UINT32_MAX || !ps3_native_guest_range_backed((u32)address, 16)) {
+        ctx->gpr[3] = (u64)(s64)(s32)0x80010602; return;
+    }
+    CellRtcDateTime date{};
+    const s32 result = cellRtcGetCurrentClockLocalTime(&date);
+    if (result == 0) {
+        const u16 fields[] = {date.year, date.month, date.day, date.hour, date.minute, date.second};
+        u8 payload[16];
+        for (unsigned i = 0; i < 6; ++i) {
+            payload[i * 2] = (u8)(fields[i] >> 8); payload[i * 2 + 1] = (u8)fields[i];
+        }
+        for (unsigned i = 0; i < 4; ++i) payload[12 + i] = (u8)(date.microsecond >> (24 - i * 8));
+        ppu_write_coherent((u32)address, payload, sizeof payload);
+    }
+    ctx->gpr[3] = (u64)(s64)result;
+}
+void rtc_weekday(ppu_context* ctx) {
+    if (ctx->gpr[3] < 1 || ctx->gpr[3] > 9999 || ctx->gpr[4] < 1 || ctx->gpr[4] > 12 ||
+        ctx->gpr[5] < 1 || ctx->gpr[5] > 31) {
+        std::fprintf(stderr, "[native-blocked] RTC weekday arguments require calendar audit\n");
+        std::fflush(stderr); ps3_native_stop();
+    }
+    ctx->gpr[3] = (u64)cellRtcGetDayOfWeek((s32)ctx->gpr[3], (s32)ctx->gpr[4], (s32)ctx->gpr[5]);
 }
 void np_init(ppu_context* ctx) {
     ctx->gpr[3] = (uint64_t)(int64_t)sceNpInit((u32)ctx->gpr[3], (void*)(uintptr_t)(uint32_t)ctx->gpr[4]);
@@ -248,11 +279,14 @@ struct RegisterAdapters {
         ps3_hle_register_ctx(ps3_compute_nid("_sys_spu_printf_detach_thread"), "_sys_spu_printf_detach_thread", spu_printf_dispatch<3>);
         ps3_hle_register_ctx(ps3_compute_nid("sys_ppu_thread_once"), "sys_ppu_thread_once", thread_once);
         ps3_hle_register_ctx(ps3_compute_nid("cellSysmoduleLoadModule"), "cellSysmoduleLoadModule", load_module);
+        ps3_hle_register_ctx(ps3_compute_nid("cellSysmoduleInitialize"), "cellSysmoduleInitialize", sysmodule_initialize);
         ps3_hle_register_ctx(ps3_compute_nid("cellSysmoduleIsLoaded"), "cellSysmoduleIsLoaded", module_loaded);
         ps3_hle_register_ctx(ps3_compute_nid("cellSysutilRegisterCallback"), "cellSysutilRegisterCallback", sysutil_register);
         ps3_hle_register_ctx(ps3_compute_nid("cellSysutilUnregisterCallback"), "cellSysutilUnregisterCallback", sysutil_unregister);
         ps3_hle_register_ctx(ps3_compute_nid("cellSysutilCheckCallback"), "cellSysutilCheckCallback", sysutil_check);
         ps3_hle_register_ctx(ps3_compute_nid("cellRtcGetCurrentTick"), "cellRtcGetCurrentTick", rtc_tick);
+        ps3_hle_register_ctx(ps3_compute_nid("cellRtcGetCurrentClockLocalTime"), "cellRtcGetCurrentClockLocalTime", rtc_local_time);
+        ps3_hle_register_ctx(ps3_compute_nid("cellRtcGetDayOfWeek"), "cellRtcGetDayOfWeek", rtc_weekday);
         ps3_hle_register_ctx(ps3_compute_nid("sceNpInit"), "sceNpInit", np_init);
         ps3_hle_register_ctx(ps3_compute_nid("sceNpTerm"), "sceNpTerm", np_term);
         ps3_hle_register_ctx(ps3_compute_nid("sceNpManagerGetStatus"), "sceNpManagerGetStatus", np_status);

@@ -33,7 +33,7 @@ jobs:
         run: cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release -DCMAKE_C_COMPILER=clang -DCMAKE_CXX_COMPILER=clang++
       - run: cmake --build build --parallel 3
       - name: CPU and catalog regression
-        run: ctest --test-dir build --output-on-failure -E rsx.d3d12.pixels
+        run: ctest --test-dir build --output-on-failure -E rsx.d3d12
       - name: Compile the production runner against our own ELF fixture
         run: |
           python external/ps3recomp/tools/wrap_spu_elf.py build/tests/generated/spu.bin --base 0 --entry 0 --out build/tests/generated/spu.elf

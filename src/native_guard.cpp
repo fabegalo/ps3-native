@@ -119,12 +119,13 @@ extern "C" void ps3_native_hle_gate(uint32_t nid, ppu_context* ctx) {
                                     "_sys_spu_printf_attach_thread", "_sys_spu_printf_detach_thread",
                                     "_sys_spu_printf_initialize", "_sys_spu_printf_finalize",
                                     "_sys_process_atexitspawn", "_sys_process_at_Exitspawn",
-                                    "cellSysmoduleLoadModule", "cellSysmoduleIsLoaded",
+                                    "cellSysmoduleLoadModule", "cellSysmoduleIsLoaded", "cellSysmoduleInitialize",
                                     "_cellSpursAttributeInitialize", "cellSpursAttributeSetNamePrefix",
                                     "cellSpursAttributeEnableSpuPrintfIfAvailable",
                                     "cellSpursAttributeSetSpuThreadGroupType",
                                     "cellSysutilRegisterCallback", "cellSysutilUnregisterCallback", "cellSysutilCheckCallback",
-                                    "cellRtcGetCurrentTick",
+                                    "cellRtcGetCurrentTick", "cellRtcGetCurrentClockLocalTime", "cellRtcGetDayOfWeek",
+                                    "cellPadInit", "cellPadEnd",
                                     "sceNpInit", "sceNpTerm", "sceNpManagerGetStatus",
                                     "cellGameBootCheck", "cellGameContentPermit",
                                     "cellGameGetParamString",
@@ -133,7 +134,7 @@ extern "C" void ps3_native_hle_gate(uint32_t nid, ppu_context* ctx) {
                                     "_cellGcmInitBody",
                                     "cellGcmGetConfiguration", "cellGcmGetControlRegister", "cellGcmGetLabelAddress", "cellGcmAddressToOffset",
                                     "cellGcmMapMainMemory",
-                                    "cellGcmSetTileInfo", "cellGcmBindTile", "cellGcmUnbindTile", "cellGcmSetDisplayBuffer", "cellGcmSetPrepareFlip",
+                                    "cellGcmSetTileInfo", "cellGcmBindTile", "cellGcmUnbindTile", "cellGcmSetDisplayBuffer", "cellGcmSetPrepareFlip", "cellGcmSetFlipImmediate",
                                     "cellVideoOutGetNumberOfDevice", "cellVideoOutGetState", "cellVideoOutGetResolution",
                                     "cellVideoOutGetDeviceInfo",
                                     "cellGcmGetTiledPitchSize", "cellGcmSetFlipMode", "cellGcmSetVBlankHandler",
@@ -244,9 +245,10 @@ extern "C" void ps3_native_syscall_gate(ppu_context* ctx) {
     if (number == 251) return;
     if (number == 185) return;
     if (number == 173) return;
+    if (number == 178 && guest_backed((u32)ctx->gpr[4], 4) && guest_backed((u32)ctx->gpr[5], 4)) return;
     if (number == 186 && (ctx->gpr[4] == 1 || ctx->gpr[4] == 2 || ctx->gpr[4] == 4)) return;
     if (number == 170 && guest_backed((uint32_t)ctx->gpr[6], 12) &&
-        vm_read32((uint32_t)ctx->gpr[6] + 8) == 0x18) return;
+        (vm_read32((uint32_t)ctx->gpr[6] + 8) == 0x18 || vm_read32((uint32_t)ctx->gpr[6] + 8) == 0)) return;
     if (number == 172 && guest_backed((uint32_t)ctx->gpr[7], 12) &&
         (vm_read32((uint32_t)ctx->gpr[7] + 8) & ~2u) == 0 && guest_backed((uint32_t)ctx->gpr[6], 16) &&
         vm_read32((uint32_t)ctx->gpr[6]) == 0) return;
@@ -263,6 +265,9 @@ extern "C" void ps3_native_syscall_gate(ppu_context* ctx) {
     }
     // Host clocks and allocator operations have state/result regressions.
     if (number == 42 || number == 44 || number == 48 || number == 49 || number == 141 || number == 144 || number == 145 || number == 147 || number == 169 || number == 348 || number == 349 || number == 352) return;
+    if (number == 170 && guest_backed((u32)ctx->gpr[6], 12))
+        std::fprintf(stderr, "[native-blocked] SPU group type=0x%X name_bytes=%u\n",
+                     vm_read32((u32)ctx->gpr[6] + 8), vm_read32((u32)ctx->gpr[6]));
     std::fprintf(stderr, "[native-blocked] LV2 requires audit syscall=%llu lr=0x%08X args=%llX,%llX,%llX,%llX\n",
                  (unsigned long long)number, (uint32_t)ctx->lr, (unsigned long long)ctx->gpr[3],
                  (unsigned long long)ctx->gpr[4], (unsigned long long)ctx->gpr[5], (unsigned long long)ctx->gpr[6]);

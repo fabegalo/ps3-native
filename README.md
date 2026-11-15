@@ -191,24 +191,33 @@ FIFO label fence and a screen-clear command. Original startup creates the
 `FlipPump` and `_SPU_printf_server` threads, an event queue and a connected port.
 The authorized original firmware 4.93 `libsre.prx` now supplies `cellSpurs`:
 440 PPU functions and 149 exports are compiled and bound separately from HLE.
-Its original initializer creates 17 semaphores, imports the SPU image at entry
-`0x818`, reserves an exclusive group of five SPUs, creates their thread objects
-and starts its two PPU control threads. Native SPU group startup now verifies
-the exact AOT image and deployed instruction bytes, preserves mutable data gaps,
-and stops on changed compiled code. An independent synthetic SPU runs on a real
-host thread through LV2, publishes RUN and exits with status 42; no original SPU
-instruction has executed yet. The current strict stop is `NV4097_GET_REPORT`
-(ZPASS, offset `0x7FE0`): actual GPU sample counts, timestamps and ordered
-completion are pending. Fixed visibility values and timestamps created on read
-are not accepted as results.
-Remaining PPU targets and unaudited services stop explicitly.
-An open backend window is not a verified game frame, menu or gameplay.
-Offline discovery found 47 game SPU images: 45 generated without reported
-unsupported instructions; two failed because executable ranges include data
-decoded as instructions. The two embedded firmware SPU images also generated.
-All 47 supported registrations are compiled into the local native module with
-verified input/tool/output hashes. This remains partial coverage: unknown images,
-unsupported instructions and unaudited SPURS workload selection stop explicitly.
+Its original initializers create an exclusive group of five SPUs and a normal
+one-worker group. All six native host workers enter original firmware SPU code;
+the kernel reaches `0x13F4`. Group join waits for actual completion, and synthetic
+mailbox/restart regressions check exit statuses 42 and 17. Terminal SPU stops
+unwind the owned execution engine instead of resuming translated callers.
+Streamed code is prepared offline, matched against the complete loaded payload,
+and checked byte-for-byte on function entry/return. DMA writes retire stale code;
+active code changes and unknown targets stop explicitly.
+
+Real D3D12 ZPASS reports and GPU timestamps now preserve command order without
+presenting early. The hardware fixture checks 4096 visible samples, zero occluded
+samples, and 256 samples after a partial depth clear. Prepared flips return their
+original queue indices and wait for GPU submission; the current backend explicitly
+blocks more than one prepared frame in flight until display surfaces are retained
+independently. An open backend window still does not verify a game frame or menu.
+The latest retail stop is an unprepared PPU target `0x0169AA08`.
+
+All 47 discovered game SPU ELFs, two embedded firmware ELFs and two verified raw
+firmware payloads are compiled locally: 51 registrations with input/tool/output
+hashes. Explicit boundaries separate original code from constant data in four
+payloads; all loaded data remains intact. This is preparation coverage, not complete
+control-flow, ISA, frame or gameplay certification.
+
+The added **God of War Collection (BCUS98229, 02.00)** has a read-only catalog and
+four locally decrypted, structurally validated PPU ELFs. Its initial EBOOT PPU AOT
+has been generated; native startup and the selector/game transitions remain untested.
+Original files and derived proprietary outputs remain outside Git.
 Module availability and per-API execution approval are separate. Attribute and
 video layouts, live mapper quota/backing, real waits/callbacks and disc boot
 metadata have focused synthetic regressions; compressed tiles remain blocked.
@@ -222,8 +231,8 @@ are disabled in strict execution. Fatal diagnostics exit without guest teardown.
 
 **Next task:** finish original CRT/static initialization through strict stops,
 expand prepared indirect targets and audit reached services with real regressions.
-Validate SPU thread lifecycle, image identity and code-write invalidation before
-enabling original SPURS workers.
+Continue original game initialization and validate a real game frame before
+claiming menu or gameplay support.
 The HLE allowlist and runtime guards stop where coverage ends; production
 completeness and broad ABI coverage remain unproven. Existing title-specific
 upstream hooks are not generic compatibility.

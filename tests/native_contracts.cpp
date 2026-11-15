@@ -13,7 +13,9 @@ extern "C" {
 #include "cellSysutil.h"
 #include "cellGcmSys.h"
 #include "cellSpurs.h"
+#include "cellPad.h"
 #include "rsx_tiling.h"
+#include "rsx_commands.h"
 #include "ps3emu/guest_call.h"
 #include <atomic>
 #include <cstdio>
@@ -21,6 +23,8 @@ extern "C" {
 #include <thread>
 #include <chrono>
 #include <string>
+#include <cstdlib>
+#include <ctime>
 #ifdef _WIN32
 #include <process.h>
 #else
@@ -30,6 +34,7 @@ extern "C" {
 uint8_t* vm_base = nullptr;
 void ppu_unlifted_stub(uint64_t, ppu_context*);
 void ps3_hle_call(uint32_t, ppu_context*);
+void ps3_hle_register(uint32_t, const char*, void*);
 void ps3_indirect_call(ppu_context*);
 void lv2_syscall(ppu_context*);
 void ppu_sysprx_register(void);
@@ -62,6 +67,7 @@ unsigned cellGcm_flip_request_count(void);
 u32 ps3_spu_printf_callback(u32);
 void ppu_resv_register(ppu_context*);
 int ppu_stwcx32(uint64_t, uint32_t, uint32_t);
+void ppu_write_coherent(uint32_t, const void*, uint32_t);
 }
 static unsigned callbacks;
 static unsigned gcm_callbacks;
@@ -69,6 +75,24 @@ static uint64_t callback_tls, callback_tid, callback_toc;
 static std::atomic<bool> continued_after_exit{false};
 static std::atomic<bool> once_entered{false}, once_release{false};
 static unsigned once_calls;
+static u32 synthetic_report_target;
+static unsigned synthetic_report_calls;
+static bool synthetic_report_early;
+static unsigned synthetic_submits;
+static int synthetic_submit(void*) {
+    ++synthetic_submits;
+    if (cellGcm_take_flip_pending()) synthetic_report_early = true;
+    return 1; // Explicit CPU-only completion fixture.
+}
+static int synthetic_report(void*, u32 method, u32, u64* timestamp, u32* value) {
+    ++synthetic_report_calls;
+    if (method == 0x1800) {
+        if (synthetic_report_target && vm_read64(synthetic_report_target) != 0xA5A5A5A5A5A5A5A5ull)
+            synthetic_report_early = true;
+        *timestamp = 0x12345678ABCDEF01ull; *value = 0x89ABCDEF;
+    }
+    return 1; // Explicit synthetic backend for ABI/publication tests only.
+}
 static void native_once_initializer(ppu_context*) {
     ++once_calls;
     once_entered.store(true);
@@ -98,7 +122,7 @@ static void callback(uint32_t opd, uint64_t a0, uint64_t a1, uint64_t a2,
     if (opd == 0x12340 && a0 == 0xABCD && a1 == 0x4321 && a2 == 0x24000) callbacks++;
     if (opd == 0x37000 && a0) gcm_callbacks++;
 }
-static void call(ppu_context& ctx, const char* name, uint32_t a0) {
+static void call(ppu_context& ctx, const char* name, uint64_t a0) {
     ctx.gpr[3] = a0;
     ps3_hle_call(ps3_compute_nid(name), &ctx);
 }
@@ -157,7 +181,7 @@ int main(int argc, char** argv) {
         std::puts("Verified typed HLE FS activation, real reads/counts and closed-handle error");
         return 0;
     }
-    if (argc == 2) {
+    if (argc == 2 && std::string(argv[1]) != "gcm_prepared_multiple" && std::string(argv[1]) != "gcm_prepared_backend_missing") {
         if (!strcmp(argv[1], "callback_missing")) {
             if (vm_init()) return 1;
             vm_write32(0x38000, 0x12380); vm_write32(0x38004, 0);
@@ -177,6 +201,12 @@ int main(int argc, char** argv) {
             const auto output = vm_read32(0x30000);
             ctx.gpr[11] = 1; lv2_syscall(&ctx);
             ctx.gpr[11] = 25; ctx.gpr[4] = output; lv2_syscall(&ctx);
+        }
+        if (!strcmp(argv[1], "rtc_calendar_invalid")) {
+            if (vm_init()) return 1;
+            ppu_sysprx_register();
+            ctx.gpr[4] = 0; ctx.gpr[5] = 1;
+            call(ctx, "cellRtcGetDayOfWeek", 2026);
         }
         if (!strcmp(argv[1], "indirect")) { ctx.ctr = 0x12340; ps3_indirect_call(&ctx); }
         if (!strcmp(argv[1], "spu")) { static spu_context spu{}; spu_interp_run(&spu, 0x100); }
@@ -332,11 +362,23 @@ int main(int argc, char** argv) {
         vm_read64(0x26000) > (uint64_t)wall_after || vm_read64(0x26008) >= 1000000000) return 12;
     call(ctx, "cellSysmoduleLoadModule", 9);
     if (ctx.gpr[3]) return 41;
+    call(ctx, "cellSysmoduleInitialize", 0xDEADBEEF);
+    if (ctx.gpr[3]) return 236;
+    call(ctx, "cellSysmoduleInitialize", 0);
+    if (ctx.gpr[3]) return 237;
+    call(ctx, "cellSysmoduleIsLoaded", 9);
+    if (ctx.gpr[3]) return 238;
     call(ctx, "cellRtcGetCurrentTick", 0x26010);
     auto rtc_seconds = vm_read64(0x26010) / 1000000 - 62135596800ull;
     if (ctx.gpr[3] || rtc_seconds < (uint64_t)wall_before || rtc_seconds > (uint64_t)wall_after + 1) return 42;
     call(ctx, "cellRtcGetCurrentTick", 0);
     if ((int64_t)ctx.gpr[3] >= 0) return 43;
+    const u32 dates[][4] = {{1,1,1,1}, {1970,1,1,4}, {1900,3,1,4}, {2000,2,29,2}, {2026,11,15,0}};
+    for (const auto& date : dates) {
+        ctx.gpr[4] = date[1]; ctx.gpr[5] = date[2];
+        call(ctx, "cellRtcGetDayOfWeek", date[0]);
+        if (ctx.gpr[3] != date[3]) return 235;
+    }
     for (unsigned a = 0x27000; a < 0x27014; a += 4) vm_write32(a, 0xA5A5A5A5);
     ctx.gpr[11] = 144; ctx.gpr[3] = 0x27004; ctx.gpr[4] = 0x2700C; lv2_syscall(&ctx);
     auto zone = (int32_t)vm_read32(0x27004), dst = (int32_t)vm_read32(0x2700C);
@@ -359,6 +401,28 @@ int main(int argc, char** argv) {
     if (!allocation || vm_read32(allocation) != 0 || vm_read32(allocation + 0xFFFC) != 0) return 7;
     ctx.gpr[11] = 352; ctx.gpr[3] = 0x25000; lv2_syscall(&ctx);
     if (vm_read32(0x25004) != available - 0x10000) return 8;
+    const u32 local_output = allocation + 0x100;
+    vm_write8(local_output - 1, 0xA5); vm_write8(local_output + 16, 0x5A);
+    const auto local_before = std::time(nullptr);
+    call(ctx, "cellRtcGetCurrentClockLocalTime", local_output);
+    const auto local_after = std::time(nullptr);
+    auto matches_local = [&](std::time_t epoch) {
+        std::tm date{};
+#ifdef _WIN32
+        if (localtime_s(&date, &epoch)) return false;
+#else
+        if (!localtime_r(&epoch, &date)) return false;
+#endif
+        return vm_read16(local_output) == date.tm_year + 1900 && vm_read16(local_output + 2) == date.tm_mon + 1 &&
+            vm_read16(local_output + 4) == date.tm_mday && vm_read16(local_output + 6) == date.tm_hour &&
+            vm_read16(local_output + 8) == date.tm_min && vm_read16(local_output + 10) == date.tm_sec;
+    };
+    if (ctx.gpr[3] || (!matches_local(local_before) && !matches_local(local_after)) || vm_read32(local_output + 12) >= 1000000 ||
+        vm_read8(local_output - 1) != 0xA5 || vm_read8(local_output + 16) != 0x5A) return 233;
+    for (u64 invalid : {0ull, 0xFFFFFFF8ull, 0x100000000ull + local_output}) {
+        call(ctx, "cellRtcGetCurrentClockLocalTime", invalid);
+        if ((u32)ctx.gpr[3] != 0x80010602 || vm_read8(local_output - 1) != 0xA5 || vm_read8(local_output + 16) != 0x5A) return 234;
+    }
     ctx.gpr[11] = 349; ctx.gpr[3] = allocation; lv2_syscall(&ctx);
     if (ctx.gpr[3] != 0) return 9;
     ctx.gpr[11] = 352; ctx.gpr[3] = 0x25000; lv2_syscall(&ctx);
@@ -636,6 +700,20 @@ int main(int argc, char** argv) {
     call(ctx, "sys_lwcond_destroy", condition);
     if ((uint32_t)ctx.gpr[3] != CELL_ESRCH) return 180;
     const auto group_attr = reserved_a + 0x7000, group_output = reserved_a + 0x7100;
+    ps3_hle_register(ps3_compute_nid("cellPadInit"), "cellPadInit", (void*)cellPadInit);
+    ps3_hle_register(ps3_compute_nid("cellPadEnd"), "cellPadEnd", (void*)cellPadEnd);
+    call(ctx, "cellPadEnd", 0);
+    if ((u32)ctx.gpr[3] != 0x80121104) return 217;
+    call(ctx, "cellPadInit", 0);
+    if ((u32)ctx.gpr[3] != 0x80121102) return 218;
+    call(ctx, "cellPadInit", 128);
+    if ((u32)ctx.gpr[3] != 0x80121102) return 219;
+    call(ctx, "cellPadInit", 4);
+    if (ctx.gpr[3]) return 220;
+    call(ctx, "cellPadInit", 4);
+    if ((u32)ctx.gpr[3] != 0x80121103) return 221;
+    call(ctx, "cellPadEnd", 0);
+    if (ctx.gpr[3]) return 222;
     vm_write32(group_attr, 0); vm_write32(group_attr + 4, 0); vm_write32(group_attr + 8, 0x18);
     auto create_group = [&](uint32_t count) {
         ctx.gpr[11] = 170; ctx.gpr[3] = group_output; ctx.gpr[4] = count;
@@ -649,8 +727,13 @@ int main(int argc, char** argv) {
     const auto first_spu_group = vm_read32(group_output);
     vm_write32(group_output, 0xA5A5A5A5);
     if (create_group(2) != 0x8001000A || vm_read32(group_output) != 0xA5A5A5A5) return 156;
+    vm_write32(group_attr + 8, 0);
+    ctx.gpr[11] = 352; ctx.gpr[3] = 0x25000; lv2_syscall(&ctx);
+    const auto available_before_context = vm_read32(0x25004);
     if (create_group(1) || vm_read32(group_output) == first_spu_group) return 157;
     const auto event_spu_group = vm_read32(group_output);
+    ctx.gpr[11] = 352; ctx.gpr[3] = 0x25000; lv2_syscall(&ctx);
+    if (ctx.gpr[3] || vm_read32(0x25004) != available_before_context - 0x40000) return 216;
     ctx.gpr[11] = 173; ctx.gpr[3] = 9999; lv2_syscall(&ctx);
     if ((u32)ctx.gpr[3] != CELL_ESRCH) return 195;
     ctx.gpr[11] = 173; ctx.gpr[3] = first_spu_group; lv2_syscall(&ctx);
@@ -658,6 +741,11 @@ int main(int argc, char** argv) {
     ctx.gpr[11] = 169; ctx.gpr[3] = 6; ctx.gpr[4] = 1; lv2_syscall(&ctx);
     if ((uint32_t)ctx.gpr[3] != 0x8001000A) return 158;
     const auto thread_attr = reserved_a + 0x7200, thread_args = reserved_a + 0x7300, thread_output = reserved_a + 0x7400;
+    vm_write32(thread_output + 16, 0xA5A5A5A5); vm_write32(thread_output + 20, 0xA5A5A5A5);
+    ctx.gpr[11] = 178; ctx.gpr[3] = 9999; ctx.gpr[4] = thread_output + 16; ctx.gpr[5] = thread_output + 20; lv2_syscall(&ctx);
+    if ((u32)ctx.gpr[3] != CELL_ESRCH || vm_read32(thread_output + 16) != 0xA5A5A5A5 || vm_read32(thread_output + 20) != 0xA5A5A5A5) return 212;
+    ctx.gpr[11] = 178; ctx.gpr[3] = first_spu_group; lv2_syscall(&ctx);
+    if ((u32)ctx.gpr[3] != CELL_ESTAT || vm_read32(thread_output + 16) != 0xA5A5A5A5 || vm_read32(thread_output + 20) != 0xA5A5A5A5) return 213;
     vm_write32(thread_attr, 0); vm_write32(thread_attr + 4, 0); vm_write32(thread_attr + 8, 0);
     for (uint32_t i = 0; i < 4; ++i) vm_write64(thread_args + i * 8, 0x1122334400000042ull + i);
     auto initialize_spu = [&](uint32_t index) {
@@ -840,7 +928,7 @@ int main(int argc, char** argv) {
         connect_lifecycle(event_spu_group, unmatched_queue, 1) != CELL_EBUSY) return 194;
     ctx.gpr[11] = 130; ctx.gpr[3] = unmatched_queue; ctx.gpr[4] = 0; ctx.gpr[5] = 200; lv2_syscall(&ctx);
     if ((uint32_t)ctx.gpr[3] != CELL_ETIMEDOUT) return 195;
-    const u32 thread_words[] = {(0x81u << 23) | (42u << 7) | 7u,
+    const u32 thread_words[] = {(0x00du << 21) | (29u << 7) | 7u,
         (0x10du << 21) | (28u << 7) | 7u, 0x102u, 0x40200000u};
     for (u32 i = 0; i < 4; ++i) vm_write32(image_source + 128 + i * 4, thread_words[i]);
     spu_begin_image(901); thread_spu_recomp_register(); spu_begin_image(0);
@@ -851,6 +939,25 @@ int main(int argc, char** argv) {
     if (ctx.gpr[3]) return 204;
     ctx.gpr[11] = 130; ctx.gpr[3] = unmatched_queue; ctx.gpr[4] = 0; ctx.gpr[5] = 1000; lv2_syscall(&ctx);
     if (ctx.gpr[3] || ctx.gpr[4] != 0xFFFFFFFF53505500ull || ctx.gpr[5] != event_spu_group || ctx.gpr[6] || ctx.gpr[7]) return 205;
+    std::atomic<bool> join_entered{false}, join_finished{false};
+    u32 join_result = UINT32_MAX;
+    const auto join_cause = reserved_a + 0x9500, join_status = join_cause + 4;
+    vm_write32(join_cause, 0xA5A5A5A5); vm_write32(join_status, 0xA5A5A5A5);
+    std::thread group_joiner([&] {
+        ppu_context local{}; local.thread_id = 120;
+        local.gpr[11] = 178; local.gpr[3] = event_spu_group;
+        local.gpr[4] = join_cause; local.gpr[5] = join_status;
+        join_entered.store(true); lv2_syscall(&local);
+        join_result = (u32)local.gpr[3]; join_finished.store(true);
+    });
+    while (!join_entered.load()) std::this_thread::yield();
+    std::this_thread::sleep_for(std::chrono::milliseconds(10));
+    const bool joined_early = join_finished.load() || vm_read32(join_cause) != 0xA5A5A5A5 || vm_read32(join_status) != 0xA5A5A5A5;
+    // Internal mailbox delivery; guest syscall 190 retains its separate audit gate.
+    ctx.gpr[11] = 190; ctx.gpr[3] = event_spu_thread; ctx.gpr[4] = 42;
+    if (!lv2_try_syscall(&ctx) || ctx.gpr[3]) std::abort();
+    group_joiner.join();
+    if (joined_early || join_result || vm_read32(join_cause) != 2 || vm_read32(join_status) != 0) return 211;
     const auto thread_deadline = std::chrono::steady_clock::now() + std::chrono::seconds(2);
     do {
         // Internal completion check; guest syscall 165 remains gated pending its full state audit.
@@ -860,20 +967,77 @@ int main(int argc, char** argv) {
         std::this_thread::yield();
     } while (std::chrono::steady_clock::now() < thread_deadline);
     if (ctx.gpr[3] || vm_read32(thread_output) != 42) return 207;
+    ctx.gpr[11] = 173; ctx.gpr[3] = event_spu_group; lv2_syscall(&ctx);
+    if (ctx.gpr[3]) return 214;
+    ctx.gpr[11] = 130; ctx.gpr[3] = unmatched_queue; ctx.gpr[4] = 0; ctx.gpr[5] = 1000; lv2_syscall(&ctx);
+    if (ctx.gpr[3] || ctx.gpr[4] != 0xFFFFFFFF53505500ull || ctx.gpr[5] != event_spu_group) return 215;
+    ctx.gpr[11] = 190; ctx.gpr[3] = event_spu_thread; ctx.gpr[4] = 17;
+    if (!lv2_try_syscall(&ctx) || ctx.gpr[3]) return 216;
+    ctx.gpr[11] = 178; ctx.gpr[3] = event_spu_group; ctx.gpr[4] = join_cause; ctx.gpr[5] = join_status; lv2_syscall(&ctx);
+    if (ctx.gpr[3] || vm_read32(join_cause) != 2 || vm_read32(join_status)) return 217;
+    ctx.gpr[11] = 165; ctx.gpr[3] = event_spu_thread; ctx.gpr[4] = thread_output;
+    if (!lv2_try_syscall(&ctx) || ctx.gpr[3] || vm_read32(thread_output) != 17) return 218;
     const auto command_start = vm_read32(gcm_context + 8);
     const auto control = (u32)(uintptr_t)cellGcmGetControlRegister();
     const auto previous_put = vm_read32(control), previous_flips = cellGcm_flip_request_count();
+    rsx_backend report_backend{}; report_backend.report = synthetic_report; report_backend.submit = synthetic_submit;
+    auto* previous_backend = rsx_get_backend(); rsx_set_backend(&report_backend);
+    ps3_hle_register(ps3_compute_nid("cellGcmSetFlipImmediate"), "cellGcmSetFlipImmediate", (void*)cellGcmSetFlipImmediate);
+    call(ctx, "cellGcmSetFlipImmediate", 0);
+    if ((u32)ctx.gpr[3] != 0x802100FF || cellGcm_flip_request_count() != previous_flips) return 223;
+    call(ctx, "cellGcmSetFlipImmediate", 8);
+    if ((u32)ctx.gpr[3] != 0x802100FF || cellGcm_flip_request_count() != previous_flips) return 224;
     ctx.gpr[4] = 7; call(ctx, "cellGcmSetPrepareFlip", gcm_context);
     if ((int64_t)ctx.gpr[3] >= 0 || vm_read32(gcm_context + 8) != command_start) return 120;
     ctx.gpr[4] = 0; call(ctx, "cellGcmSetPrepareFlip", gcm_context);
-    if (ctx.gpr[3] || vm_read32(gcm_context + 8) != command_start + 4 ||
-        vm_read32(control) != previous_put + 4 || cellGcm_flip_request_count() != previous_flips ||
+    if (argc > 1 && std::string(argv[1]) == "gcm_prepared_multiple") {
+        ctx.gpr[4] = 0; call(ctx, "cellGcmSetPrepareFlip", gcm_context); return 225;
+    }
+    if (ctx.gpr[3] != 1 || vm_read32(command_start) != 0x0004E944 || vm_read32(command_start + 4) ||
+        vm_read32(gcm_context + 8) != command_start + 8 ||
+        vm_read32(control) != previous_put + 8 || cellGcm_flip_request_count() != previous_flips ||
         cellGcm_take_flip_pending()) return 121;
+    call(ctx, "cellGcmSetFlipImmediate", 0);
+    if ((u32)ctx.gpr[3] != 0x802100FF) return 226;
+    call(ctx, "cellGcmSetFlipImmediate", 1);
+    if (ctx.gpr[3] || cellGcm_take_flip_pending()) return 227;
     cellGcmTickFlip();
-    if (cellGcm_flip_request_count() != previous_flips || cellGcm_take_flip_pending()) return 122;
+    if (cellGcm_flip_request_count() != previous_flips + 1 || cellGcm_take_flip_pending()) return 122;
+    if (argc > 1 && std::string(argv[1]) == "gcm_prepared_backend_missing") report_backend.submit = nullptr;
     cellGcm_rsx_process_fifo();
-    if (cellGcm_flip_request_count() != previous_flips + 1 || !cellGcm_take_flip_pending() ||
+    if (synthetic_submits != 1 || cellGcm_flip_request_count() != previous_flips + 1 || !cellGcm_take_flip_pending() ||
         cellGcm_take_flip_pending()) return 123;
+    cellGcmTickFlip(); ppu_gcm_pump();
+    if (cellGcmGetFlipStatus()) return 228;
+    for (u32 ordinal = 2; ordinal <= 8; ++ordinal) {
+        ctx.gpr[4] = 0; call(ctx, "cellGcmSetPrepareFlip", gcm_context);
+        const u32 index = ordinal & 7;
+        if (ctx.gpr[3] != index || cellGcm_take_flip_pending()) return 229;
+        cellGcm_rsx_process_fifo();
+        if (cellGcm_take_flip_pending() || cellGcm_flip_request_count() != previous_flips + ordinal - 1) return 230;
+        call(ctx, "cellGcmSetFlipImmediate", index);
+        if (ctx.gpr[3] || !cellGcm_take_flip_pending() || cellGcm_flip_request_count() != previous_flips + ordinal) return 231;
+        cellGcmTickFlip(); ppu_gcm_pump();
+        if (cellGcmGetFlipStatus()) return 232;
+    }
+    auto report_method = [&](u32 method, u32 argument) {
+        const auto cursor = vm_read32(gcm_context + 8);
+        vm_write32(cursor, (1u << 18) | method); vm_write32(cursor + 4, argument);
+        vm_write32(gcm_context + 8, cursor + 8); vm_write32(control, cursor + 8 - 0x200000);
+        cellGcm_rsx_process_fifo();
+    };
+    report_method(0x17C8, 1); report_method(0x17CC, 1);
+    report_method(0x1800, (1u << 24) | (7 * 16));
+    call(ctx, "cellGcmGetTimeStamp", 7);
+    if (ctx.gpr[3] != 0x12345678ABCDEF01ull || cellGcmGetReportDataAddress(7)->value != 0x89ABCDEF) return 208;
+    synthetic_report_target = reserved_a + 0x9000;
+    std::memset(vm_base + synthetic_report_target - 1, 0xA5, 18);
+    report_method(0x1A8, 0xBAD68000);
+    report_method(0x1800, (1u << 24) | (mapped_io + 0x9000));
+    if (synthetic_report_early || synthetic_report_calls != 4 || vm_read64(synthetic_report_target) != 0x12345678ABCDEF01ull ||
+        vm_read32(synthetic_report_target + 8) != 0x89ABCDEF || vm_read32(synthetic_report_target + 12) ||
+        vm_read8(synthetic_report_target - 1) != 0xA5 || vm_read8(synthetic_report_target + 16) != 0xA5) return 209;
+    report_method(0x1A8, 0x66626660); rsx_set_backend(previous_backend);
     ctx.gpr[4] = 0x21000; ctx.gpr[5] = 0x22000; ctx.gpr[6] = 0x23000;
     call(ctx, "_sys_spu_printf_initialize", 0x20000);
     if (ctx.gpr[3] || ps3_spu_printf_callback(0) != 0x20000 ||
@@ -965,6 +1129,14 @@ int main(int argc, char** argv) {
     ctx.gpr[4] = bulk_source; ctx.gpr[5] = 32; call(ctx, "_sys_memcpy", bulk);
     if (ctx.gpr[3] != bulk || std::memcmp(vm_base + bulk, vm_base + bulk_source, 32) ||
         vm_read8(bulk - 1) != 0x12 || vm_read8(bulk + 32) != 0x34) return 135;
+    reserved_ppu.reserve_addr = bulk & ~127u;
+    reserved_spu.resv_ea = bulk & ~127u; reserved_spu.resv_valid = 1; reserved_spu.event_status = 0;
+    spu_lockline_lock(); spu_coh_reserve(&reserved_spu, bulk); spu_lockline_unlock();
+    const u8 own_host_payload[16] = {1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16};
+    ppu_write_coherent(bulk, own_host_payload, sizeof own_host_payload);
+    if (std::memcmp(vm_base + bulk, own_host_payload, sizeof own_host_payload) ||
+        reserved_ppu.reserve_addr <= UINT32_MAX || reserved_spu.resv_valid || !(reserved_spu.event_status & SPU_EVENT_LR)) return 210;
+    spu_coh_unregister(&reserved_spu);
     vm_shutdown();
     std::puts("Verified first-callback retention, real mutual exclusion and monotonic clock");
     return 0;
