@@ -129,7 +129,22 @@
      if (__builtin_expect(ppu_vm_size == 0, 1)) return 0;
      if (__builtin_expect((uint64_t)a + n <= ppu_vm_size, 1)) return 0;
      return vm_oob_report(a, n);
-@@ -2610,6 +2668,12 @@
+@@ -2315,8 +2373,14 @@
+  * read into a commit; on POSIX it is a SIGSEGV, and the diagnostic takes the
+  * title down with it. Off Windows, ask the kernel first: write() from an
+  * unreadable page fails with EFAULT instead of faulting. */
++#ifdef PS3_NATIVE_STRICT
++extern "C" int ps3_native_guest_range_backed(uint32_t, uint32_t);
++#endif
+ static bool ppu_dump_readable(uint32_t ea, uint32_t n)
+ {
++#ifdef PS3_NATIVE_STRICT
++    return ps3_native_guest_range_backed(ea, n) != 0;
++#endif
+     if (vm_oob(ea, n)) return false;
+ #ifdef _WIN32
+     return true;
+@@ -2610,6 +2674,12 @@
  
  extern "C" void ps3_indirect_call(ppu_context* ctx)
  {
@@ -142,7 +157,7 @@
      static int on = -1;
      if (on < 0) on = getenv("PPU_CSCHECK") ? 1 : 0;
      { static int hg = -1; if (hg < 0) hg = getenv("PS3_ICALL_GATE") ? 1 : 0;
-@@ -2889,6 +2953,12 @@
+@@ -2889,6 +2959,12 @@
      }
  
      ppu_fn fn = ppu_lookup_icall(addr);
@@ -155,7 +170,7 @@
      if (!fn) {
          /* OPD-swap clobber fixup: a malformed memcpy (game func_0036FA74) writes
           * some handler/vtable OPDs as {TOC, func} (code & toc SWAPPED), so lifted
-@@ -3202,6 +3272,10 @@
+@@ -3202,6 +3278,10 @@
   * continue (the result is undefined, but it won't crash the link). */
  extern "C" void ppu_unlifted_stub(uint64_t addr, ppu_context* ctx)
  {
@@ -166,7 +181,7 @@
      (void)ctx;
      static int logged = 0;
      if (logged < 20) {
-@@ -3237,8 +3311,15 @@
+@@ -3237,8 +3317,15 @@
  #define PS3_SC_INFLIGHT_MAX 64
  extern "C" uint32_t g_sc_inflight[PS3_SC_INFLIGHT_MAX] = { 0 };
  
@@ -182,7 +197,7 @@
      /* One-shot: PPU_GUARD_EA=<hex> arms the page guard on that address without
       * waiting for a store watch to fire. Armed here because lv2_syscall runs
       * early and unconditionally; used to measure how far a guest block clear
-@@ -3312,11 +3393,10 @@
+@@ -3312,11 +3399,10 @@
      switch (num) {
      case 352: {   /* sys_memory_get_user_memory_size(sys_memory_info_t* info)
                     * info = { u32 total_user_memory; u32 available_user_memory } */
@@ -198,7 +213,7 @@
      }
      case 330: {   /* sys_mmapper_allocate_address(u64 size, u64 flags,
                     * u64 alignment, u32* alloc_addr) -> reserve guest VA range */
-@@ -3349,6 +3429,11 @@
+@@ -3349,6 +3435,11 @@
      case 988:     /* sys_tty_write — canonical LV2 number (psdevwiki); some CRTs
                     * use this instead of 403. Same ABI. */
      case 403: {   /* sys_tty_write(s32 ch, cptr buf, u32 len, ptr pwritelen) */
@@ -210,7 +225,7 @@
          uint32_t ch   = (uint32_t)ctx->gpr[3];
          uint32_t buf  = (uint32_t)ctx->gpr[4];
          uint32_t len  = (uint32_t)ctx->gpr[5];
-@@ -3527,6 +3612,10 @@
+@@ -3527,6 +3618,10 @@
                  return;
              }
          }
@@ -221,7 +236,7 @@
          static int logged = 0;
          if (logged < 30) {
              fprintf(stderr, "[ppu] lv2_syscall %llu (stub)\n", (unsigned long long)num);
-@@ -3558,6 +3647,17 @@
+@@ -3558,6 +3653,17 @@
   * allocations. BSS is owned too, even though it has no file-backed bytes. */
  struct ppu_image_range { uint64_t begin, end; };
  static std::vector<ppu_image_range> g_ppu_image_ranges;
@@ -239,7 +254,7 @@
  extern "C" void sys_memory_set_image_query(uint64_t (*query)(uint64_t, uint64_t));
  
  static uint64_t ppu_image_overlap_end(uint64_t addr, uint64_t end)
-@@ -3569,10 +3669,20 @@
+@@ -3569,10 +3675,20 @@
  }
  /* Default used by the PS3 executable entry path when PROC_PARAM is absent. */
  static int32_t g_ppu_primary_priority = 1001;
@@ -260,7 +275,7 @@
      FILE* f = fopen(path, "rb");
      if (!f) { fprintf(stderr, "[ppu] cannot open %s\n", path); return 0; }
      fseek(f, 0, SEEK_END);
-@@ -3612,7 +3722,12 @@
+@@ -3612,7 +3728,12 @@
                      be32(param + 4) == 0x13BCC5F6u &&
                      priority >= 0 && priority <= 3071) {
                      g_ppu_primary_priority = priority;
@@ -273,7 +288,7 @@
                  }
              }
              continue;
-@@ -3817,6 +3932,9 @@
+@@ -3817,6 +3938,9 @@
      uint32_t off  = __atomic_fetch_add(&s_bump, total, __ATOMIC_RELAXED);
      uint32_t base = PPU_TLS_IMG + total + off;  /* main block occupies the first */
      if (base + total > lim) {                   /* out of room: share, as before */
@@ -283,7 +298,7 @@
          static int s_warned = 0;
          if (!__atomic_exchange_n(&s_warned, 1, __ATOMIC_RELAXED))
              fprintf(stderr, "[ppu] TLS window full after %u thread blocks: later "
-@@ -3840,6 +3958,9 @@
+@@ -3840,6 +3964,9 @@
      if (!fn) {
          fprintf(stderr, "[ppu] thread entry 0x%08X (cia=0x%08X) not registered\n",
                  code, (uint32_t)ctx->cia);
@@ -293,7 +308,33 @@
          return;
      }
      g_active_ctx = ctx;
-@@ -3936,11 +4057,17 @@
+@@ -3904,11 +4031,24 @@
+  * several per movie -- never runs out: only more than 64 host threads making
+  * callbacks AT ONCE share a slot. */
+ static std::atomic<uint64_t> s_cb_slots_used{0};
++static std::atomic<uint64_t> s_cb_slots_backed{0};
++extern "C" int ppu_callback_stack_range_backed(uint32_t address, uint32_t size)
++{
++    if (!size || address < VM_CB_STACK_BASE) return 0;
++    const uint64_t offset = (uint64_t)address - VM_CB_STACK_BASE;
++    const uint64_t slot = offset / VM_CB_STACK_SIZE;
++    if (slot >= VM_CB_STACK_REGION / VM_CB_STACK_SIZE ||
++        offset % VM_CB_STACK_SIZE + size > VM_CB_STACK_SIZE) return 0;
++    return (s_cb_slots_backed.load(std::memory_order_acquire) >> slot) & 1u;
++}
+ struct cb_slot_owner {
+     int slot = -1;
+     ~cb_slot_owner()
+     {
+-        if (slot >= 0) s_cb_slots_used.fetch_and(~(1ull << slot), std::memory_order_acq_rel);
++        if (slot >= 0) {
++            s_cb_slots_backed.fetch_and(~(1ull << slot), std::memory_order_acq_rel);
++            s_cb_slots_used.fetch_and(~(1ull << slot), std::memory_order_acq_rel);
++        }
+     }
+ };
+ static thread_local cb_slot_owner t_cb_slot;
+@@ -3936,11 +4076,18 @@
              s_hi = s_lo + VM_CB_STACK_SIZE;
          } else {
              /* Out of slots: share the last one, and say so. */
@@ -308,10 +349,11 @@
 +        if (vm_commit(s_lo, VM_CB_STACK_SIZE) != CELL_OK) {
 +            fprintf(stderr, "[native-blocked] PPU callback stack backing failed\n"); fflush(stderr); ps3_native_stop();
 +        }
++        if (i < slots) s_cb_slots_backed.fetch_or(1ull << i, std::memory_order_release);
      }
      if (active) {
          uint32_t sp = (uint32_t)active->gpr[1];
-@@ -3959,6 +4086,12 @@
+@@ -3959,6 +4106,12 @@
      uint32_t code = 0, toc = 0;
      ppu_opd_resolve(opd_addr, &code, &toc);
      ppu_fn fn = ppu_lookup(code);
@@ -324,7 +366,7 @@
      if (!fn) {  /* OPD code clobbered? fall back to a captured fixup */
          for (int i = 0; i < s_opd_fixup_n; i++)
              if (s_opd_fixups[i].opd == opd_addr) {
-@@ -3981,7 +4114,13 @@
+@@ -3981,7 +4134,13 @@
      ctx.gpr[2]  = toc;
      ctx.gpr[3]  = a0; ctx.gpr[4] = a1; ctx.gpr[5] = a2; ctx.gpr[6] = a3;
      ctx.gpr[7]  = a4; ctx.gpr[8] = a5; ctx.gpr[9] = a6; ctx.gpr[10] = a7;
@@ -339,7 +381,7 @@
      ctx.cia     = code;
      /* Save/restore g_active_ctx: this scratch ctx lives on the stack, so leaving
       * g_active_ctx pointing at it after we return leaves a DANGLING pointer once the
-@@ -4027,7 +4166,12 @@
+@@ -4027,7 +4186,12 @@
      *result = 0;
      if (!code) return 0;
      ppu_fn fn = ppu_lookup(code);
@@ -353,7 +395,7 @@
  
      ppu_context ctx;
      memset(&ctx, 0, sizeof(ctx));
-@@ -4035,7 +4179,12 @@
+@@ -4035,7 +4199,12 @@
      ctx.gpr[2]  = toc;
      ctx.gpr[3]  = a0; ctx.gpr[4] = a1; ctx.gpr[5] = a2; ctx.gpr[6] = a3;
      ctx.gpr[7]  = a4; ctx.gpr[8] = a5; ctx.gpr[9] = a6; ctx.gpr[10] = a7;
@@ -367,7 +409,7 @@
      ctx.cia     = code;
      /* Save/restore g_active_ctx (see ppu_guest_call): the scratch ctx is stack-local,
       * so a dangling g_active_ctx after return corrupts the crash handler / diagnostics. */
-@@ -4110,7 +4259,8 @@
+@@ -4110,7 +4279,8 @@
       * get_stack_information(49) would report a {0,0} stack for the main
       * thread. Backfill the real region now that the harness chose it. */
      { extern void ppu_thread_set_main_stack(uint32_t, uint32_t);
@@ -377,7 +419,7 @@
      /* For samplers on other threads (a port's periodic stack dump): the main
       * thread's context lives on this frame, not in the thread table. */
      g_ppu_main_ctx = &ctx;
-@@ -4245,6 +4395,9 @@
+@@ -4245,6 +4415,9 @@
      fprintf(stderr, "[ppu] run: code 0x%08X, toc 0x%08X, sp 0x%08X\n", code, toc, (uint32_t)ctx.gpr[1]);
      g_active_ctx = &ctx;
      ppu_resv_register(&ctx);   /* main/entry thread: join the reservation set too */
@@ -2660,7 +2702,7 @@
      printf("[cellGame] ContentPermit() -> %s\n",
             s_check_is_disc ? "/dev_bdvd/PS3_GAME" : "game-data dir");
  
-@@ -454,11 +545,63 @@
+@@ -454,11 +545,64 @@
          memcpy(vm_base + usr_ea, tmp, (size_t)n + 1);
      }
  
@@ -2698,16 +2740,17 @@
 +        fprintf(stderr, "[native-blocked] host game-data metadata lookup failed\n");
 +        fflush(stderr); ps3_native_stop();
 +    }
-+    if (exists && (st.st_size > (1 << 20) || (size && st.st_size >= 20))) {
-+        fprintf(stderr, "[native-blocked] existing game-data size metadata requires audit\n");
-+        fflush(stderr); ps3_native_stop();
-+    }
-+    if (exists && (sfo_read_string(sfo, "CATEGORY", category, sizeof category) || strcmp(category, "GD"))) {
++    if (exists && (st.st_size > (1 << 20) ||
++                   sfo_read_string(sfo, "CATEGORY", category, sizeof category) || strcmp(category, "GD"))) {
 +        __atomic_store_n(&s_check_state, 0, __ATOMIC_RELEASE);
 +        return CELL_GAME_ERROR_BROKEN;
 +    }
 +    if (size) {
-+        const u32 values[3] = {(u32)content_free_kb_reported(), exists ? UINT32_MAX : 0, 0};
++        /* Original basic_plugins (ELF SHA256 29a7fec140c26b1b574fff6e05459935ec25498709a8efc08d5cc5da9c83bc3c):
++         * game interface 1 slot 72 -> 0x2D250 -> 0x33674; 0x33740..0x33764
++         * assigns sysSizeKB=3 for GAMEDATA, independently of host allocation.
++         * 0x33F74..0x33F90 preserves NOTCALC when directory size is unknown. */
++        const u32 values[3] = {(u32)content_free_kb_reported(), exists ? UINT32_MAX : 0, 3};
 +        uint8_t data[12];
 +        for (unsigned i = 0; i < 3; ++i) {
 +            data[i * 4] = (uint8_t)(values[i] >> 24); data[i * 4 + 1] = (uint8_t)(values[i] >> 16);
@@ -2724,7 +2767,7 @@
      /* dirName is a GUEST address -- translate BEFORE any use. The old code
       * printf'd the raw EA as a host char* and crashed (LBP: read fault at
       * 0x94AEA0 = the guest EA of its dir string). */
-@@ -641,6 +784,15 @@
+@@ -641,6 +785,15 @@
   * and expects to read it back on the next run. */
  s32 cellGameSetParamString(s32 id, const char* buf)
  {
@@ -2740,7 +2783,7 @@
      /* `buf` is a GUEST address (raw r4), like GetParamString's -- a host
       * dereference here faults. See [[guest-pointer-abi]]. */
      uint32_t buf_ea = (uint32_t)(uintptr_t)buf;
-@@ -731,6 +883,25 @@
+@@ -731,6 +884,25 @@
  s32 cellGameCreateGameData(CellGameSetInitParams* init, char* tmp_contentInfoPath,
                              char* tmp_usrdirPath)
  {
@@ -7103,6 +7146,39 @@
      return CELL_OK;
  }
  
+@@ -867,6 +952,9 @@
+     memset(&port->param, 0, sizeof(port->param));
+     port->param.nChannel = nch;
+     port->param.nBlock   = nblk;
++#ifdef PS3_NATIVE_STRICT
++    port->param.level = 1.0f; /* Default gain; nonzero attributes are gated before allocation. */
++#endif
+     port->read_index  = 0;
+     port->write_index = 0;
+ 
+@@ -900,6 +988,22 @@
+ 
+     mutex_unlock(&s_audio_mutex);
+     return CELL_OK;
++}
++
++int cellAudioGuestRangeBacked(u32 address, u32 size)
++{
++    if (!s_audio_initialized || !size) return 0;
++    const u64 end = (u64)address + size;
++    int backed = 0;
++    mutex_lock(&s_audio_mutex);
++    for (unsigned i = 0; i < CELL_AUDIO_PORT_MAX; ++i) {
++        const AudioPortSlot* port = &s_ports[i];
++        if (port->in_use &&
++            ((address >= port->port_addr && end <= port->port_addr + port->buf_size) ||
++             (address >= port->read_idx_addr && end <= port->read_idx_addr + 8))) { backed = 1; break; }
++    }
++    mutex_unlock(&s_audio_mutex);
++    return backed;
+ }
+ 
+ s32 cellAudioPortClose(u32 portNum)
 --- a/libs/misc/cellAvconfExt.c
 +++ b/libs/misc/cellAvconfExt.c
 @@ -27,6 +27,13 @@

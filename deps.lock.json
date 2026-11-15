@@ -8,7 +8,7 @@
     "patches": [
       {
         "path": "patches/ps3recomp/0001-strict-aot-execution.patch",
-        "sha256": "05d82f91c5f25c1329402cf30f134fdcb7205e91222424c38e5852e2003e110e",
+        "sha256": "f462feb7c1a751de1c2e7966262bc2b1b87c73864dd70d5a752a65333d6e1881",
         "source_hash_normalization": "LF",
         "files": {
           "runtime/ppu/ppu_hle.cpp": {
@@ -17,7 +17,7 @@
           },
           "runtime/ppu/ppu_loader.cpp": {
             "before": "3790c09cd3f40458bd64d25fb9b5fb062fbdd0593d5eb27f1f312b3d514eb534",
-            "after": "c589ca426c2ea81c7bcf58a7f1d614b711cc2647e3f0e70979dc124c2df4cd57"
+            "after": "9f881dc6e7a548b4b62b6aa67ffd798c6d7a1f7030d286ad911b712f1daff36e"
           },
           "runtime/ppu/ppu_sysprx.cpp": {
             "before": "aa768c1660855d4b077d48e4384df2509285da002e33e17d5dc7355f8789ba6d",
@@ -65,7 +65,7 @@
           },
           "libs/system/cellGame.c": {
             "before": "6f8cdf59ecf4a7fe976552d7d99b6181452c8ce879b450e5d805760133b39a12",
-            "after": "4ac7ac909b1d1ea00e95de1051cd35008b793e16405bea103b779795484e1b22"
+            "after": "67ee7c5d48092381e6faa39bb2cc2ee00be53b75a9b26c2e7d7289a9f03a1a8c"
           },
           "runtime/syscalls/sys_memory.c": {
             "before": "55c96f509e96e3f626bb2758826a7b03ac4683092b82a6dd6bb942cfaafee4fa",
@@ -229,7 +229,7 @@
           },
           "libs/audio/cellAudio.c": {
             "before": "6df6495dbe487ead116a14c688d565a483898ce746d6e84ad7ac201138b0a4c9",
-            "after": "89690cc5acff273297e979bf9139b093ce2214794c9bfb8710618dbf868ba0f0"
+            "after": "e2fa58adcb9c1ce9226c3e1871cd863ace9d20c1fb6cb3ed4aeaa5e442261b72"
           },
           "libs/misc/cellAvconfExt.c": {
             "before": "a994079ff28e40a1bb78c1875c7373e3393728536153099447a2e62c7a15d713",

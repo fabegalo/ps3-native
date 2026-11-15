@@ -11,6 +11,7 @@ void lv2_syscall(ppu_context*);
 uint32_t ppu_thread_allocate_main_stack(uint32_t);
 uint32_t ppu_primary_stack_size(void);
 int32_t sys_process_is_stack(uint32_t);
+void ppu_dump_guest_stack(ppu_context*, const char*);
 }
 int main(int argc, char** argv) {
     if ((argc != 2 && argc != 3) || vm_init() != 0) return 1;
@@ -26,6 +27,9 @@ int main(int argc, char** argv) {
     process.gpr[3] = pid + 1; lv2_syscall(&process);
     if ((uint32_t)process.gpr[3] != 0x80010005 || vm_read32(0x20014) != 0xA5A5A5A5) return 4;
     ppu_recomp_register();
+    // A diagnostic probe of an absent stack must not become a guest fault.
+    ppu_context absent_stack{};
+    ppu_dump_guest_stack(&absent_stack, "unmapped-regression");
     const auto stack = ppu_thread_allocate_main_stack(ppu_primary_stack_size());
     if (!stack || !sys_process_is_stack(stack - 1) || ppu_thread_allocate_main_stack(0x10000) ||
         sys_process_is_stack(0xCFFFFFFF) || !sys_process_is_stack(0xD0000000) ||

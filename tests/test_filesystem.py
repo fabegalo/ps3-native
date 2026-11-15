@@ -85,7 +85,7 @@ class FilesystemTests(unittest.TestCase):
             check('fs_data_missing')  # An empty directory is not installed game data.
             (data / 'PARAM.SFO').write_bytes(sfo('GD'))
             check('fs_data_present')
-            check('fs_data_size', 86)
+            check('fs_data_size')
             (data / 'PARAM.SFO').write_bytes(sfo('DG'))
             check('fs_data_broken')
             (data / 'PARAM.SFO').write_bytes(b'\0PSF' + bytes(16))

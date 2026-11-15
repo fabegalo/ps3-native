@@ -210,8 +210,10 @@ El Chavo prints `FIOS 1.3.5 initialized` and reads Brazilian Portuguese from
 the host UI language. It creates installation data through bounded HLE staging,
 copies and synchronizes the original 96,738-byte icon, and atomically publishes
 the directory with a real SFO. The copied icon matches the original SHA-256.
-The next boot finds this installation and stops at existing-data size metadata:
-the firmware meaning of `sysSizeKB` still requires verification.
+The next boot preserves and recognizes this installation. Offline study of the
+original `basic_plugins` game interface confirmed `sysSizeKB=3` for GAMEDATA;
+unknown content size remains NOTCALC. Startup now stops at
+`sceNpTrophyCreateContext`, whose context/signature handling still requires audit.
 Original game frames remain unverified.
 TTY output preserves binary bytes and real write counts. Read-only game-data
 checks validate paths, SFO category and output ranges; empty directories are not
@@ -232,10 +234,13 @@ four locally decrypted, structurally validated PPU ELFs. Its initial EBOOT has
 9,951 PPU functions compiled locally and 12 SPU programs registered, including
 the original SPURS firmware. The authorized original `libnet.prx` is also bound
 by AOT: 358 PPU functions, 100 exports and its genuine module-start entry.
-Native startup passes its initialization path, reads `defaultSettings.cxml`,
-configures real stereo LPCM output, starts the host mixer and opens the logo's
-sound bank. It then stops on an unmapped low-memory access in the translated
-sound-bank loader; null calls and low-memory accesses are no longer ignored.
+Native startup passes its initialization path and reads `defaultSettings.cxml`.
+Recognizing actual callback-stack allocations fixes an earlier EFAULT that
+prevented SPURS and sound-library initialization. The original six SPURS workers
+now start; the host stereo mixer starts and an eight-channel guest port opens.
+Startup stops on a streamed SPU kernel at LS 0xA00. Offline preparation identifies
+a WWS kernel that generates register save/restore code at LS 0x3FEC0; the current
+AOT contract cannot prepare those runtime-generated variants. No interpreter is used.
 No game frame, selector transition or gameplay is verified. Original and derived
 proprietary files remain outside Git.
 Kernel mutex creation/destruction, uncontended locks, recursion and try-lock

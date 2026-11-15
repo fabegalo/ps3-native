@@ -40,6 +40,7 @@ void ps3_hle_register(uint32_t, const char*, void*);
 int32_t sys_net_initialize_network_ex(void*);
 int32_t cellAudioInit(void);
 int32_t cellAudioQuit(void);
+int32_t cellAudioPortClose(uint32_t);
 void ps3_indirect_call(ppu_context*);
 void lv2_syscall(ppu_context*);
 void ppu_sysprx_register(void);
@@ -63,6 +64,8 @@ uint64_t ppu_thread_register_main(void);
 uint64_t ppu_thread_register_main_priority(int32_t);
 int lv2_try_syscall(ppu_context*);
 s32 sys_ppu_thread_once(u32, u32);
+int ps3_native_guest_range_backed(uint32_t, uint32_t);
+int ppu_callback_stack_range_backed(uint32_t, uint32_t);
 int sys_event_queue_push_by_id(uint32_t, uint64_t, uint64_t, uint64_t, uint64_t);
 uint32_t spu_thread_get_group_id(uint32_t);
 void spu_begin_image(int);
@@ -107,7 +110,23 @@ static int synthetic_report(void*, u32 method, u32, u64* timestamp, u32* value) 
     }
     return 1; // Explicit synthetic backend for ABI/publication tests only.
 }
-static void native_once_initializer(ppu_context*) {
+static std::atomic<u32> once_callback_stack{0};
+static std::atomic<bool> once_callback_bad{false};
+static void native_once_initializer(ppu_context* ctx) {
+    const u32 mutex = (u32)ctx->gpr[1] - 0x60, attr = mutex + 0x20;
+    once_callback_stack.store(mutex);
+    const u32 slot_end = VM_CB_STACK_BASE + ((mutex - VM_CB_STACK_BASE) / VM_CB_STACK_SIZE + 1) * VM_CB_STACK_SIZE;
+    if (!ppu_callback_stack_range_backed(mutex, 24) || ppu_callback_stack_range_backed(slot_end - 16, 32) ||
+        ppu_callback_stack_range_backed(mutex, 0)) once_callback_bad.store(true);
+    vm_write32(attr, 2); vm_write32(attr + 4, 0x20); vm_write64(attr + 8, 0);
+    ctx->gpr[3] = mutex; ctx->gpr[4] = attr;
+    ps3_hle_call(ps3_compute_nid("sys_lwmutex_create"), ctx);
+    if (ctx->gpr[3]) once_callback_bad.store(true);
+    else {
+        ctx->gpr[3] = mutex;
+        ps3_hle_call(ps3_compute_nid("sys_lwmutex_destroy"), ctx);
+        if (ctx->gpr[3]) once_callback_bad.store(true);
+    }
     ++once_calls;
     once_entered.store(true);
     while (!once_release.load()) std::this_thread::yield();
@@ -144,13 +163,43 @@ static void call(ppu_context& ctx, const char* name, uint64_t a0) {
 int main(int argc, char** argv) {
     if (argc == 2 && !std::strcmp(argv[1], "audio_host")) {
         if (vm_init()) return 1;
+        if (vm_commit(0x30000, 0x10000)) return 4;
+        g_ppu_main_stack_addr = 0x30000; g_ppu_main_stack_size = 0x10000;
+        ps3_load_prx_modules();
+        ppu_context audio{};
+        audio.gpr[1] = 0x3FF00;
+        const u32 param = 0x31000, output = 0x31100, config = 0x31204;
         for (unsigned cycle = 0; cycle < 2; ++cycle) {
             if (cellAudioInit() || (u32)cellAudioInit() != (u32)CELL_AUDIO_ERROR_ALREADY_INIT) return 2;
+            vm_write64(param, 3); vm_write64(param + 8, 8); vm_write64(param + 16, 0);
+            vm_write64(param + 24, 0); vm_write32(output, 0xA5A5A5A5);
+            audio.gpr[4] = output; call(audio, "cellAudioPortOpen", param);
+            if ((u32)audio.gpr[3] != (u32)CELL_AUDIO_ERROR_PARAM || vm_read32(output) != 0xA5A5A5A5) return 5;
+            u32 first_buffer = 0;
+            for (u32 port = 0; port < 8; ++port) {
+                vm_write64(param, port & 1 ? 2 : 8);
+                audio.gpr[4] = output; call(audio, "cellAudioPortOpen", param);
+                if (audio.gpr[3] || vm_read32(output) != port) return 6;
+                vm_write32(config - 4, 0xA5A5A5A5); vm_write32(config + 32, 0xA5A5A5A5);
+                audio.gpr[4] = config; call(audio, "cellAudioGetPortConfig", port);
+                const u32 buffer = vm_read32(config + 28), bytes = vm_read32(config + 24), index = vm_read32(config);
+                if (audio.gpr[3] || vm_read32(config - 4) != 0xA5A5A5A5 || vm_read32(config + 32) != 0xA5A5A5A5 ||
+                    vm_read32(config + 4) != 1 || vm_read64(config + 8) != (port & 1 ? 2u : 8u) ||
+                    vm_read64(config + 16) != 8 || bytes != (port & 1 ? 16384u : 65536u) ||
+                    !ps3_native_guest_range_backed(buffer, bytes) || ps3_native_guest_range_backed(buffer + bytes, 4) ||
+                    !ps3_native_guest_range_backed(index, 8) || vm_read64(index)) return 7;
+                if (!port) first_buffer = buffer;
+            }
+            vm_write32(output, 0xA5A5A5A5);
+            audio.gpr[4] = output; call(audio, "cellAudioPortOpen", param);
+            if ((u32)audio.gpr[3] != (u32)CELL_AUDIO_ERROR_PORT_FULL || vm_read32(output) != 0xA5A5A5A5) return 8;
+            for (u32 port = 0; port < 8; ++port) if (cellAudioPortClose(port)) return 9;
+            if (ps3_native_guest_range_backed(first_buffer, 4)) return 10;
             std::this_thread::sleep_for(std::chrono::milliseconds(20));
             if (cellAudioQuit() || (u32)cellAudioQuit() != (u32)CELL_AUDIO_ERROR_NOT_INIT) return 3;
         }
         vm_shutdown();
-        std::puts("Verified real host audio start/stop twice; no game PCM supplied");
+        std::puts("Verified real host audio lifecycle and eight guest ports twice; no game PCM supplied");
         return 0;
     }
     ppu_context ctx{};
@@ -211,17 +260,17 @@ int main(int argc, char** argv) {
             g_ppu_main_stack_addr = 0x30000; g_ppu_main_stack_size = 0x10000;
             const bool broken = !strcmp(argv[1], "fs_data_broken");
             const bool escape = !strcmp(argv[1], "fs_data_escape");
-            const bool present = !strcmp(argv[1], "fs_data_present");
+            const bool present = !strcmp(argv[1], "fs_data_present") || !strcmp(argv[1], "fs_data_size");
             std::strcpy((char*)vm_base + 0x30300, escape ? "../outside" : "TEST00001");
             std::memset(vm_base + 0x30400, 0xA5, 20);
-            ctx.gpr[4] = 0x30300; ctx.gpr[5] = present || broken ? 0 : 0x30404;
+            ctx.gpr[4] = 0x30300; ctx.gpr[5] = !strcmp(argv[1], "fs_data_present") ? 0 : 0x30404;
             call(ctx, "cellGameDataCheck", 3);
             const u32 expected = escape ? 0x8002CB07u : broken ? 0x8002CB05u : present ? 0 : 2;
             if ((u32)ctx.gpr[3] != expected || vm_read32(0x30400) != 0xA5A5A5A5 ||
                 vm_read32(0x30410) != 0xA5A5A5A5) return 1;
             if (!broken && !escape) {
-                if (!present) {
-                    if (vm_read32(0x30408) || vm_read32(0x3040C)) return 2;
+                if (ctx.gpr[5]) {
+                    if (vm_read32(0x30408) != (present ? UINT32_MAX : 0) || vm_read32(0x3040C) != 3) return 2;
                     std::printf("[data-space-kb] %u\n", vm_read32(0x30404));
                 }
                 ctx.gpr[4] = 0x30300; ctx.gpr[5] = 0;
@@ -1249,7 +1298,8 @@ int main(int argc, char** argv) {
     bool returned_early = second_finished.load();
     once_release.store(true);
     once_first.join(); once_second.join();
-    if (returned_early || once_bad.load() || once_calls != 1 ||
+    if (returned_early || once_bad.load() || once_callback_bad.load() ||
+        !once_callback_stack.load() || ps3_native_guest_range_backed(once_callback_stack.load(), 24) || once_calls != 1 ||
         sys_ppu_thread_once(once_control, once_opd) || once_calls != 1) return 109;
     const auto event_attr = reserved_a + 0x2100, event_output = event_attr + 0x20;
     vm_write32(event_attr, 1); vm_write32(event_attr + 4, 1);

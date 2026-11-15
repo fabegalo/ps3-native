@@ -14,12 +14,16 @@ extern "C" [[noreturn]] void ps3_native_stop(void);
 extern "C" int sys_memory_range_backed(uint32_t, uint32_t);
 extern "C" int ps3_sysprx_heap_range_backed(uint32_t, uint32_t);
 extern "C" int ppu_thread_stack_range_backed(uint32_t, uint32_t);
+extern "C" int ppu_callback_stack_range_backed(uint32_t, uint32_t);
+extern "C" int cellAudioGuestRangeBacked(uint32_t, uint32_t);
 extern "C" uint32_t g_ppu_main_stack_addr, g_ppu_main_stack_size;
 static bool guest_backed(uint32_t address, uint32_t size) {
     const uint64_t end = (uint64_t)address + size;
     return end <= 0x100000000ull &&
         (sys_memory_range_backed(address, size) || ps3_sysprx_heap_range_backed(address, size) ||
          ppu_thread_stack_range_backed(address, size) ||
+         ppu_callback_stack_range_backed(address, size) ||
+         cellAudioGuestRangeBacked(address, size) ||
          (address >= g_ppu_main_stack_addr && end <= (uint64_t)g_ppu_main_stack_addr + g_ppu_main_stack_size));
 }
 extern "C" int ps3_native_guest_range_backed(uint32_t address, uint32_t size) {
@@ -136,6 +140,7 @@ extern "C" void ps3_native_hle_gate(uint32_t nid, ppu_context* ctx) {
                                     "cellPadInit", "cellPadEnd",
                                     "sceNpInit", "sceNpTerm", "sceNpManagerGetStatus",
                                     "sceNpTrophyInit", "sceNpTrophyTerm",
+                                    "cellAudioPortOpen", "cellAudioGetPortConfig",
                                     "cellGameBootCheck", "cellGameContentPermit", "cellGameDataCheck",
                                     "cellGameCreateGameData",
                                     "cellGameSetParamString",

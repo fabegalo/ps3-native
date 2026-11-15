@@ -35,6 +35,8 @@ extern "C" void* _sys_memset(void*, s32, u32);
 extern "C" void* _sys_memcpy(void*, const void*, u32);
 extern "C" int cellAudioOutputProbe(void);
 extern "C" s32 cellAudioInit(void);
+extern "C" s32 cellAudioPortOpen(const void*, u32*);
+extern "C" s32 cellAudioGetPortConfig(u32, void*);
 extern "C" s32 sceNpTrophyInit(void*, u32, u32, u64);
 extern "C" s32 sceNpTrophyTerm(void);
 extern "C" s32 cellAudioOutGetSoundAvailability(u32, u32, u32, u32);
@@ -73,6 +75,25 @@ void audio_configure(ppu_context* ctx) {
         (void*)(uintptr_t)ctx->gpr[5], (u32)ctx->gpr[6]);
 }
 void audio_initialize(ppu_context* ctx) { ctx->gpr[3] = (u64)(s64)cellAudioInit(); }
+void audio_port_open(ppu_context* ctx) {
+    if (ctx->gpr[3] > UINT32_MAX || ctx->gpr[4] > UINT32_MAX ||
+        !ps3_native_guest_range_backed((u32)ctx->gpr[3], 32) ||
+        !ps3_native_guest_range_backed((u32)ctx->gpr[4], 4)) {
+        ctx->gpr[3] = (u64)(s64)(s32)CELL_AUDIO_ERROR_PARAM; return;
+    }
+    if (vm_read64((u32)ctx->gpr[3] + 16)) {
+        std::fprintf(stderr, "[native-blocked] audio port attributes require audit\n");
+        std::fflush(stderr); ps3_native_stop();
+    }
+    ctx->gpr[3] = (u64)(s64)cellAudioPortOpen((const void*)(uintptr_t)(u32)ctx->gpr[3],
+                                           (u32*)(uintptr_t)(u32)ctx->gpr[4]);
+}
+void audio_port_config(ppu_context* ctx) {
+    if (ctx->gpr[4] > UINT32_MAX || !ps3_native_guest_range_backed((u32)ctx->gpr[4], 32)) {
+        ctx->gpr[3] = (u64)(s64)(s32)CELL_AUDIO_ERROR_PARAM; return;
+    }
+    ctx->gpr[3] = (u64)(s64)cellAudioGetPortConfig((u32)ctx->gpr[3], (void*)(uintptr_t)(u32)ctx->gpr[4]);
+}
 void trophy_initialize(ppu_context* ctx) {
     ctx->gpr[3] = (u64)(s64)sceNpTrophyInit((void*)(uintptr_t)ctx->gpr[3], (u32)ctx->gpr[4], (u32)ctx->gpr[5], ctx->gpr[6]);
 }
@@ -365,6 +386,8 @@ struct RegisterAdapters {
         ps3_hle_register_ctx(ps3_compute_nid("cellAudioOutConfigure"), "cellAudioOutConfigure", audio_configure);
         ps3_hle_register_ctx(ps3_compute_nid("cellAudioInit"), "cellAudioInit", audio_initialize);
         ps3_hle_register_ctx(ps3_compute_nid("sceNpTrophyInit"), "sceNpTrophyInit", trophy_initialize);
+        ps3_hle_register_ctx(ps3_compute_nid("cellAudioPortOpen"), "cellAudioPortOpen", audio_port_open);
+        ps3_hle_register_ctx(ps3_compute_nid("cellAudioGetPortConfig"), "cellAudioGetPortConfig", audio_port_config);
         ps3_hle_register_ctx(ps3_compute_nid("sceNpTrophyTerm"), "sceNpTrophyTerm", trophy_terminate);
         ps3_hle_register_ctx(ps3_compute_nid("sys_prx_get_module_id_by_name"), "sys_prx_get_module_id_by_name", module_by_name);
         ps3_hle_register_ctx(ps3_compute_nid("_sys_memset"), "_sys_memset", memory_set);
