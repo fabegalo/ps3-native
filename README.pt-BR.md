@@ -195,8 +195,15 @@ de tela no FIFO RSX. O código original cria as threads `FlipPump` e
 A `libsre.prx` original do firmware 4.93, autorizada pelo mantenedor, agora
 fornece `cellSpurs`: 440 funções PPU e 149 exports compilados e separados do HLE.
 O inicializador original cria 17 semáforos, importa a imagem SPU com entrada
-`0x818` e reserva um grupo exclusivo de cinco SPUs. A parada atual é
-`sys_spu_thread_initialize` (LV2 172); nenhuma thread SPU original executou ainda.
+`0x818`, reserva um grupo exclusivo de cinco SPUs, cria seus objetos de thread
+e inicia suas duas threads PPU de controle. O início nativo do grupo SPU agora
+verifica a imagem AOT exata e os bytes das instruções carregadas, preserva as
+áreas de dados mutáveis e para se código compilado for alterado. Um SPU sintético
+independente executa por LV2 numa thread real, publica RUN e sai com status 42;
+nenhuma instrução SPU original executou ainda. A parada atual é
+`NV4097_GET_REPORT` (ZPASS, offset `0x7FE0`): contagem de amostras, timestamps
+e conclusão ordenada reais da GPU estão pendentes. Valores fixos de visibilidade
+e timestamps inventados na leitura não são aceitos como resultado.
 Destinos PPU restantes e serviços não auditados param explicitamente.
 A janela do backend
 aberta ainda não comprova um frame do jogo, menu ou gameplay.

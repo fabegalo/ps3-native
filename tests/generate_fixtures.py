@@ -12,11 +12,13 @@ out.mkdir(parents=True, exist_ok=True)
 code = struct.pack('>5I', 0x3C800002, 0x38600013, 0x38630017, 0x90640010, 0x4E800020)
 elf = bytearray(0x300)
 elf[:64] = struct.pack('>16sHHIQQQIHHHHHH', b'\x7fELF\x02\x02\x01' + bytes(9),
-                      2, 21, 1, 0x20000, 64, 0x200, 0, 64, 56, 2, 64, 3, 0)
+                      2, 21, 1, 0x20000, 64, 0x200, 0, 64, 56, 3, 64, 3, 0)
 for i, (off, addr, size, flags) in enumerate([(0x100, 0x10000, len(code), 5), (0x180, 0x20000, 32, 6)]):
     elf[64+i*56:120+i*56] = struct.pack('>IIQQQQQQ', 1, flags, off, addr, addr, size, size, 16)
 elf[0x100:0x100+len(code)] = code
 elf[0x180:0x188] = struct.pack('>II', 0x10000, 0x20000)
+elf[176:232] = struct.pack('>IIQQQQQQ', 0x60000001, 0, 0x1A0, 0, 0, 32, 32, 4)
+elf[0x1A0:0x1C0] = struct.pack('>8I', 32, 0x13BCC5F6, 1, 0x12345678, 1001, 0x100000, 0x100000, 0)
 for i, (addr, off, size, flags) in enumerate([(0x10000, 0x100, len(code), 6), (0x20000, 0x180, 8, 3)], 1):
     elf[0x200+i*64:0x240+i*64] = struct.pack('>IIQQQQIIQQ', 0, 1, flags, addr, off, size, 0, 0, 4, 0)
 (out / 'ppu.elf').write_bytes(elf)
@@ -59,6 +61,16 @@ artifacts = {name: hashlib.sha256((out / name).read_bytes()).hexdigest() for nam
              ('ppu.elf', 'ppu_recomp.c', 'ppu_recomp.h', 'spu.bin', 'spu_recomp.c', 'spu_recomp.h')}
 (out / 'fixture.json').write_text(json.dumps({'provenance': 'ps3-native synthetic',
                                              'ppu_result': 42, 'artifacts': artifacts}), encoding='utf-8')
+
+# Independent LV2 thread: publish exit status 42, then the real thread-exit stop.
+thread_words = [(0x81 << 23) | (42 << 7) | 7, (0x10d << 21) | (28 << 7) | 7, 0x102, 0x40200000]
+thread = out / 'thread'
+thread.mkdir(exist_ok=True)
+(thread / 'code.bin').write_bytes(struct.pack('>4I', *thread_words))
+run('spu_lifter.py', thread / 'code.bin', '--base', '0x100', '--symbol-prefix', 'thread_', '--output', thread)
+for name in ('spu_recomp.h', 'spu_recomp.c'):
+    path = thread / name
+    path.write_text(path.read_text().replace('../../runtime/spu/', ''), encoding='utf-8')
 
 sys.path.insert(0, str(root / 'src'))
 from lle_fixture import own_prx

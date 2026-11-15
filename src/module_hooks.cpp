@@ -19,19 +19,40 @@ extern "C" s32 _cellSpursAttributeInitialize(CellSpursAttribute*, u32, u32, s32,
 extern "C" void ps3_hle_register_ctx(uint32_t, const char*, void (*)(ppu_context*));
 extern "C" [[noreturn]] void ps3_native_stop(void);
 extern "C" int sys_memory_range_backed(uint32_t, uint32_t);
+extern "C" int ps3_native_guest_range_backed(uint32_t, uint32_t);
 extern "C" int ps3_sysprx_heap_range_backed(uint32_t, uint32_t);
 extern "C" __attribute__((weak)) const NativeLleModule* ps3_native_firmware_definition(void) { return nullptr; }
 extern "C" s32 sys_ppu_thread_once(u32, u32);
 extern "C" s32 _sys_spu_printf_initialize(u32, u32, u32, u32);
 extern "C" s32 _sys_spu_printf_finalize(void);
+extern "C" u32 ps3_spu_printf_callback(u32);
 extern "C" void* _sys_memset(void*, s32, u32);
 extern "C" void* _sys_memcpy(void*, const void*, u32);
 // Standalone CPU harnesses have no presentation backend.
 extern "C" __attribute__((weak)) int ppu_host_video_state(void) { return 0; }
 namespace {
+void module_by_name(ppu_context* ctx) {
+    if (ctx->gpr[4] || ctx->gpr[5]) { ctx->gpr[3] = (u64)(s64)(s32)0x80010002; return; }
+    char name[29]{};
+    for (u32 i = 0; i < 28; ++i) {
+        const u64 address = (u32)ctx->gpr[3] + (u64)i;
+        if (address > UINT32_MAX || !ps3_native_guest_range_backed((u32)address, 1)) {
+            ctx->gpr[3] = (u64)(s64)(s32)0x80010002; return;
+        }
+        name[i] = (char)vm_read8((u32)address);
+        if (!name[i]) break;
+    }
+    if (ps3_native_lle_named(name)) {
+        std::fprintf(stderr, "[native-blocked] resident PRX handle query requires audit\n");
+        std::fflush(stderr); ps3_native_stop();
+    }
+    // HLE libraries are not resident original PRX modules and have no PRX handle.
+    ctx->gpr[3] = (u64)(s64)(s32)0x8001112E;
+}
 void memory_set(ppu_context* ctx) {
     ctx->gpr[3] = (u32)(uintptr_t)_sys_memset((void*)(uintptr_t)(u32)ctx->gpr[3], (s32)ctx->gpr[4], (u32)ctx->gpr[5]);
 }
+void gcm_timestamp(ppu_context* ctx) { ctx->gpr[3] = cellGcmGetTimeStamp((u32)ctx->gpr[3]); }
 void memory_copy(ppu_context* ctx) {
     ctx->gpr[3] = (u32)(uintptr_t)_sys_memcpy((void*)(uintptr_t)(u32)ctx->gpr[3],
         (const void*)(uintptr_t)(u32)ctx->gpr[4], (u32)ctx->gpr[5]);
@@ -66,6 +87,12 @@ void spu_printf_initialize(ppu_context* ctx) {
         (u32)ctx->gpr[3], (u32)ctx->gpr[4], (u32)ctx->gpr[5], (u32)ctx->gpr[6]);
 }
 void spu_printf_finalize(ppu_context* ctx) { ctx->gpr[3] = (uint64_t)(int64_t)_sys_spu_printf_finalize(); }
+template<unsigned Index> void spu_printf_dispatch(ppu_context* ctx) {
+    const auto opd = ps3_spu_printf_callback(Index);
+    if (!opd) { ctx->gpr[3] = (uint64_t)(int64_t)(s32)0x8001000Fu; return; } // CELL_ESTAT
+    ps3_native_call_opd(ctx, opd);
+    ctx->gpr[3] = (uint64_t)(int64_t)(s32)ctx->gpr[3];
+}
 void thread_once(ppu_context* ctx) {
     const auto control = (u32)ctx->gpr[3], initializer = (u32)ctx->gpr[4];
     if ((control & 3) || !sys_memory_range_backed(control, 4) ||
@@ -205,6 +232,8 @@ void spurs_group_type(ppu_context* ctx) {
 // Typed HLE adapters only; no original PRX is loaded by this registration.
 struct RegisterAdapters {
     RegisterAdapters() {
+        ps3_hle_register_ctx(ps3_compute_nid("cellGcmGetTimeStamp"), "cellGcmGetTimeStamp", gcm_timestamp);
+        ps3_hle_register_ctx(ps3_compute_nid("sys_prx_get_module_id_by_name"), "sys_prx_get_module_id_by_name", module_by_name);
         ps3_hle_register_ctx(ps3_compute_nid("_sys_memset"), "_sys_memset", memory_set);
         ps3_hle_register_ctx(ps3_compute_nid("_sys_memcpy"), "_sys_memcpy", memory_copy);
         ps3_hle_register_ctx(ps3_compute_nid("_sys_strcpy"), "_sys_strcpy", string_copy);
@@ -213,6 +242,10 @@ struct RegisterAdapters {
         ps3_hle_register_ctx(ps3_compute_nid("_sys_strncat"), "_sys_strncat", string_append_bounded);
         ps3_hle_register_ctx(ps3_compute_nid("_sys_spu_printf_initialize"), "_sys_spu_printf_initialize", spu_printf_initialize);
         ps3_hle_register_ctx(ps3_compute_nid("_sys_spu_printf_finalize"), "_sys_spu_printf_finalize", spu_printf_finalize);
+        ps3_hle_register_ctx(ps3_compute_nid("_sys_spu_printf_attach_group"), "_sys_spu_printf_attach_group", spu_printf_dispatch<0>);
+        ps3_hle_register_ctx(ps3_compute_nid("_sys_spu_printf_detach_group"), "_sys_spu_printf_detach_group", spu_printf_dispatch<1>);
+        ps3_hle_register_ctx(ps3_compute_nid("_sys_spu_printf_attach_thread"), "_sys_spu_printf_attach_thread", spu_printf_dispatch<2>);
+        ps3_hle_register_ctx(ps3_compute_nid("_sys_spu_printf_detach_thread"), "_sys_spu_printf_detach_thread", spu_printf_dispatch<3>);
         ps3_hle_register_ctx(ps3_compute_nid("sys_ppu_thread_once"), "sys_ppu_thread_once", thread_once);
         ps3_hle_register_ctx(ps3_compute_nid("cellSysmoduleLoadModule"), "cellSysmoduleLoadModule", load_module);
         ps3_hle_register_ctx(ps3_compute_nid("cellSysmoduleIsLoaded"), "cellSysmoduleIsLoaded", module_loaded);

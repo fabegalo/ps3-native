@@ -2,6 +2,7 @@ set(gen "${CMAKE_CURRENT_BINARY_DIR}/generated")
 file(GLOB tools "${PS3RECOMP_DIR}/tools/*.py")
 add_custom_command(OUTPUT "${gen}/ppu_recomp.c" "${gen}/ppu_recomp.h" "${gen}/ppu.elf"
     "${gen}/spu_recomp.c" "${gen}/spu_recomp.h"
+    "${gen}/thread/spu_recomp.c" "${gen}/thread/spu_recomp.h"
     "${gen}/lle_bridge.cpp" "${gen}/lle_recomp.cpp"
     COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/generate_fixtures.py" "${PROJECT_SOURCE_DIR}" "${gen}"
     DEPENDS generate_fixtures.py lle_fixture.py "${PROJECT_SOURCE_DIR}/src/ps3native/firmware.py" ${tools})
@@ -59,7 +60,8 @@ add_test(NAME spu.aot.dma.negative COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURR
     $<TARGET_FILE:ps3-native-spu> corrupt-input)
 set_tests_properties(ppu.aot spu.aot.dma PROPERTIES TIMEOUT 30)
 set_tests_properties(ppu.aot.negative spu.aot.dma.negative PROPERTIES TIMEOUT 35)
-add_executable(ps3-native-contracts native_contracts.cpp)
+add_executable(ps3-native-contracts native_contracts.cpp "${gen}/thread/spu_recomp.c")
+target_compile_definitions(ps3-native-contracts PRIVATE PS3_NATIVE_STRICT)
 target_link_libraries(ps3-native-contracts PRIVATE fixture_ppu)
 if(WIN32)
     target_link_libraries(ps3-native-contracts PRIVATE dbghelp user32 gdi32 winmm shlwapi synchronization psapi)

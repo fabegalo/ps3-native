@@ -1,9 +1,15 @@
 #include "ppu_recomp.h"
 #include "ps3emu/nid.h"
+#include "ps3emu/error_codes.h"
 #include "vm.h"
 #include "spu_interp.h"
 #include "spu_workload.h"
 #include "spu_coherency.h"
+#include "spu_lifted_thread.h"
+#include "spu_overlay_residency.h"
+extern "C" {
+#include "thread/spu_recomp.h"
+}
 #include "cellSysutil.h"
 #include "cellGcmSys.h"
 #include "cellSpurs.h"
@@ -15,6 +21,11 @@
 #include <thread>
 #include <chrono>
 #include <string>
+#ifdef _WIN32
+#include <process.h>
+#else
+#include <unistd.h>
+#endif
 extern "C" {
 uint8_t* vm_base = nullptr;
 void ppu_unlifted_stub(uint64_t, ppu_context*);
@@ -42,6 +53,9 @@ uint64_t ppu_thread_register_main_priority(int32_t);
 int lv2_try_syscall(ppu_context*);
 s32 sys_ppu_thread_once(u32, u32);
 int sys_event_queue_push_by_id(uint32_t, uint64_t, uint64_t, uint64_t, uint64_t);
+uint32_t spu_thread_get_group_id(uint32_t);
+void spu_begin_image(int);
+extern int (*g_spu_user_event_hook)(spu_context*, uint32_t);
 void cellGcm_rsx_process_fifo(void);
 int cellGcm_take_flip_pending(void);
 unsigned cellGcm_flip_request_count(void);
@@ -153,7 +167,17 @@ int main(int argc, char** argv) {
         if (!strcmp(argv[1], "hle")) ps3_hle_call(0xDEADBEEFu, &ctx);
         if (!strcmp(argv[1], "ppu")) ppu_unlifted_stub(0x12340, &ctx);
         if (!strcmp(argv[1], "syscall")) { ctx.gpr[11] = 0xFFFF; lv2_syscall(&ctx); }
-        if (!strcmp(argv[1], "unaudited_syscall")) { ctx.gpr[11] = 1; lv2_syscall(&ctx); }
+        if (!strcmp(argv[1], "unaudited_syscall")) { ctx.gpr[11] = 100; lv2_syscall(&ctx); }
+        if (!strcmp(argv[1], "sdk_missing")) {
+            if (vm_init()) return 1;
+            lv2_init_syscalls();
+            ctx.gpr[11] = 348; ctx.gpr[3] = 0x10000; ctx.gpr[4] = 0x200; ctx.gpr[5] = 0x30000;
+            lv2_syscall(&ctx);
+            if (ctx.gpr[3]) return 1;
+            const auto output = vm_read32(0x30000);
+            ctx.gpr[11] = 1; lv2_syscall(&ctx);
+            ctx.gpr[11] = 25; ctx.gpr[4] = output; lv2_syscall(&ctx);
+        }
         if (!strcmp(argv[1], "indirect")) { ctx.ctr = 0x12340; ps3_indirect_call(&ctx); }
         if (!strcmp(argv[1], "spu")) { static spu_context spu{}; spu_interp_run(&spu, 0x100); }
         if (!strcmp(argv[1], "spu_indirect")) { static spu_context spu{}; spu.pc = 0x12340; spu_indirect_branch(&spu); }
@@ -168,6 +192,7 @@ int main(int argc, char** argv) {
         if (!strcmp(argv[1], "sysutil_no_dispatcher")) call(ctx, "cellSysutilCheckCallback", 0);
         if (!strcmp(argv[1], "provider_not_registered")) call(ctx, "cellSysmoduleLoadModule", 0x18);
         if (!strcmp(argv[1], "gcm_unaudited")) call(ctx, "cellGcmSetZcull", 0);
+        if (!strcmp(argv[1], "gcm_timestamp_index")) call(ctx, "cellGcmGetTimeStamp", 2048);
         if (!strcmp(argv[1], "tile_compressed")) { ctx.gpr[8] = 10; call(ctx, "cellGcmSetTileInfo", 0); }
         if (!strcmp(argv[1], "io_unbacked")) {
             ctx.gpr[4] = 0x100000; ctx.gpr[5] = 0x20000;
@@ -221,6 +246,15 @@ int main(int argc, char** argv) {
     ctx.gpr[1] = 0xD00FFFF0;
     ppu_sysprx_register();
     lv2_init_syscalls();
+    ctx.gpr[11] = 1; lv2_syscall(&ctx);
+#ifdef _WIN32
+    const auto process_id = (uint32_t)_getpid();
+#else
+    const auto process_id = (uint32_t)getpid();
+#endif
+    if (ctx.gpr[3] != process_id || !process_id) return 181;
+    lv2_syscall(&ctx);
+    if (ctx.gpr[3] != process_id) return 182;
     call(ctx, "sceNpTerm", 0);
     if ((int64_t)ctx.gpr[3] != (int32_t)0x8002aa01u) return 44;
     ctx.gpr[4] = 0x40000;
@@ -559,6 +593,48 @@ int main(int argc, char** argv) {
     ctx.gpr[11] = 161; ctx.gpr[3] = raw_id; if (!lv2_try_syscall(&ctx) || ctx.gpr[3]) return 104;
     ctx.gpr[11] = 169; ctx.gpr[3] = 6; ctx.gpr[4] = 0; lv2_syscall(&ctx);
     if (ctx.gpr[3]) return 105;
+    const auto condition_mutex = reserved_a + 0x9000, condition = reserved_a + 0x9040;
+    const auto condition_attr = reserved_a + 0x9060, condition_mutex_attr = reserved_a + 0x9080;
+    vm_write32(condition_mutex_attr, 1); vm_write32(condition_mutex_attr + 4, 0x10);
+    std::memcpy(vm_base + condition_attr, "own-cond", 8);
+    ctx.gpr[4] = condition_mutex_attr; call(ctx, "sys_lwmutex_create", condition_mutex);
+    ctx.gpr[4] = condition_mutex; ctx.gpr[5] = condition_attr; call(ctx, "sys_lwcond_create", condition);
+    const auto condition_id = vm_read32(condition + 4);
+    if (ctx.gpr[3] || vm_read32(condition) != condition_mutex || !condition_id) return 174;
+    ctx.gpr[4] = 200; call(ctx, "sys_lwcond_wait", condition);
+    if ((uint32_t)ctx.gpr[3] != CELL_EPERM) return 175;
+    ctx.gpr[4] = 0; call(ctx, "sys_lwmutex_lock", condition_mutex); call(ctx, "sys_lwmutex_lock", condition_mutex);
+    const auto condition_start = std::chrono::steady_clock::now();
+    ctx.gpr[4] = 300; call(ctx, "sys_lwcond_wait", condition);
+    if ((uint32_t)ctx.gpr[3] != CELL_ETIMEDOUT ||
+        std::chrono::steady_clock::now() - condition_start < std::chrono::microseconds(300) ||
+        vm_read32(condition_mutex) != ctx.thread_id || vm_read32(condition_mutex + 12) != 2) return 176;
+    call(ctx, "sys_lwmutex_unlock", condition_mutex); call(ctx, "sys_lwmutex_unlock", condition_mutex);
+    std::atomic<bool> condition_entered{false}, condition_finished{false}, condition_failed{false};
+    std::thread condition_thread([&] {
+        ppu_context local{}; local.thread_id = 18;
+        local.gpr[4] = 0; call(local, "sys_lwmutex_lock", condition_mutex);
+        condition_entered.store(true);
+        local.gpr[4] = 0; call(local, "sys_lwcond_wait", condition);
+        condition_failed.store(local.gpr[3] || vm_read32(condition_mutex) != 18);
+        call(local, "sys_lwmutex_unlock", condition_mutex);
+        condition_finished.store(true);
+    });
+    while (!condition_entered.load()) std::this_thread::yield();
+    ctx.gpr[4] = 0; call(ctx, "sys_lwmutex_lock", condition_mutex);
+    call(ctx, "sys_lwcond_destroy", condition);
+    const bool refused_destroy = (uint32_t)ctx.gpr[3] == CELL_EBUSY;
+    call(ctx, "sys_lwcond_signal", condition);
+    const bool signal_succeeded = ctx.gpr[3] == 0, waiter_blocked = !condition_finished.load();
+    call(ctx, "sys_lwmutex_unlock", condition_mutex);
+    condition_thread.join();
+    if (!refused_destroy || !signal_succeeded || !waiter_blocked || condition_failed.load()) return 177;
+    call(ctx, "sys_lwcond_signal_all", condition);
+    if (ctx.gpr[3]) return 178;
+    call(ctx, "sys_lwcond_destroy", condition);
+    if (ctx.gpr[3] || vm_read32(condition + 4) != 0xFFFFFFFE) return 179;
+    call(ctx, "sys_lwcond_destroy", condition);
+    if ((uint32_t)ctx.gpr[3] != CELL_ESRCH) return 180;
     const auto group_attr = reserved_a + 0x7000, group_output = reserved_a + 0x7100;
     vm_write32(group_attr, 0); vm_write32(group_attr + 4, 0); vm_write32(group_attr + 8, 0x18);
     auto create_group = [&](uint32_t count) {
@@ -574,8 +650,50 @@ int main(int argc, char** argv) {
     vm_write32(group_output, 0xA5A5A5A5);
     if (create_group(2) != 0x8001000A || vm_read32(group_output) != 0xA5A5A5A5) return 156;
     if (create_group(1) || vm_read32(group_output) == first_spu_group) return 157;
+    const auto event_spu_group = vm_read32(group_output);
+    ctx.gpr[11] = 173; ctx.gpr[3] = 9999; lv2_syscall(&ctx);
+    if ((u32)ctx.gpr[3] != CELL_ESRCH) return 195;
+    ctx.gpr[11] = 173; ctx.gpr[3] = first_spu_group; lv2_syscall(&ctx);
+    if ((u32)ctx.gpr[3] != CELL_ESTAT) return 196;
     ctx.gpr[11] = 169; ctx.gpr[3] = 6; ctx.gpr[4] = 1; lv2_syscall(&ctx);
     if ((uint32_t)ctx.gpr[3] != 0x8001000A) return 158;
+    const auto thread_attr = reserved_a + 0x7200, thread_args = reserved_a + 0x7300, thread_output = reserved_a + 0x7400;
+    vm_write32(thread_attr, 0); vm_write32(thread_attr + 4, 0); vm_write32(thread_attr + 8, 0);
+    for (uint32_t i = 0; i < 4; ++i) vm_write64(thread_args + i * 8, 0x1122334400000042ull + i);
+    auto initialize_spu = [&](uint32_t index) {
+        ctx.gpr[11] = 172; ctx.gpr[3] = thread_output; ctx.gpr[4] = first_spu_group;
+        ctx.gpr[5] = index; ctx.gpr[6] = image_output; ctx.gpr[7] = thread_attr; ctx.gpr[8] = thread_args;
+        lv2_syscall(&ctx); return (uint32_t)ctx.gpr[3];
+    };
+    vm_write32(thread_output, 0xA5A5A5A5);
+    if (initialize_spu(0) != 0x80010002 || vm_read32(thread_output) != 0xA5A5A5A5) return 161;
+    vm_write32(image_source + 68, 16); vm_write32(image_source + 72, 32);
+    ctx.gpr[4] = image_source; ctx.gpr[5] = 1; call(ctx, "sys_spu_image_import", image_output);
+    if (ctx.gpr[3] || initialize_spu(0)) return 162;
+    static spu_context deployed_spu{};
+    spu_lifted_thread_desc deployed_desc{};
+    deployed_desc.tid = 0x1234; deployed_desc.group_id = first_spu_group;
+    deployed_desc.entry = 0x100; deployed_desc.img_ea = image_output; deployed_desc.image_id = 901;
+    deployed_desc.args[0] = 0x1122334455667788ull;
+    const auto deploy_segments = vm_read32(image_output + 8);
+    vm_write32(deploy_segments + 40, 0x1234ABCD);
+    spu_lifted_thread_setup(&deployed_spu, &deployed_desc);
+    if (deployed_spu.pc != 0x100 || deployed_spu.image_id != 901 || deployed_spu.gpr[1]._u32[0] ||
+        deployed_spu.gpr[3]._u32[0] != 0x11223344 || deployed_spu.gpr[3]._u32[1] != 0x55667788 ||
+        std::memcmp(deployed_spu.ls + 0x100, vm_base + image_source + 128, 16)) return 197;
+    for (u32 i = 0; i < 16; i += 4)
+        if (spu_ls_read32(&deployed_spu, 0x110 + i) != 0x1234ABCD) return 198;
+    vm_write32(deploy_segments + 40, 0);
+    const auto prepared_spu = vm_read32(thread_output);
+    if (!prepared_spu || prepared_spu == 0xA5A5A5A5 || spu_thread_get_group_id(prepared_spu) != first_spu_group) return 163;
+    vm_write32(thread_output, 0xA5A5A5A5);
+    if (initialize_spu(0) != 0x8001000A || vm_read32(thread_output) != 0xA5A5A5A5 ||
+        initialize_spu(256) != 0x80010002 || vm_read32(thread_output) != 0xA5A5A5A5) return 164;
+    vm_write32(thread_attr + 8, 2);
+    if (initialize_spu(1) || vm_read32(thread_output) == prepared_spu) return 165;
+    ctx.gpr[3] = thread_output; ctx.gpr[4] = event_spu_group; ctx.gpr[5] = 0; lv2_syscall(&ctx);
+    if (ctx.gpr[3]) return 168;
+    const auto event_spu_thread = vm_read32(thread_output);
     const auto once_opd = reserved_a + 0x2000, once_control = once_opd + 0x20;
     vm_write32(once_opd, 0x12480); vm_write32(once_opd + 4, 0);
     vm_write32(once_control, 0);
@@ -624,6 +742,7 @@ int main(int argc, char** argv) {
     vm_write32(event_output, 0xA5A5A5A5);
     if (create_queue(0x12345678, 127) >= 0 || vm_read32(event_output) != 0xA5A5A5A5) return 113;
     if (create_queue(0, 1) || vm_read32(event_output) == first_queue) return 114;
+    const auto one_slot_queue = vm_read32(event_output);
     ctx.gpr[11] = 134; ctx.gpr[3] = event_output; ctx.gpr[4] = 1;
     ctx.gpr[5] = 0xFFFFFFFF0000DEADull; lv2_syscall(&ctx);
     if (ctx.gpr[3] || !vm_read32(event_output)) return 116;
@@ -634,6 +753,29 @@ int main(int argc, char** argv) {
     if (ctx.gpr[3]) return 118;
     ctx.gpr[3] = event_port; lv2_syscall(&ctx);
     if ((int64_t)ctx.gpr[3] >= 0) return 119;
+    ctx.gpr[11] = 134; ctx.gpr[3] = event_output; ctx.gpr[4] = 1; ctx.gpr[5] = 0; lv2_syscall(&ctx);
+    if (ctx.gpr[3]) return 183;
+    const auto anonymous_port = vm_read32(event_output);
+    auto send_port = [&](uint32_t port) {
+        ctx.gpr[11] = 138; ctx.gpr[3] = port; ctx.gpr[4] = 0x1111222233334444ull;
+        ctx.gpr[5] = 0x5555666677778888ull; ctx.gpr[6] = 0x9999AAAABBBBCCCCull; lv2_syscall(&ctx);
+        return (uint32_t)ctx.gpr[3];
+    };
+    if (send_port(anonymous_port) != CELL_ENOTCONN) return 184;
+    ctx.gpr[11] = 136; ctx.gpr[3] = anonymous_port; ctx.gpr[4] = one_slot_queue; lv2_syscall(&ctx);
+    if (ctx.gpr[3] || send_port(anonymous_port) || send_port(anonymous_port) != CELL_EBUSY) return 185;
+    ctx.gpr[11] = 130; ctx.gpr[3] = one_slot_queue; ctx.gpr[4] = 0; ctx.gpr[5] = 2000; lv2_syscall(&ctx);
+    if (ctx.gpr[3] || ctx.gpr[4] != (((uint64_t)process_id << 32) | anonymous_port) ||
+        ctx.gpr[5] != 0x1111222233334444ull || ctx.gpr[6] != 0x5555666677778888ull ||
+        ctx.gpr[7] != 0x9999AAAABBBBCCCCull) return 186;
+    if (send_port(event_port)) return 187;
+    ctx.gpr[11] = 130; ctx.gpr[3] = first_queue; ctx.gpr[4] = 0; ctx.gpr[5] = 2000; lv2_syscall(&ctx);
+    if (ctx.gpr[3] || ctx.gpr[4] != 0xFFFFFFFF0000DEADull) return 188;
+    if (create_queue(0, 1)) return 189;
+    const auto unmatched_queue = vm_read32(event_output);
+    if (send_port(unmatched_queue) != CELL_ESRCH) return 190;
+    ctx.gpr[11] = 130; ctx.gpr[3] = unmatched_queue; ctx.gpr[4] = 0; ctx.gpr[5] = 200; lv2_syscall(&ctx);
+    if ((uint32_t)ctx.gpr[3] != CELL_ETIMEDOUT) return 191;
     // A raw receive returns four registers and never writes its dummy buffer.
     std::memset(vm_base + event_output + 8, 0xA5, 32);
     const auto event_clock = std::chrono::steady_clock::now();
@@ -656,6 +798,68 @@ int main(int argc, char** argv) {
     if (pushed || premature_receive || receiver.gpr[3] || receiver.gpr[4] != 0x123456789ABCDEF0ull ||
         receiver.gpr[5] != 2 || receiver.gpr[6] != 3 || receiver.gpr[7] != 4 ||
         vm_read64(event_output + 8) != 0xA5A5A5A5A5A5A5A5ull) return 148;
+    const auto port_output = reserved_a + 0x8400;
+    auto connect_spu_group = [&](uint32_t group, uint32_t queue, uint64_t mask) {
+        ctx.gpr[11] = 251; ctx.gpr[3] = group; ctx.gpr[4] = queue;
+        ctx.gpr[5] = mask; ctx.gpr[6] = port_output; lv2_syscall(&ctx);
+        return (uint32_t)ctx.gpr[3];
+    };
+    vm_write32(port_output, 0xA5A5A5A5);
+    if (connect_spu_group(first_spu_group, first_queue, 2) != CELL_ESTAT ||
+        connect_spu_group(event_spu_group, 9999, 2) != CELL_ESRCH ||
+        connect_spu_group(event_spu_group, first_queue, 0) != CELL_EINVAL ||
+        vm_read32(port_output) != 0xA5A5A5A5) return 169;
+    if (connect_spu_group(event_spu_group, first_queue, 1ull << 63) ||
+        vm_read8(port_output) != 63 || vm_read8(port_output + 1) != 0xA5) return 170;
+    vm_write32(port_output, 0xA5A5A5A5);
+    if (connect_spu_group(event_spu_group, first_queue, 1ull << 63) != CELL_EISCONN ||
+        vm_read32(port_output) != 0xA5A5A5A5 ||
+        connect_spu_group(event_spu_group, first_queue, (1ull << 63) | 2) || vm_read8(port_output) != 1) return 171;
+    static spu_context event_spu{};
+    spu_context_init(&event_spu, event_spu_thread);
+    event_spu.spu_id = event_spu_thread; event_spu.spu_group_id = event_spu_group;
+    spu_channel_write(&event_spu.ch_out_mbox, 0xCAFEBABE);
+    if (!g_spu_user_event_hook || !g_spu_user_event_hook(&event_spu, 0x3F001234) ||
+        event_spu.ch_out_mbox.count || event_spu.ch_in_mbox.count != 1 || event_spu.ch_in_mbox.value) return 172;
+    ctx.gpr[11] = 130; ctx.gpr[3] = first_queue; ctx.gpr[4] = 0; ctx.gpr[5] = 2000; lv2_syscall(&ctx);
+    if (ctx.gpr[3] || ctx.gpr[4] != 0xFFFFFFFF53505501ull || ctx.gpr[5] != event_spu_thread ||
+        ctx.gpr[6] != 0x3F00001234ull || ctx.gpr[7] != 0xCAFEBABE) return 173;
+    auto connect_lifecycle = [&](uint32_t group, uint32_t queue, uint32_t type) {
+        ctx.gpr[11] = 185; ctx.gpr[3] = group; ctx.gpr[4] = queue; ctx.gpr[5] = type; lv2_syscall(&ctx);
+        return (uint32_t)ctx.gpr[3];
+    };
+    if (connect_lifecycle(9999, first_queue, 2) != CELL_ESRCH ||
+        connect_lifecycle(event_spu_group, first_queue, 3) != CELL_EINVAL ||
+        connect_lifecycle(event_spu_group, first_queue, 4) != CELL_EINVAL ||
+        connect_lifecycle(event_spu_group, 9999, 2) != CELL_ESRCH) return 192;
+    if (connect_lifecycle(event_spu_group, first_queue, 2) ||
+        connect_lifecycle(event_spu_group, 9999, 2) != CELL_EBUSY ||
+        connect_lifecycle(event_spu_group, unmatched_queue, 1)) return 193;
+    ctx.gpr[11] = 186; ctx.gpr[3] = event_spu_group; ctx.gpr[4] = 2; lv2_syscall(&ctx);
+    if (ctx.gpr[3] || connect_lifecycle(event_spu_group, first_queue, 2) ||
+        connect_lifecycle(event_spu_group, unmatched_queue, 1) != CELL_EBUSY) return 194;
+    ctx.gpr[11] = 130; ctx.gpr[3] = unmatched_queue; ctx.gpr[4] = 0; ctx.gpr[5] = 200; lv2_syscall(&ctx);
+    if ((uint32_t)ctx.gpr[3] != CELL_ETIMEDOUT) return 195;
+    const u32 thread_words[] = {(0x81u << 23) | (42u << 7) | 7u,
+        (0x10du << 21) | (28u << 7) | 7u, 0x102u, 0x40200000u};
+    for (u32 i = 0; i < 4; ++i) vm_write32(image_source + 128 + i * 4, thread_words[i]);
+    spu_begin_image(901); thread_spu_recomp_register(); spu_begin_image(0);
+    spu_workload_register_img(spu_workload_fingerprint(vm_base + image_source, 144), thread_spu_func_00000100, 901, "own thread exit");
+    const spu_overlay_code_segment thread_code{0x100, 16, vm_base + image_source + 128};
+    if (!spu_overlay_register_initial_image(901, &thread_code, 1)) return 203;
+    ctx.gpr[11] = 173; ctx.gpr[3] = event_spu_group; lv2_syscall(&ctx);
+    if (ctx.gpr[3]) return 204;
+    ctx.gpr[11] = 130; ctx.gpr[3] = unmatched_queue; ctx.gpr[4] = 0; ctx.gpr[5] = 1000; lv2_syscall(&ctx);
+    if (ctx.gpr[3] || ctx.gpr[4] != 0xFFFFFFFF53505500ull || ctx.gpr[5] != event_spu_group || ctx.gpr[6] || ctx.gpr[7]) return 205;
+    const auto thread_deadline = std::chrono::steady_clock::now() + std::chrono::seconds(2);
+    do {
+        // Internal completion check; guest syscall 165 remains gated pending its full state audit.
+        ctx.gpr[11] = 165; ctx.gpr[3] = event_spu_thread; ctx.gpr[4] = thread_output;
+        if (!lv2_try_syscall(&ctx)) return 206;
+        if ((u32)ctx.gpr[3] != CELL_ESTAT) break;
+        std::this_thread::yield();
+    } while (std::chrono::steady_clock::now() < thread_deadline);
+    if (ctx.gpr[3] || vm_read32(thread_output) != 42) return 207;
     const auto command_start = vm_read32(gcm_context + 8);
     const auto control = (u32)(uintptr_t)cellGcmGetControlRegister();
     const auto previous_put = vm_read32(control), previous_flips = cellGcm_flip_request_count();
@@ -678,6 +882,21 @@ int main(int argc, char** argv) {
     call(ctx, "_sys_spu_printf_finalize", 0);
     if (ctx.gpr[3] || ps3_spu_printf_callback(0) || ps3_spu_printf_callback(1) ||
         ps3_spu_printf_callback(2) || ps3_spu_printf_callback(3)) return 125;
+    call(ctx, "_sys_spu_printf_attach_group", first_spu_group);
+    if ((uint32_t)ctx.gpr[3] != 0x8001000F) return 166;
+    const auto printf_opd = reserved_a + 0x8000;
+    vm_write32(printf_opd, 0x12380); vm_write32(printf_opd + 4, 0x12340000);
+    ctx.gpr[4] = printf_opd; ctx.gpr[5] = printf_opd; ctx.gpr[6] = printf_opd;
+    call(ctx, "_sys_spu_printf_initialize", printf_opd);
+    const auto original_toc = ctx.gpr[2], original_stack = ctx.gpr[1], original_tls = ctx.gpr[13];
+    for (const char* name : {"_sys_spu_printf_attach_group", "_sys_spu_printf_detach_group",
+         "_sys_spu_printf_attach_thread", "_sys_spu_printf_detach_thread"}) {
+        ctx.gpr[4] = 0; call(ctx, name, first_spu_group);
+        if (ctx.gpr[3] != first_spu_group || ctx.gpr[1] != original_stack || ctx.gpr[2] != original_toc ||
+            ctx.gpr[13] != original_tls || callback_tls != original_tls || callback_tid != ctx.thread_id ||
+            callback_toc != 0x12340000 || g_active_ctx) return 167;
+    }
+    call(ctx, "_sys_spu_printf_finalize", 0);
     vm_write32(0x33028, 0x40);
     call(ctx, "cellSpursAttributeEnableSpuPrintfIfAvailable", 0x33000);
     if (ctx.gpr[3] || vm_read32(0x33028) != 0x10000040) return 126;
@@ -693,6 +912,25 @@ int main(int argc, char** argv) {
     ctx.gpr[4] = 0x18; call(ctx, "cellSpursAttributeSetSpuThreadGroupType", 0x33000);
     if ((int64_t)ctx.gpr[3] >= 0 || vm_read32(0x33028) != 0x40000040) return 131;
     const auto bulk = reserved_a + 0x3078, bulk_source = reserved_a + 0x3200;
+    call(ctx, "cellGcmGetTimeStamp", 2047);
+    if (ctx.gpr[3]) return 199;
+    auto* report = cellGcmGetReportDataAddress(2047);
+    if (!report) return 200;
+    report->timestamp = 0x12345678ABCDEF01ull;
+    call(ctx, "cellGcmGetTimeStamp", 2047);
+    if (ctx.gpr[3] != 0x12345678ABCDEF01ull || report->timestamp != ctx.gpr[3]) return 201;
+    call(ctx, "cellGcmGetTimeStamp", 2047);
+    if (ctx.gpr[3] != 0x12345678ABCDEF01ull) return 202;
+    std::memcpy(vm_base + bulk_source, "own-absent-module", 18);
+    ctx.gpr[4] = 0; ctx.gpr[5] = 0; call(ctx, "sys_prx_get_module_id_by_name", bulk_source);
+    if ((s32)ctx.gpr[3] != (s32)0x8001112E) return 180;
+    vm_write32(bulk, 0xCAFEBABE);
+    ctx.gpr[4] = 0; ctx.gpr[5] = bulk; call(ctx, "sys_prx_get_module_id_by_name", bulk_source);
+    if ((s32)ctx.gpr[3] != (s32)0x80010002 || vm_read32(bulk) != 0xCAFEBABE) return 181;
+    ctx.gpr[4] = 1; ctx.gpr[5] = 0; call(ctx, "sys_prx_get_module_id_by_name", bulk_source);
+    if ((s32)ctx.gpr[3] != (s32)0x80010002) return 182;
+    ctx.gpr[4] = 0; call(ctx, "sys_prx_get_module_id_by_name", 0);
+    if ((s32)ctx.gpr[3] != (s32)0x80010002) return 183;
     std::memcpy(vm_base + bulk_source, "own-string", 11);
     vm_write8(bulk - 1, 0x12); vm_write8(bulk + 11, 0x34);
     ctx.gpr[4] = bulk_source; call(ctx, "_sys_strcpy", bulk);

@@ -37,6 +37,7 @@ int main(int argc, char** argv) {
     if (ps3_native_lle_load(&invalid) || ps3_native_lle_owns(0xD00DFEED)) return 5;
     if (!ps3_native_lle_load(module) || !ps3_native_lle_owns(0xD00DFEED) || ps3_native_lle_owns(0xDEADBEEF) ||
         !ps3_native_lle_library("ownSynthetic") || ps3_native_lle_library("cellSpurs")) return 6;
+    if (!ps3_native_lle_named(module->name) || ps3_native_lle_named("own-absent-module") || ps3_native_lle_named(nullptr)) return 12;
     vm_write64(module->base + 0x180, 2);
     if (!ps3_native_lle_load(module) || vm_read64(module->base + 0x180) != 2) return 7;
     vm_write64(module->base + 0x180, 1);

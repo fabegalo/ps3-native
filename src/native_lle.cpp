@@ -11,6 +11,7 @@ extern "C" void ps3_indirect_call(ppu_context*);
 extern "C" [[noreturn]] void ps3_native_stop(void);
 extern "C" PPU_THREAD_LOCAL ppu_context* g_active_ctx;
 extern "C" PPU_THREAD_LOCAL void (*g_trampoline_fn)(void*);
+extern "C" int ps3_native_guest_range_backed(uint32_t, uint32_t);
 
 static std::atomic<const NativeLleModule*> loaded;
 static uint32_t be32(const uint8_t* p) {
@@ -62,6 +63,10 @@ extern "C" int ps3_native_lle_library(const char* library) {
     const auto* m = loaded.load(std::memory_order_acquire);
     return m && library && !std::strcmp(m->library, library);
 }
+extern "C" int ps3_native_lle_named(const char* name) {
+    const auto* m = loaded.load(std::memory_order_acquire);
+    return m && name && !std::strncmp(m->name, name, 28);
+}
 extern "C" int ps3_native_lle_dispatch(uint32_t nid, ppu_context* ctx) {
     const auto* m = loaded.load(std::memory_order_acquire);
     const auto* e = find_export(m, nid);
@@ -72,15 +77,23 @@ extern "C" int ps3_native_lle_dispatch(uint32_t nid, ppu_context* ctx) {
         std::fprintf(stderr, "[native-blocked] original PRX export descriptor changed nid=0x%08X\n", nid);
         std::fflush(stderr); ps3_native_stop();
     }
-    const auto saved_toc = ctx->gpr[2];
-    auto* previous = g_active_ctx;
-    auto previous_trampoline = g_trampoline_fn;
-    g_trampoline_fn = nullptr;
-    ctx->gpr[2] = toc;
-    ctx->ctr = code;
-    ps3_indirect_call(ctx);
-    ctx->gpr[2] = saved_toc;
-    g_active_ctx = previous;
-    g_trampoline_fn = previous_trampoline;
+    ps3_native_call_opd(ctx, e->opd);
     return 1;
+}
+extern "C" void ps3_native_call_opd(ppu_context* ctx, uint32_t opd) {
+    if (!ctx || (opd & 3) || !ps3_native_guest_range_backed(opd, 8)) {
+        std::fprintf(stderr, "[native-blocked] invalid synchronous guest OPD=0x%08X\n", opd);
+        std::fflush(stderr); ps3_native_stop();
+    }
+    struct Restore {
+        ppu_context* ctx;
+        uint64_t toc;
+        ppu_context* active;
+        void (*trampoline)(void*);
+        ~Restore() { ctx->gpr[2] = toc; g_active_ctx = active; g_trampoline_fn = trampoline; }
+    } restore{ctx, ctx->gpr[2], g_active_ctx, g_trampoline_fn};
+    g_trampoline_fn = nullptr;
+    ctx->gpr[2] = vm_read32(opd + 4);
+    ctx->ctr = vm_read32(opd);
+    ps3_indirect_call(ctx);
 }

@@ -192,8 +192,15 @@ FIFO label fence and a screen-clear command. Original startup creates the
 The authorized original firmware 4.93 `libsre.prx` now supplies `cellSpurs`:
 440 PPU functions and 149 exports are compiled and bound separately from HLE.
 Its original initializer creates 17 semaphores, imports the SPU image at entry
-`0x818` and reserves an exclusive group of five SPUs. The current strict stop is
-`sys_spu_thread_initialize` (LV2 172); no original SPU thread has executed yet.
+`0x818`, reserves an exclusive group of five SPUs, creates their thread objects
+and starts its two PPU control threads. Native SPU group startup now verifies
+the exact AOT image and deployed instruction bytes, preserves mutable data gaps,
+and stops on changed compiled code. An independent synthetic SPU runs on a real
+host thread through LV2, publishes RUN and exits with status 42; no original SPU
+instruction has executed yet. The current strict stop is `NV4097_GET_REPORT`
+(ZPASS, offset `0x7FE0`): actual GPU sample counts, timestamps and ordered
+completion are pending. Fixed visibility values and timestamps created on read
+are not accepted as results.
 Remaining PPU targets and unaudited services stop explicitly.
 An open backend window is not a verified game frame, menu or gameplay.
 Offline discovery found 47 game SPU images: 45 generated without reported

@@ -6,11 +6,22 @@ uint8_t* vm_base = nullptr;
 uint32_t ppu_load_elf(const char*);
 void ppu_recomp_register(void);
 int ppu_run(uint32_t, uint32_t);
+void lv2_init_syscalls(void);
+void lv2_syscall(ppu_context*);
 }
 int main(int argc, char** argv) {
     if ((argc != 2 && argc != 3) || vm_init() != 0) return 1;
     auto entry = ppu_load_elf(argv[1]);
     if (entry != 0x20000) return 2;
+    lv2_init_syscalls();
+    ppu_context process{};
+    process.gpr[11] = 1; lv2_syscall(&process);
+    const auto pid = process.gpr[3];
+    process.gpr[11] = 25; process.gpr[4] = 0x20014; lv2_syscall(&process);
+    if (process.gpr[3] || vm_read32(0x20014) != 0x12345678) return 3;
+    vm_write32(0x20014, 0xA5A5A5A5);
+    process.gpr[3] = pid + 1; lv2_syscall(&process);
+    if ((uint32_t)process.gpr[3] != 0x80010005 || vm_read32(0x20014) != 0xA5A5A5A5) return 4;
     ppu_recomp_register();
     int rc = ppu_run(entry, 0xD00FFFF0);
     auto result = vm_read32(0x20010);

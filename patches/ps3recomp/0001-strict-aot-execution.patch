@@ -194,7 +194,35 @@
  extern "C" void sys_memory_set_image_query(uint64_t (*query)(uint64_t, uint64_t));
  
  static uint64_t ppu_image_overlap_end(uint64_t addr, uint64_t end)
-@@ -3817,6 +3893,9 @@
+@@ -3569,10 +3645,16 @@
+ }
+ /* Default used by the PS3 executable entry path when PROC_PARAM is absent. */
+ static int32_t g_ppu_primary_priority = 1001;
++extern "C" uint32_t g_ps3_sdk_version;
++extern "C" int g_ps3_sdk_version_valid = 0;
+ 
+ extern "C" uint32_t ppu_load_elf(const char* path)
+ {
+     g_ppu_primary_priority = 1001;
++    g_ps3_sdk_version_valid = 0;
++#ifdef PS3_NATIVE_STRICT
++    g_ps3_sdk_version = 0;
++#endif
+     FILE* f = fopen(path, "rb");
+     if (!f) { fprintf(stderr, "[ppu] cannot open %s\n", path); return 0; }
+     fseek(f, 0, SEEK_END);
+@@ -3612,7 +3694,10 @@
+                     be32(param + 4) == 0x13BCC5F6u &&
+                     priority >= 0 && priority <= 3071) {
+                     g_ppu_primary_priority = priority;
++                    g_ps3_sdk_version = be32(param + 0xC);
++                    g_ps3_sdk_version_valid = 1;
+                     fprintf(stderr, "[ppu] primary thread priority %d\n", priority);
++                    fprintf(stderr, "[ppu] executable SDK version 0x%08X\n", g_ps3_sdk_version);
+                 }
+             }
+             continue;
+@@ -3817,6 +3902,9 @@
      uint32_t off  = __atomic_fetch_add(&s_bump, total, __ATOMIC_RELAXED);
      uint32_t base = PPU_TLS_IMG + total + off;  /* main block occupies the first */
      if (base + total > lim) {                   /* out of room: share, as before */
@@ -204,7 +232,7 @@
          static int s_warned = 0;
          if (!__atomic_exchange_n(&s_warned, 1, __ATOMIC_RELAXED))
              fprintf(stderr, "[ppu] TLS window full after %u thread blocks: later "
-@@ -3840,6 +3919,9 @@
+@@ -3840,6 +3928,9 @@
      if (!fn) {
          fprintf(stderr, "[ppu] thread entry 0x%08X (cia=0x%08X) not registered\n",
                  code, (uint32_t)ctx->cia);
@@ -214,7 +242,7 @@
          return;
      }
      g_active_ctx = ctx;
-@@ -3936,11 +4018,17 @@
+@@ -3936,11 +4027,17 @@
              s_hi = s_lo + VM_CB_STACK_SIZE;
          } else {
              /* Out of slots: share the last one, and say so. */
@@ -232,7 +260,7 @@
      }
      if (active) {
          uint32_t sp = (uint32_t)active->gpr[1];
-@@ -3959,6 +4047,12 @@
+@@ -3959,6 +4056,12 @@
      uint32_t code = 0, toc = 0;
      ppu_opd_resolve(opd_addr, &code, &toc);
      ppu_fn fn = ppu_lookup(code);
@@ -245,7 +273,7 @@
      if (!fn) {  /* OPD code clobbered? fall back to a captured fixup */
          for (int i = 0; i < s_opd_fixup_n; i++)
              if (s_opd_fixups[i].opd == opd_addr) {
-@@ -3981,7 +4075,13 @@
+@@ -3981,7 +4084,13 @@
      ctx.gpr[2]  = toc;
      ctx.gpr[3]  = a0; ctx.gpr[4] = a1; ctx.gpr[5] = a2; ctx.gpr[6] = a3;
      ctx.gpr[7]  = a4; ctx.gpr[8] = a5; ctx.gpr[9] = a6; ctx.gpr[10] = a7;
@@ -260,7 +288,7 @@
      ctx.cia     = code;
      /* Save/restore g_active_ctx: this scratch ctx lives on the stack, so leaving
       * g_active_ctx pointing at it after we return leaves a DANGLING pointer once the
-@@ -4027,7 +4127,12 @@
+@@ -4027,7 +4136,12 @@
      *result = 0;
      if (!code) return 0;
      ppu_fn fn = ppu_lookup(code);
@@ -274,7 +302,7 @@
  
      ppu_context ctx;
      memset(&ctx, 0, sizeof(ctx));
-@@ -4035,7 +4140,12 @@
+@@ -4035,7 +4149,12 @@
      ctx.gpr[2]  = toc;
      ctx.gpr[3]  = a0; ctx.gpr[4] = a1; ctx.gpr[5] = a2; ctx.gpr[6] = a3;
      ctx.gpr[7]  = a4; ctx.gpr[8] = a5; ctx.gpr[9] = a6; ctx.gpr[10] = a7;
@@ -290,15 +318,151 @@
       * so a dangling g_active_ctx after return corrupts the crash handler / diagnostics. */
 --- a/runtime/ppu/ppu_sysprx.cpp
 +++ b/runtime/ppu/ppu_sysprx.cpp
-@@ -17,6 +17,7 @@
+@@ -17,6 +17,10 @@
  #include <stdio.h>
  #include <stdlib.h>
  #include <string.h>
 +#include <mutex>
++#include <condition_variable>
++#include <chrono>
++#include "ps3emu/error_codes.h"
  /* win32_compat.h is <windows.h> on Windows (CRITICAL_SECTION for the real
   * lwmutex exclusion) and the POSIX shims elsewhere -- Sleep, DWORD, QPC. */
  #include "../platform/win32_compat.h"
-@@ -461,10 +462,14 @@
+@@ -396,6 +400,123 @@
+     ctx->gpr[3] = 0;
+ }
+ 
++
++#ifdef PS3_NATIVE_STRICT
++extern "C" int ps3_native_guest_range_backed(uint32_t, uint32_t);
++extern "C" int ppu_thread_priority(uint64_t, int32_t*);
++extern "C" void ps3_native_stop(void);
++struct LwcWaiter {
++    LwcWaiter* next = nullptr;
++    uint64_t tid;
++    bool notified = false;
++    std::condition_variable changed;
++};
++struct LwcSlot {
++    uint32_t address = 0, id = 0, mutex = 0;
++    char name[8] = {};
++    LwcWaiter* head = nullptr;
++    LwcWaiter* tail = nullptr;
++};
++static LwcSlot s_lwc[256];
++static std::mutex s_lwc_lock;
++static uint32_t s_lwc_next = 0x4C000000u;
++static void lwc_result(ppu_context* ctx, uint32_t result) { ctx->gpr[3] = (uint64_t)(int64_t)(int32_t)result; }
++static LwcSlot* lwc_find(uint32_t address) {
++    if (!ps3_native_guest_range_backed(address, 8)) return nullptr;
++    const auto id = vm_read32(address + 4), mutex = vm_read32(address);
++    for (auto& slot : s_lwc)
++        if (slot.address == address && slot.id == id && slot.mutex == mutex) return &slot;
++    return nullptr;
++}
++static void sys_lwcond_create(ppu_context* ctx) {
++    const uint32_t address = (uint32_t)ctx->gpr[3], mutex = (uint32_t)ctx->gpr[4], attr = (uint32_t)ctx->gpr[5];
++    if (!ps3_native_guest_range_backed(address, 8) || !ps3_native_guest_range_backed(mutex, 24) ||
++        !ps3_native_guest_range_backed(attr, 8)) { lwc_result(ctx, CELL_EFAULT); return; }
++    if (!lwm_find(mutex)) { lwc_result(ctx, CELL_ESRCH); return; }
++    const auto protocol = vm_read32(mutex + LWM_ATTR) & 15;
++    if (protocol != 1 && protocol != 2) {
++        fprintf(stderr, "[native-blocked] lightweight condition protocol requires audit: %u\n", protocol);
++        fflush(stderr); ps3_native_stop();
++    }
++    std::lock_guard<std::mutex> lock(s_lwc_lock);
++    for (const auto& slot : s_lwc) if (slot.address == address) { lwc_result(ctx, CELL_EBUSY); return; }
++    for (auto& slot : s_lwc) if (!slot.address && s_lwc_next != UINT32_MAX) {
++        slot.address = address; slot.mutex = mutex; slot.id = ++s_lwc_next;
++        memcpy(slot.name, vm_base + attr, 8);
++        vm_write32(address, mutex); vm_write32(address + 4, slot.id);
++        lwc_result(ctx, CELL_OK); return;
++    }
++    lwc_result(ctx, CELL_EAGAIN);
++}
++static void sys_lwcond_destroy(ppu_context* ctx) {
++    std::lock_guard<std::mutex> lock(s_lwc_lock);
++    auto* slot = lwc_find((uint32_t)ctx->gpr[3]);
++    if (!slot) { lwc_result(ctx, CELL_ESRCH); return; }
++    if (slot->head) { lwc_result(ctx, CELL_EBUSY); return; }
++    vm_write32(slot->address + 4, 0xFFFFFFFEu); // sysPrxForUser lwmutex_dead
++    slot->address = 0; slot->id = 0; slot->mutex = 0;
++    lwc_result(ctx, CELL_OK);
++}
++static void lwc_signal(ppu_context* ctx, bool all) {
++    std::lock_guard<std::mutex> lock(s_lwc_lock);
++    auto* slot = lwc_find((uint32_t)ctx->gpr[3]);
++    if (!slot) { lwc_result(ctx, CELL_ESRCH); return; }
++    const bool priority = (vm_read32(slot->mutex + LWM_ATTR) & 15) == 2;
++    LwcWaiter* selected = nullptr;
++    int32_t best = 0;
++    for (auto* waiter = slot->head; waiter; waiter = waiter->next) {
++        if (waiter->notified) continue;
++        if (all) { waiter->notified = true; waiter->changed.notify_one(); continue; }
++        int32_t value = 0;
++        if (priority && !ppu_thread_priority(waiter->tid, &value)) {
++            fprintf(stderr, "[native-blocked] lightweight condition waiter has no PPU priority\n");
++            fflush(stderr); ps3_native_stop();
++        }
++        if (!selected || (priority && value < best)) { selected = waiter; best = value; }
++    }
++    if (selected) { selected->notified = true; selected->changed.notify_one(); }
++    lwc_result(ctx, CELL_OK);
++}
++static void sys_lwcond_signal(ppu_context* ctx) { lwc_signal(ctx, false); }
++static void sys_lwcond_signal_all(ppu_context* ctx) { lwc_signal(ctx, true); }
++static void sys_lwcond_signal_to(ppu_context*) {
++    fprintf(stderr, "[native-blocked] targeted lightweight condition signal requires audit\n");
++    fflush(stderr); ps3_native_stop();
++}
++static void sys_lwcond_wait(ppu_context* ctx) {
++    std::unique_lock<std::mutex> lock(s_lwc_lock);
++    auto* slot = lwc_find((uint32_t)ctx->gpr[3]);
++    if (!slot) { lwc_result(ctx, CELL_ESRCH); return; }
++    const uint32_t mutex = slot->mutex, self = LWM_SELF(ctx), recursion = vm_read32(mutex + LWM_RECUR);
++    auto* primitive = lwm_find(mutex);
++    if (!primitive || vm_read32(mutex + LWM_OWNER) != self || !recursion) { lwc_result(ctx, CELL_EPERM); return; }
++    LwcWaiter waiter;
++    waiter.tid = ctx->thread_id;
++    if (slot->tail) slot->tail->next = &waiter;
++    else slot->head = &waiter;
++    slot->tail = &waiter;
++    vm_write32(mutex + LWM_OWNER, 0); vm_write32(mutex + LWM_RECUR, 0);
++    ppu_thread_note_block(ctx->thread_id);
++    lwm_release(primitive);
++    bool notified = true;
++    if (const uint64_t timeout = ctx->gpr[4]) {
++        const auto now = std::chrono::steady_clock::now();
++        const auto maximum = (std::chrono::steady_clock::time_point::max)();
++        const auto room = std::chrono::duration_cast<std::chrono::microseconds>(maximum - now).count();
++        const auto deadline = timeout < (uint64_t)room ? now + std::chrono::microseconds(timeout) : maximum;
++        notified = waiter.changed.wait_until(lock, deadline, [&] { return waiter.notified; });
++    } else waiter.changed.wait(lock, [&] { return waiter.notified; });
++    LwcWaiter* previous = nullptr;
++    for (auto* item = slot->head; item != &waiter; item = item->next) previous = item;
++    if (previous) previous->next = waiter.next;
++    else slot->head = waiter.next;
++    if (slot->tail == &waiter) slot->tail = previous;
++    lock.unlock();
++    lwm_acquire(primitive, 0);
++    vm_write32(mutex + LWM_OWNER, self); vm_write32(mutex + LWM_RECUR, recursion);
++    lwc_result(ctx, notified ? CELL_OK : CELL_ETIMEDOUT);
++}
++#else
+ /* sys_lwcond (sysPrxForUser) — guest-side condition variable, paired with an
+  * lwmutex. The CRT and (newly) libsre's cellSpurs create/wait/signal these. Like
+  * sys_lwmutex above, model it directly in guest memory so the args stay GUEST
+@@ -442,6 +563,8 @@
+     ctx->gpr[3] = 0;
+ }
+ 
++#endif
++
+ /* sys_ppu_thread_get_id(vm::ptr<u64> id) -> *id = calling thread's real id.
+  * The old fixed "1" broke every am-I-the-designated-thread check in
+  * multithreaded titles (LBP's job system routes work by thread identity, so
+@@ -461,10 +584,14 @@
   * search_and_map just needs a non-zero id to track. */
  /* id -> size so sys_mmapper_search_and_map (lv2 337) can lay blocks out
   * without overlap. Ids are dense from 0x1000. */
@@ -313,7 +477,7 @@
      uint32_t i = mem_id - 0x1000u;
      return (i < 256) ? s_mm_sizes[i] : 0;
  }
-@@ -478,14 +483,13 @@
+@@ -478,14 +605,13 @@
  
  static void sys_mmapper_allocate_memory(ppu_context* ctx)
  {
@@ -335,7 +499,7 @@
  }
  /* sys_mmapper_allocate_memory_from_container(u32 size, u32 container, u64 flags,
   * vm::ptr<u32> mem_id) -> id in *r6. flОw's CRT uses this for its heap/mutex pool;
-@@ -504,6 +508,17 @@
+@@ -504,6 +630,17 @@
  
  /* A handful of CRT helpers the early boot tends to hit; accept and continue. */
  static void crt_ok(ppu_context* ctx) { ctx->gpr[3] = 0; }
@@ -353,7 +517,7 @@
  static void sys_lwmutex_destroy_counted(ppu_context* ctx)
  {
      { static long long _n=0; _n++;
-@@ -543,16 +558,11 @@
+@@ -543,16 +680,11 @@
      unsigned int cmdSize, unsigned int ioSize, unsigned int ioAddress,
      CellGcmGuestAlloc galloc, CellGcmGuestWrite32 gwrite32);
  
@@ -373,7 +537,7 @@
  }
  static void gcm_guest_write32(unsigned int addr, unsigned int val) { vm_write32(addr, val); }
  
-@@ -584,8 +594,8 @@
+@@ -584,8 +716,8 @@
      uint32_t ioAddr  = (uint32_t)ctx->gpr[6];
      fprintf(stderr, "[HLE] _cellGcmInitBody(ctx_out=0x%08X, cmdSize=0x%X, ioSize=0x%X, ioAddr=0x%X)\n",
              ctx_out, cmdSize, ioSize, ioAddr);
@@ -384,7 +548,7 @@
  }
  
  /* --- sys_net offline model ---------------------------------------------
-@@ -678,18 +688,22 @@
+@@ -678,18 +810,32 @@
   * its entry. */
  #define SPU_IMG_SRC_MAX 32
  static struct { uint32_t img, src; } s_spu_img_src[SPU_IMG_SRC_MAX];
@@ -392,18 +556,30 @@
 -extern "C" void ps3_spu_image_record(uint32_t img_ea, uint32_t src_ea)
 -{
 -    if (!img_ea || !src_ea) return;
+-    for (int i = 0; i < SPU_IMG_SRC_MAX; i++)
+-        if (s_spu_img_src[i].img == img_ea || s_spu_img_src[i].img == 0) {
+-            s_spu_img_src[i].img = img_ea; s_spu_img_src[i].src = src_ea; return;
 +static std::mutex s_spu_img_lock;
 +
 +extern "C" int ps3_spu_image_record(uint32_t img_ea, uint32_t src_ea)
 +{
 +    if (!img_ea || !src_ea) return 0;
 +    std::lock_guard<std::mutex> lock(s_spu_img_lock);
-     for (int i = 0; i < SPU_IMG_SRC_MAX; i++)
-         if (s_spu_img_src[i].img == img_ea || s_spu_img_src[i].img == 0) {
--            s_spu_img_src[i].img = img_ea; s_spu_img_src[i].src = src_ea; return;
++    int empty = -1;
++    for (int i = 0; i < SPU_IMG_SRC_MAX; i++) {
++        if (s_spu_img_src[i].img == img_ea) {
 +            s_spu_img_src[i].img = img_ea; s_spu_img_src[i].src = src_ea; return 1;
          }
++        if (!s_spu_img_src[i].img && empty < 0) empty = i;
++    }
++    if (empty >= 0) { s_spu_img_src[empty] = {img_ea, src_ea}; return 1; }
 +    return 0;
++}
++extern "C" void ps3_spu_image_forget(uint32_t img_ea)
++{
++    std::lock_guard<std::mutex> lock(s_spu_img_lock);
++    for (int i = 0; i < SPU_IMG_SRC_MAX; ++i)
++        if (s_spu_img_src[i].img == img_ea) s_spu_img_src[i] = {};
  }
  
  extern "C" uint32_t ps3_spu_image_source_ea(uint32_t img_ea)
@@ -412,7 +588,7 @@
      for (int i = 0; i < SPU_IMG_SRC_MAX; i++)
          if (s_spu_img_src[i].img == img_ea) return s_spu_img_src[i].src;
      return 0;
-@@ -923,7 +937,9 @@
+@@ -923,7 +1069,9 @@
  extern "C" void ppu_sysprx_register(void)
  {
      ps3_hle_register_ctx(0x15BAE46Bu, "_cellGcmInitBody", hle_cellGcmInitBody);
@@ -422,7 +598,7 @@
  
      /* PS3_NET_ONLINE: real host sockets (libs/network/sysNet.c). Registered
       * first because the first registration of a NID wins, so these shadow the
-@@ -962,8 +978,8 @@
+@@ -962,8 +1110,8 @@
      ps3_hle_register_ctx(ps3_compute_nid("sys_time_get_system_time"), "sys_time_get_system_time", sys_time_get_system_time);
      ps3_hle_register_ctx(ps3_compute_nid("sys_process_is_stack"),     "sys_process_is_stack",     sys_process_is_stack);
      /* Atexit registration: nothing to do at boot, just succeed. */
@@ -433,7 +609,7 @@
  
      /* Lightweight mutex family (guards global/singleton init in the CRT). */
      ps3_hle_register_ctx(ps3_compute_nid("sys_lwmutex_create"),  "sys_lwmutex_create",  sys_lwmutex_create);
-@@ -994,7 +1010,7 @@
+@@ -994,7 +1142,7 @@
      ps3_hle_register_ctx(ps3_compute_nid("sys_ppu_thread_exit"),        "sys_ppu_thread_exit",        hle_ppu_thread_exit);
      ps3_hle_register_ctx(ps3_compute_nid("sys_mmapper_allocate_memory"), "sys_mmapper_allocate_memory", sys_mmapper_allocate_memory);
      ps3_hle_register_ctx(ps3_compute_nid("sys_mmapper_allocate_memory_from_container"), "sys_mmapper_allocate_memory_from_container", sys_mmapper_allocate_memory_from_container);
@@ -470,7 +646,46 @@
  #include "sys_event.h"
  #include "../memory/vm.h"
  #include <stdlib.h>   /* getenv -- an implicit decl returns int, truncating the pointer */
-@@ -137,6 +138,7 @@
+@@ -26,14 +27,19 @@
+ 
+ #ifdef _WIN32
+ static LARGE_INTEGER s_qpc_freq;
+-static int           s_qpc_init = 0;
++static LARGE_INTEGER s_timebase_origin;
++static INIT_ONCE s_qpc_once = INIT_ONCE_STATIC_INIT;
++static BOOL CALLBACK qpc_initialize(PINIT_ONCE once, PVOID parameter, PVOID* context)
++{
++    (void)once; (void)parameter; (void)context;
++    QueryPerformanceFrequency(&s_qpc_freq);
++    QueryPerformanceCounter(&s_timebase_origin);
++    return TRUE;
++}
+ 
+ static void ensure_qpc_init(void)
+ {
+-    if (!s_qpc_init) {
+-        QueryPerformanceFrequency(&s_qpc_freq);
+-        s_qpc_init = 1;
+-    }
++    InitOnceExecuteOnce(&s_qpc_once, qpc_initialize, NULL, NULL);
+ }
+ 
+ int64_t lv2_usec_deadline(uint64_t usec)
+@@ -67,12 +73,10 @@
+ uint64_t ppu_timebase_now(void)
+ {
+ #ifdef _WIN32
+-    static LONGLONG t0 = 0;
+     ensure_qpc_init();
+     LARGE_INTEGER now;
+     QueryPerformanceCounter(&now);
+-    if (!t0) t0 = now.QuadPart;   /* benign race: same anchor either way */
+-    uint64_t d = (uint64_t)(now.QuadPart - t0);
++    uint64_t d = (uint64_t)(now.QuadPart - s_timebase_origin.QuadPart);
+     uint64_t q = (uint64_t)s_qpc_freq.QuadPart;
+     return (d / q) * PS3_TIMEBASE_FREQ + (d % q) * PS3_TIMEBASE_FREQ / q;
+ #else
+@@ -137,6 +141,7 @@
  int64_t sys_timer_usleep(ppu_context* ctx)
  {
      uint64_t usec = LV2_ARG_U64(ctx, 0);
@@ -478,7 +693,7 @@
      ppu_thread_note_block(ctx->thread_id);   /* PS3_PRIO_START */
      { extern unsigned long long ps3_qpc_us(void);
        static int n=0; if (PS3_LOG_FIRST(n, 60))
-@@ -245,42 +247,50 @@
+@@ -245,42 +250,50 @@
  
  #ifdef _WIN32
      /* Use high-resolution sleep via waitable timer for better precision */
@@ -551,7 +766,7 @@
      }
  #endif
  
-@@ -358,21 +368,11 @@
+@@ -358,21 +371,11 @@
  
      uint64_t sec, nsec;
  
@@ -647,24 +862,38 @@
          static int s_warned = 0;
          if (s_warned++ < 4)
              fprintf(stderr, "[SYS] ppu_thread_join(tid=%llu): host thread still running 5 s "
-@@ -1268,6 +1298,7 @@
+@@ -1264,54 +1294,25 @@
+  * r3 = thread_id
+  * r4 = pointer to receive priority (s32*)
+  * -----------------------------------------------------------------------*/
++int ppu_thread_priority(uint64_t tid, int32_t* priority)
++{
++    if (!priority) return 0;
++    table_lock();
++    ppu_thread_info* t = find_thread(tid);
++    if (t) *priority = t->priority;
++    table_unlock();
++    return t != NULL;
++}
+ int64_t sys_ppu_thread_get_priority(ppu_context* ctx)
  {
-     uint64_t tid       = LV2_ARG_U64(ctx, 0);
-     uint32_t prio_addr = LV2_ARG_PTR(ctx, 1);
-+    if (!prio_addr || prio_addr > UINT32_MAX - 3u) return (int64_t)(int32_t)CELL_EFAULT;
- 
-     table_lock();
-     ppu_thread_info* t = find_thread(tid);
-@@ -1278,24 +1309,9 @@
-         return (int64_t)(int32_t)CELL_ESRCH;
-     }
-     if (!t) {
+-    uint64_t tid       = LV2_ARG_U64(ctx, 0);
+-    uint32_t prio_addr = LV2_ARG_PTR(ctx, 1);
+-
+-    table_lock();
+-    ppu_thread_info* t = find_thread(tid);
+-    if (!t && tid >= 1 && tid <= PPU_THREAD_MAX && g_ppu_threads[tid - 1].entry_addr != 0) {
+-        /* A thread created by sys_ppu_thread_create that has exited and been freed (the slot keeps its entry address):
+-         * it is gone (ESRCH). */
+-        table_unlock();
+-        return (int64_t)(int32_t)CELL_ESRCH;
+-    }
+-    if (!t) {
 -        /* The main thread (and any thread we didn't spawn via sys_ppu_thread_create)
 -         * isn't in our table. Returning ESRCH here is fatal for engines that query
 -         * their own priority at startup (PhyreEngine PApplication::PlatformInit ->
 -         * "Error initializing PSSG"). Report a sane default priority + success. */
-+        /* Main and worker threads are registered; an unknown ID has no priority. */
-         table_unlock();
+-        table_unlock();
 -        if (prio_addr != 0) {
 -            int32_t prio = PPU_DEFAULT_PRIORITY;
 -            int32_t* out = (int32_t*)vm_to_host(prio_addr);
@@ -678,11 +907,34 @@
 -#endif
 -        }
 -        return CELL_OK;
-+        return (int64_t)(int32_t)CELL_ESRCH;
-     }
+-    }
+-
+-    if (prio_addr != 0) {
+-        int32_t prio = t->priority;
+-        int32_t* out = (int32_t*)vm_to_host(prio_addr);
+-#if __BYTE_ORDER__ == __ORDER_LITTLE_ENDIAN__ || defined(_WIN32)
+-        uint32_t u = (uint32_t)prio;
+-        u = ((u >> 24) & 0xFF) | ((u >> 8) & 0xFF00) |
+-            ((u <<  8) & 0xFF0000) | ((u << 24) & 0xFF000000u);
+-        *out = (int32_t)u;
+-#else
+-        *out = prio;
+-#endif
+-    }
+-
+-    table_unlock();
++    uint32_t address = LV2_ARG_PTR(ctx, 1);
++    int32_t priority;
++    if (!address || address > UINT32_MAX - 3u) return (int64_t)(int32_t)CELL_EFAULT;
++    if (!ppu_thread_priority(LV2_ARG_U64(ctx, 0), &priority)) return (int64_t)(int32_t)CELL_ESRCH;
++    uint32_t value = (uint32_t)priority;
++    uint8_t* output = (uint8_t*)vm_to_host(address);
++    output[0] = (uint8_t)(value >> 24); output[1] = (uint8_t)(value >> 16);
++    output[2] = (uint8_t)(value >> 8); output[3] = (uint8_t)value;
+     return CELL_OK;
+ }
  
-     if (prio_addr != 0) {
-@@ -1426,6 +1442,7 @@
+@@ -1426,6 +1427,7 @@
  int64_t sys_ppu_thread_get_stack_information(ppu_context* ctx)
  {
      uint32_t out_addr = LV2_ARG_PTR(ctx, 0);
@@ -732,7 +984,124 @@
  /*
   * ps3recomp - SPU channel + indirect-branch runtime glue
   *
-@@ -2722,6 +2723,10 @@
+@@ -75,6 +76,14 @@
+     clock_gettime(CLOCK_MONOTONIC, &ts);
+     return (uint64_t)ts.tv_sec * 1000000000ull + (uint64_t)ts.tv_nsec;
+ #endif
++}
++void spu_thread_decrementer_init(spu_context* ctx, uint32_t option)
++{
++    const uint64_t now = spu_host_ns();
++    extern uint64_t ppu_timebase_now(void);
++    const uint64_t ticks = ppu_timebase_now();
++    ctx->dec_base_ns = now;
++    ctx->decrementer = option & 2 ? ~(uint32_t)ticks : 0;
+ }
+ 
+ /* ---------------------------------------------------------------------------
+@@ -1688,7 +1697,11 @@
+     for (uint32_t n = s_hash_head[spu_fn_hash(addr)]; n; n = s_hash_next[n - 1]) {
+         const spu_reg_entry* e = &s_registry[n - 1];
+         if (e->addr == addr &&
+-            (image_id == 0 || e->image_id == 0 || e->image_id == image_id)) {
++            (image_id == 0 || e->image_id == image_id
++#ifndef PS3_NATIVE_STRICT
++             || e->image_id == 0
++#endif
++            )) {
+             /* One compare on the return path; the report itself is rare. */
+             if (e->image_id != image_id)
+                 spu_report_cross_image(addr, image_id, e->image_id);
+@@ -1895,7 +1908,7 @@
+  * primary-image miss against the resident overlay's registry. */
+ typedef struct { uint32_t src_ea; int image_id; uint8_t sig[16]; int has_sig; uint32_t span;
+                  uint32_t load_lsa; unsigned code_count; spu_overlay_code_segment* code;
+-                 uint32_t canon; } spu_ovl_src;
++                 uint32_t canon; int initial; } spu_ovl_src;
+ /* 6 FMOD codec/DSP overlays + up to 89 WWS job-code modules (all stream into
+  * the same job code buffer at LS 0x4000, dispatched by content signature). */
+ #define SPU_OVL_SRC_MAX 128
+@@ -1987,7 +2000,7 @@
+  * transfer. Any later GET into the span resets the slot to pending (contiguous
+  * continuation) or clears it (anything else), see spu_overlay_note_get. */
+ enum { SPU_OVERLAY_PENDING = 1, SPU_OVERLAY_VERIFIED, SPU_OVERLAY_REJECTED };
+-#define SPU_OVERLAY_CODE_SEGMENTS 8u
++#define SPU_OVERLAY_CODE_SEGMENTS (SPU_LS_SIZE / 4u)
+ int spu_overlay_register_verified_region(uint32_t content_ea, uint32_t load_lsa,
+     uint32_t span, int image_id, const spu_overlay_code_segment* code, unsigned count)
+ {
+@@ -2016,6 +2029,62 @@
+     return 1;
+ }
+ 
++int spu_overlay_register_initial_image(int image_id, const spu_overlay_code_segment* code, unsigned count)
++{
++    if (!code || !count || count > SPU_OVERLAY_CODE_SEGMENTS) return 0;
++    uint32_t begin = SPU_LS_SIZE, end = 0;
++    for (unsigned i = 0; i < count; ++i) {
++        if (code[i].lsa >= SPU_LS_SIZE || !code[i].size || code[i].size > SPU_LS_SIZE - code[i].lsa ||
++            (i && code[i].lsa < code[i-1].lsa + code[i-1].size)) return 0;
++        if (code[i].lsa < begin) begin = code[i].lsa;
++        end = code[i].lsa + code[i].size;
++    }
++    for (int i = 0; i < s_ovl_src_count; ++i) {
++        const spu_ovl_src* o = &s_ovl_src[i];
++        if (!o->initial || o->image_id != image_id) continue;
++        if (o->code_count != count) return 0;
++        for (unsigned j = 0; j < count; ++j)
++            if (!code[j].bytes || code[j].lsa != o->code[j].lsa || code[j].size != o->code[j].size ||
++                memcmp(code[j].bytes, o->code[j].bytes, code[j].size)) return 0;
++        return 1;
++    }
++    if (!spu_overlay_register_verified_region(0, begin, end - begin, image_id, code, count)) return 0;
++    s_ovl_src[s_ovl_src_count - 1].initial = 1;
++    return 1;
++}
++int spu_overlay_bind_initial_image(spu_context* ctx)
++{
++    if (!ctx || ctx->image_id <= 0) return 0;
++    ctx->initial_code_index = 0;
++    for (int i = 0; i < s_ovl_src_count; ++i) {
++        const spu_ovl_src* o = &s_ovl_src[i];
++        if (!o->initial || o->image_id != ctx->image_id) continue;
++        for (unsigned j = 0; j < o->code_count; ++j)
++            if (memcmp(ctx->ls + o->code[j].lsa, o->code[j].bytes, o->code[j].size)) return 0;
++        ctx->initial_code_index = i + 1;
++        return 1;
++    }
++    return 0;
++}
++void spu_code_write_check(spu_context* ctx, uint32_t lsa, uint32_t size)
++{
++#ifdef PS3_NATIVE_STRICT
++    if (!ctx || !ctx->initial_code_index || !size) return;
++    const spu_ovl_src* o = &s_ovl_src[ctx->initial_code_index - 1];
++    for (unsigned i = 0; i < o->code_count; ++i) {
++        const spu_overlay_code_segment* c = &o->code[i];
++        const uint32_t start = lsa > c->lsa ? lsa : c->lsa;
++        const uint64_t write_end = (uint64_t)lsa + size;
++        const uint32_t end = write_end < c->lsa + c->size ? (uint32_t)write_end : c->lsa + c->size;
++        if (start < end && memcmp(ctx->ls + start, c->bytes + start - c->lsa, end - start)) {
++            fprintf(stderr, "[native-blocked] SPU compiled code changed image=%d lsa=0x%05X pc=0x%05X\n", ctx->image_id, start, ctx->pc);
++            fflush(stderr); ps3_native_stop();
++        }
++    }
++#else
++    (void)ctx; (void)lsa; (void)size;
++#endif
++}
+ static int spu_overlay_resident_verified(spu_context* ctx, unsigned slot)
+ {
+     int* state = &ctx->resident_code[slot].verify_state;
+@@ -2231,6 +2300,7 @@
+         !spu_ovl_ea_known(ea)) return;
+     for (int i = 0; i < nsrc; i++) {
+         const spu_ovl_src* o = &s_ovl_src[i];
++        if (o->initial) continue;
+         int hit = o->has_sig ? (size >= 512 && memcmp(ls, o->sig, 16) == 0)
+                              : (o->src_ea == ea);
+         if (hit) {
+@@ -2722,6 +2792,10 @@
              return;
          }
          if (ctx->pc == SPURS_PM_SELECT_WORKLOAD_LS) {
@@ -743,13 +1112,14 @@
              /* cellSpursModulePoll: report "no contention — keep running".
               * (The host scheduler admits bounded workers; this service does not preempt.) */
              unsigned n = ++g_spurs_pm_polls;
-@@ -2858,6 +2863,13 @@
+@@ -2858,6 +2932,14 @@
      }
      /* Use the same ownership order as the interpreter's rejoin probe. */
      spu_fn fn = spu_lifted_lookup(ctx, ctx->pc);
 +#ifdef PS3_NATIVE_STRICT
 +    if (!fn) {
-+        fprintf(stderr, "[native-blocked] unprepared SPU target=0x%05X image=%d\n", ctx->pc, ctx->image_id);
++        fprintf(stderr, "[native-blocked] unprepared SPU target=0x%05X image=%d mfc_ea=0x%08X%08X lsa=0x%05X size=0x%X\n",
++            ctx->pc, ctx->image_id, ctx->mfc_eah, ctx->mfc_eal, ctx->mfc_lsa, ctx->mfc_size);
 +        fflush(stderr);
 +        ps3_native_stop();
 +    }
@@ -757,7 +1127,7 @@
      /* The job returned through the link register we planted: it is finished.
       * Its outermost frame ends in `bi $r0`, and r0 was 0 -- so without this the
       * return landed on LS 0, which is the job's OWN entry, and it ran a second
-@@ -3406,4 +3418,4 @@
+@@ -3406,4 +3488,4 @@
  
  #ifdef __cplusplus
  }
@@ -1306,7 +1676,27 @@
          if (opd) {
              gwrite32(opd + 0x0, GCM_FIFO_CALLBACK_SENTINEL_EA);  /* func EA */
              gwrite32(opd + 0x4, 0);                              /* toc (unused) */
-@@ -2596,6 +2602,9 @@
+@@ -2248,6 +2254,11 @@
+      * tells the title every queried object is occluded. */
+     if (m == 0x1A8) s_report_dma = v;
+     if (m == 0x1800) {
++#ifdef PS3_NATIVE_STRICT
++        extern void ps3_native_stop(void);
++        fprintf(stderr, "[native-blocked] RSX report completion and sample counts require audit type=%u offset=0x%X\n", v >> 24, v & 0xFFFFFFu);
++        fflush(stderr); ps3_native_stop();
++#else
+         const u32 off = v & 0xFFFFFFu, idx = off / 16u;
+         const u32 val = (v >> 24) == 1u ? 0xFFFFu : 0u;
+         const u64 ts = gcm_report_timestamp();
+@@ -2266,6 +2277,7 @@
+             s_report_data[idx].timestamp = ts;
+             s_report_data[idx].value = val;
+         }
++#endif
+     }
+ }
+ 
+@@ -2596,6 +2608,9 @@
               * 3 MB ring at boot, wraps, and a walker stopping at every flip
               * then crawled ~1 KB a tick while the title wrote over the
               * commands ahead of it. */
@@ -1316,7 +1706,7 @@
              if (gcm_fifo_backlog(put, s_fifo_getoff) < GCM_FIFO_CATCHUP_BYTES)
                  { why = "flip"; break; }
              continue;
-@@ -3550,29 +3559,16 @@
+@@ -3550,29 +3565,16 @@
  /* NID: 0xA2478CA3 */
  s32 cellGcmSetPrepareFlip(void* ctx, u32 bufferId)
  {
@@ -1356,7 +1746,7 @@
  }
  
  /* NID: 0x1BFAB6EE */
-@@ -3717,6 +3713,9 @@
+@@ -3717,6 +3719,9 @@
          return CELL_OK;
      }
  
@@ -1366,7 +1756,24 @@
      /* Auto-map unmapped main memory. On real hardware PSL1GHT pre-maps its
       * whole RSX heap in gcmInitBody, so its libraries never call MapMainMemory
       * before handing an EA to the RSX (Tiny3D's command ring lives in an
-@@ -4127,11 +4126,13 @@
+@@ -4114,12 +4119,16 @@
+     if (index >= CELL_GCM_MAX_REPORT_COUNT)
+         return 0;
+ 
++#ifdef PS3_NATIVE_STRICT
++    return __atomic_load_n(&s_report_data[index].timestamp, __ATOMIC_ACQUIRE);
++#else
+     /*
+      * On real hardware this reads the RSX timestamp for a given report index.
+      * We return the host timestamp in nanoseconds as a reasonable approximation.
+      */
+     s_report_data[index].timestamp = get_timestamp_ns();
+     return s_report_data[index].timestamp;
++#endif
+ }
+ 
+ /* ---------------------------------------------------------------------------
+@@ -4127,11 +4136,13 @@
   * -----------------------------------------------------------------------*/
  
  /* NID: 0x0B4B62D5 */
@@ -1384,7 +1791,7 @@
  
      if (ps3_log_verbose())
          printf("[cellGcmSys] SetTile(index=%u, loc=%u, offset=0x%X, size=0x%X, pitch=%u)\n",
-@@ -4145,7 +4146,7 @@
+@@ -4145,7 +4156,7 @@
      s_tiles[index].bank   = bank;
      /* SetTile binds too (as it does on RPCS3), so a
       * title that never calls BindTile still has its tiles in force. */
@@ -1393,7 +1800,7 @@
  
      /* Build tile register value (simplified) */
      s_tiles[index].tile  = (location << 0) | (pitch << 8);
-@@ -4153,6 +4154,10 @@
+@@ -4153,6 +4164,10 @@
      gcm_tile_publish(index);
  
      return CELL_OK;
@@ -1404,7 +1811,7 @@
  }
  
  /* NID: 0x06EDEA25 */
-@@ -4311,7 +4316,7 @@
+@@ -4311,7 +4326,7 @@
                         u32 pitch, u8 comp, u16 base, u8 bank)
  {
      /* Delegates to existing SetTile */
@@ -1415,11 +1822,10 @@
  /* Default FIFO size — configures command buffer size before init */
 --- a/libs/system/sysPrxForUser.c
 +++ b/libs/system/sysPrxForUser.c
-@@ -58,6 +58,31 @@
- static void slot_lock(void)   { pthread_mutex_lock(&s_slot_lock); }
+@@ -59,6 +59,31 @@
  static void slot_unlock(void) { pthread_mutex_unlock(&s_slot_lock); }
  #endif
-+
+ 
 +static u32 s_spu_printf_callbacks[4];
 +s32 _sys_spu_printf_initialize(u32 attach_group, u32 detach_group, u32 attach_thread, u32 detach_thread)
 +{
@@ -1444,10 +1850,25 @@
 +    slot_unlock();
 +    return callback;
 +}
- 
++
  /* Reset all lwmutex/lwcond state — call before CRT redirect to game main */
  void sys_lwmutex_reset_all(void)
-@@ -380,15 +405,25 @@
+ {
+@@ -201,7 +226,12 @@
+ 
+ s32 sys_process_getpid(void)
+ {
+-    return 1001;
++    /* The currently supported guest session owns this native process. */
++#ifdef _WIN32
++    return (s32)GetCurrentProcessId();
++#else
++    return (s32)getpid();
++#endif
+ }
+ 
+ s32 sys_process_get_number_of_object(u32 object_type, u32* count)
+@@ -380,15 +410,25 @@
  
  void* _sys_memset(void* dst, s32 val, u32 size)
  {
@@ -1473,7 +1894,7 @@
      return dst;
  }
  
-@@ -455,44 +490,33 @@
+@@ -455,44 +495,33 @@
      return CELL_EAGAIN;
  }
  
@@ -1542,7 +1963,7 @@
  }
  
  s32 sys_lwmutex_create(sys_lwmutex_t_hle* lwmutex, const sys_lwmutex_attribute_t* attr)
-@@ -867,6 +891,14 @@
+@@ -867,6 +896,14 @@
  static u32 s_heap_bump = 0;
  static u32 s_heap_bin[YZ_BINS];          /* guest EA of each free list head */
  
@@ -1557,7 +1978,7 @@
  static u32 yz_bin_for(u32 need)
  {
      u32 b = 4;                            /* 16 bytes minimum */
-@@ -877,6 +909,7 @@
+@@ -877,6 +914,7 @@
  static u32 yz_heap_alloc(u32 size, u32 align)
  {
      if (align < 16) align = 16;
@@ -1565,7 +1986,7 @@
      /* Anything larger than the window can never fit, and letting it through
       * wrapped `need` (size + align + 16 in 32 bits) to a tiny bin: a block far
       * smaller than the caller asked for. */
-@@ -896,6 +929,7 @@
+@@ -896,6 +934,7 @@
           * YZ_HEAP_END and hand out an address outside the window. */
          if ((1u << b) > YZ_HEAP_END - s_heap_bump) { slot_unlock(); return 0; }
          raw = s_heap_bump;
@@ -1869,7 +2290,41 @@
  
 --- a/runtime/syscalls/lv2_register.c
 +++ b/runtime/syscalls/lv2_register.c
-@@ -347,7 +347,9 @@
+@@ -11,6 +11,7 @@
+  */
+ 
+ #include <stdlib.h>   /* calloc, free */
++_Noreturn void ps3_native_stop(void);
+ #include "ps3emu/nid.h"   /* ps3_compute_nid (static inline) */
+ #include "lv2_syscall_table.h"
+ #include "lv2_lock_line.h"
+@@ -41,6 +42,7 @@
+ #include "../spu/spu_lifted_thread.h" /* run a thread's own image, lifted */
+ #include "../spu/spu_context.h"       /* the architectural context that runs it */
+ #include "../spu/spu_workload.h"   /* the content-fingerprint registry */
++#include "../spu/spu_overlay_residency.h"
+ #include "sys_event.h"
+ 
+ #include <stdio.h>
+@@ -298,6 +300,9 @@
+      * it lazily hands every thread the last thread's values. */
+     uint64_t args[4];
+     uint32_t img_ea;         /* sys_spu_image descriptor EA (for LS segment load) */
++    uint32_t owned_image;
++    char name[128];
++    uint32_t option;
+     /* Real SPU execution: the architectural context a thread running its own
+      * lifted image owns, allocated at group_start and holding that thread's
+      * local store. NULL for fallback and interpreter threads. */
+@@ -311,6 +316,7 @@
+     spu_thread_handle_t host_thread;
+     spu_thread_event_t  finish_event;
+     int                 running;
++    int                 finish_initialized;
+     spu_ppu_fallback_fn fb_handler;
+     void*               fb_user;
+     /* Live spu_context while a lifted worker is running on its host thread
+@@ -347,7 +353,9 @@
      int      state;
      uint32_t num_threads;
      uint32_t thread_indices[8];  /* table index into s_spu_threads */
@@ -1880,13 +2335,27 @@
      int32_t  exit_status;        /* final ppu-side status the group reports */
      uint32_t cause;              /* how the group ended */
      /* Event queue connected via sys_spu_thread_group_connect_event[_all_threads].
-@@ -363,6 +365,19 @@
+@@ -355,6 +363,7 @@
+      * into this queue with source = SYS_SPU_THREAD_GROUP_EVENT (0x100..) so
+      * PPU code blocked on sys_event_queue_receive wakes up. */
+     uint32_t event_queue_id;
++    uint32_t lifecycle_queues[3]; /* run, exception, cooperative system module */
+     uint32_t user_event_ports[64];
+ } spu_group_t;
+ 
+@@ -363,6 +372,25 @@
  static uint32_t     s_spu_next_group_id  = 0x1000;
  static uint32_t     s_spu_next_thread_id = 0x2000;
  static int          s_spu_initialized    = 0;
 +static uint32_t     s_spu_managed_limit = 6;
 +#ifdef PS3_NATIVE_STRICT
 +extern int ps3_native_guest_range_backed(uint32_t, uint32_t);
++extern void* _sys_malloc(uint32_t);
++extern int32_t _sys_free(void*);
++extern int ps3_spu_image_record(uint32_t, uint32_t);
++extern uint32_t ps3_spu_image_source_ea(uint32_t);
++extern void ps3_spu_image_forget(uint32_t);
++static uint16_t vm_read_be16(uint32_t);
 +#ifdef _WIN32
 +static SRWLOCK s_spu_group_lock = SRWLOCK_INIT;
 +#define group_lock() AcquireSRWLockExclusive(&s_spu_group_lock)
@@ -1900,7 +2369,7 @@
  
  static spu_group_t* spu_find_group(uint32_t id)
  {
-@@ -494,7 +509,31 @@
+@@ -494,7 +522,31 @@
      uint32_t nrawspu = (uint32_t)ctx->gpr[4];
      fprintf(stderr, "[SPU] initialize(nspu=%u, nrawspu=%u)\n", nspu, nrawspu);
      fflush(stderr);
@@ -1932,7 +2401,7 @@
      ctx->gpr[3] = 0;
      return 0;
  }
-@@ -516,6 +555,33 @@
+@@ -516,6 +568,33 @@
      int32_t  prio     = (int32_t)ctx->gpr[5];
      uint32_t attr_ea  = (uint32_t)ctx->gpr[6];
      fprintf(stderr, "[SPU] thread_group_create(num=%u prio=%d)\n", num, prio);
@@ -1966,7 +2435,7 @@
  
      spu_group_t* g = spu_alloc_group();
      if (!g) {
-@@ -524,7 +590,6 @@
+@@ -524,7 +603,6 @@
          ctx->gpr[3] = (uint64_t)(int64_t)(int32_t)CELL_EAGAIN;
          return (int64_t)ctx->gpr[3];
      }
@@ -1974,7 +2443,7 @@
      g->num_threads = num;
  
      int32_t  gtype   = 0;
-@@ -550,6 +615,7 @@
+@@ -550,6 +628,7 @@
      fflush(stderr);
      ctx->gpr[3] = 0;
      return 0;
@@ -1982,7 +2451,397 @@
  }
  
  /* HLE SPURS kernel (YDKJ_SPURSKERNEL): libsre hands its 5 cellSpurs SPU threads
-@@ -2044,8 +2110,99 @@
+@@ -593,6 +672,81 @@
+     /* attr_ea         = (uint32_t)ctx->gpr[7];  // unused */
+     uint32_t args_ea    = (uint32_t)ctx->gpr[8];
+ 
++#ifdef PS3_NATIVE_STRICT
++    const uint32_t attr = (uint32_t)ctx->gpr[7];
++    if (thread_num >= 256) return (int64_t)(int32_t)CELL_EINVAL;
++    if (!ps3_native_guest_range_backed(out_tid_ea, 4) || !ps3_native_guest_range_backed(attr, 12) ||
++        !ps3_native_guest_range_backed(args_ea, 32) || !ps3_native_guest_range_backed(img_ea, 16))
++        return (int64_t)(int32_t)CELL_EFAULT;
++    const uint32_t name = vm_read_be32(attr), name_len = vm_read_be32(attr + 4), option = vm_read_be32(attr + 8);
++    const uint32_t entry = vm_read_be32(img_ea + 4), segs = vm_read_be32(img_ea + 8), nsegs = vm_read_be32(img_ea + 12);
++    /* Retain decrementer/timebase synchronization; initialization does not start execution. */
++    if (name_len > 128 || (option & ~2u) || vm_read_be32(img_ea) || entry > 0x3FFFC || (entry & 3) || !nsegs || nsegs > 32)
++        return (int64_t)(int32_t)CELL_EINVAL;
++    if ((name_len > 1 && !ps3_native_guest_range_backed(name, name_len - 1)) ||
++        !ps3_native_guest_range_backed(segs, nsegs * 24)) return (int64_t)(int32_t)CELL_EFAULT;
++    uint32_t records[32][6];
++    int copy_found = 0, info_found = 0;
++    for (uint32_t i = 0; i < nsegs; ++i) {
++        for (uint32_t j = 0; j < 6; ++j) records[i][j] = vm_read_be32(segs + i * 24 + j * 4);
++        const uint32_t type = records[i][0], ls = records[i][1], size = records[i][2], source = records[i][4];
++        if (type == 4) {
++            if (info_found++ || size > 256) return (int64_t)(int32_t)CELL_EINVAL;
++            continue;
++        }
++        if ((type != 1 && type != 2) || !size || ((ls | size) & 15) || (uint64_t)ls + size > 0x40000)
++            return (int64_t)(int32_t)CELL_EINVAL;
++        if (type == 1) {
++            if (source & 3) return (int64_t)(int32_t)CELL_EINVAL;
++            if (!ps3_native_guest_range_backed(source, size)) return (int64_t)(int32_t)CELL_EFAULT;
++            copy_found = 1;
++        }
++        for (uint32_t j = 0; j < i; ++j)
++            if (records[j][0] != 4 && ls < (uint64_t)records[j][1] + records[j][2] && records[j][1] < (uint64_t)ls + size)
++                return (int64_t)(int32_t)CELL_EINVAL;
++    }
++    if (!copy_found) return (int64_t)(int32_t)CELL_EINVAL;
++    const uint32_t source = ps3_spu_image_source_ea(img_ea);
++    if (!source) return (int64_t)(int32_t)CELL_EINVAL;
++    group_lock();
++    spu_group_t* g = spu_find_group(group_id);
++    if (!g) { group_unlock(); return (int64_t)(int32_t)CELL_ESRCH; }
++    if (g->state != SPU_GROUP_STATE_INITIALIZED) { group_unlock(); return (int64_t)(int32_t)CELL_EBUSY; }
++    uint32_t slot = MAX_SPU_THREADS;
++    for (uint32_t i = 0; i < g->num_threads; ++i) {
++        const uint32_t index = g->thread_indices[i];
++        if (index < MAX_SPU_THREADS && s_spu_threads[index].index == thread_num) {
++            group_unlock(); return (int64_t)(int32_t)CELL_EBUSY;
++        }
++        if (index == MAX_SPU_THREADS && slot == MAX_SPU_THREADS) slot = i;
++    }
++    if (slot == MAX_SPU_THREADS) { group_unlock(); return (int64_t)(int32_t)CELL_EBUSY; }
++    const uint32_t snapshot = (uint32_t)(uintptr_t)_sys_malloc(16 + nsegs * 24);
++    if (!snapshot) { group_unlock(); return (int64_t)(int32_t)CELL_ENOMEM; }
++    spu_thread_t* t = spu_alloc_thread();
++    if (!t || !ps3_spu_image_record(snapshot, source)) {
++        if (t) t->in_use = 0;
++        _sys_free((void*)(uintptr_t)snapshot); group_unlock(); return (int64_t)(int32_t)CELL_EAGAIN;
++    }
++    vm_write_be32(snapshot, 0); vm_write_be32(snapshot + 4, entry);
++    vm_write_be32(snapshot + 8, snapshot + 16); vm_write_be32(snapshot + 12, nsegs);
++    for (uint32_t i = 0; i < nsegs; ++i)
++        for (uint32_t j = 0; j < 6; ++j) vm_write_be32(snapshot + 16 + i * 24 + j * 4, records[i][j]);
++    t->group_id = group_id; t->index = thread_num; t->entry_point = entry;
++    t->img_ea = snapshot; t->owned_image = snapshot; t->args_ea = args_ea; t->args_size = 32; t->option = option;
++    if (name_len > 1) memcpy(t->name, vm_base + name, name_len - 1);
++    for (uint32_t a = 0; a < 4; ++a)
++        t->args[a] = ((uint64_t)vm_read_be32(args_ea + a * 8) << 32) | vm_read_be32(args_ea + a * 8 + 4);
++    g->thread_indices[slot] = (uint32_t)(t - s_spu_threads);
++    uint32_t initialized = 0;
++    for (uint32_t i = 0; i < g->num_threads; ++i) initialized += g->thread_indices[i] < MAX_SPU_THREADS;
++    if (initialized == g->num_threads) g->state = SPU_GROUP_STATE_READY;
++    vm_write_be32(out_tid_ea, t->tid);
++    fprintf(stderr, "[SPU] prepared thread group=0x%X index=%u tid=0x%X entry=0x%05X name=%.127s\n",
++        group_id, thread_num, t->tid, entry, t->name);
++    group_unlock();
++    return CELL_OK;
++#else
+     spu_group_t* g = spu_find_group(group_id);
+     if (!g) {
+         fprintf(stderr, "[SPU] thread_init: group 0x%X not found\n", group_id);
+@@ -677,6 +831,7 @@
+     fflush(stderr);
+     ctx->gpr[3] = 0;
+     return 0;
++#endif
+ }
+ 
+ /* Reserved stack for an SPU host thread. Lifted SPU code turns a guest loop
+@@ -725,6 +880,13 @@
+       ps3_thread_name("spu %s:%u", g && g->name[0] ? g->name : "group", t->index); }
+     spu_lifted_thread_result r;
+     spu_lifted_thread_run(t->sctx, &r);
++#ifdef PS3_NATIVE_STRICT
++    if (r.faulted || r.group_exit) {
++        fprintf(stderr, "[native-blocked] SPU stop requires lifecycle audit tid=0x%X status=0x%X code=0x%X\n", t->tid, t->sctx->status, t->sctx->stop_code);
++        fflush(stderr); ps3_native_stop();
++    }
++    group_lock();
++#endif
+     t->exit_status = r.exit_status;
+     if (r.group_exit) {
+         spu_group_t* g = spu_find_group(t->group_id);
+@@ -740,6 +902,9 @@
+ #ifdef _WIN32
+     t->running = 0;
+     SetEvent(t->finish_event);
++#ifdef PS3_NATIVE_STRICT
++    group_unlock();
++#endif
+     return 0;
+ #else
+     pthread_mutex_lock(&t->finish_event.mu);
+@@ -747,6 +912,9 @@
+     t->finish_event.done = 1;
+     pthread_cond_broadcast(&t->finish_event.cv);
+     pthread_mutex_unlock(&t->finish_event.mu);
++#ifdef PS3_NATIVE_STRICT
++    group_unlock();
++#endif
+     return NULL;
+ #endif
+ }
+@@ -948,7 +1116,21 @@
+     *src = ps3_spu_image_source_ea(t->img_ea);
+     *fp = 0;
+     *registered = 0;
++#ifdef PS3_NATIVE_STRICT
++    if (!*src || !ps3_native_guest_range_backed(*src, 52)) return 0;
++    const uint32_t ph = vm_read_be32(*src + 28), sh = vm_read_be32(*src + 32);
++    const uint32_t phsize = vm_read_be16(*src + 42), phnum = vm_read_be16(*src + 44),
++        shsize = vm_read_be16(*src + 46), shnum = vm_read_be16(*src + 48);
++    if (phsize != 32 || !phnum || phnum > 128 || (shnum && shsize != 40) ||
++        (uint64_t)ph + phsize * phnum > 0x100000 || (uint64_t)sh + shsize * shnum > 0x100000 ||
++        (uint64_t)*src + ph + phsize * phnum > UINT32_MAX || (uint64_t)*src + sh + shsize * shnum > UINT32_MAX ||
++        !ps3_native_guest_range_backed(*src + ph, phsize * phnum) ||
++        (shnum && !ps3_native_guest_range_backed(*src + sh, shsize * shnum))) return 0;
++#endif
+     const size_t isz = *src ? spu_elf_image_size(vm_base + *src, 1u << 20) : 0;
++#ifdef PS3_NATIVE_STRICT
++    if (!isz || !ps3_native_guest_range_backed(*src, (uint32_t)isz)) return 0;
++#endif
+     if (isz) {
+         *fp = spu_workload_fingerprint(vm_base + *src, isz);
+         *registered = spu_workload_find_img(*fp, iid) != 0;
+@@ -969,6 +1151,73 @@
+ /* sys_spu_thread_group_start(id) */
+ static int64_t sys_spu_thread_group_start_handler(ppu_context* ctx)
+ {
++#ifdef PS3_NATIVE_STRICT
++    const uint32_t id = (uint32_t)ctx->gpr[3];
++    group_lock();
++    spu_group_t* g = spu_find_group(id);
++    if (!g || g->state != SPU_GROUP_STATE_READY) {
++        group_unlock(); return (int64_t)(int32_t)(g ? CELL_ESTAT : CELL_ESRCH);
++    }
++    extern void (*spu_lookup(uint32_t, int))(spu_context*);
++    for (uint32_t i = 0; i < g->num_threads; ++i) {
++        spu_thread_t* t = &s_spu_threads[g->thread_indices[i]];
++        const int image = spu_thread_image_id(t);
++        if (image <= 0 || !spu_lookup(t->entry_point, image) || (t->option & ~2u)) {
++            fprintf(stderr, "[native-blocked] SPU initial image lacks exact AOT binding tid=0x%X entry=0x%05X image=%d\n", t->tid, t->entry_point, image);
++            fflush(stderr); ps3_native_stop();
++        }
++        if (!t->sctx) t->sctx = (spu_context*)calloc(1, sizeof(spu_context));
++        if (!t->sctx) { group_unlock(); return (int64_t)(int32_t)CELL_ENOMEM; }
++        spu_lifted_thread_desc d = {0};
++        d.tid = t->tid; d.group_id = id; d.entry = t->entry_point; d.img_ea = t->img_ea; d.image_id = image;
++        memcpy(d.args, t->args, sizeof d.args);
++        spu_lifted_thread_setup(t->sctx, &d);
++        if (!spu_overlay_bind_initial_image(t->sctx)) {
++            fprintf(stderr, "[native-blocked] SPU initial code differs from compiled bytes image=%d\n", image);
++            fflush(stderr); ps3_native_stop();
++        }
++        spu_thread_decrementer_init(t->sctx, t->option);
++#ifdef _WIN32
++        if (!t->finish_event) t->finish_event = CreateEventA(NULL, TRUE, FALSE, NULL);
++        if (!t->finish_event) { group_unlock(); return (int64_t)(int32_t)CELL_ENOMEM; }
++        ResetEvent(t->finish_event);
++#else
++        if (!t->finish_initialized) {
++            if (pthread_mutex_init(&t->finish_event.mu, NULL)) { group_unlock(); return (int64_t)(int32_t)CELL_ENOMEM; }
++            if (pthread_cond_init(&t->finish_event.cv, NULL)) {
++                pthread_mutex_destroy(&t->finish_event.mu);
++                group_unlock(); return (int64_t)(int32_t)CELL_ENOMEM;
++            }
++            t->finish_initialized = 1;
++        }
++        t->finish_event.done = 0;
++#endif
++    }
++    g->state = SPU_GROUP_STATE_RUNNING; g->cause = 0; g->exit_status = 0;
++    if (g->lifecycle_queues[0] && sys_event_queue_push_by_id(g->lifecycle_queues[0], 0xFFFFFFFF53505500ull, id, 0, 0)) {
++        fprintf(stderr, "[native-blocked] SPU RUN event delivery failed\n"); fflush(stderr); ps3_native_stop();
++    }
++    for (uint32_t i = 0; i < g->num_threads; ++i) {
++        spu_thread_t* t = &s_spu_threads[g->thread_indices[i]];
++        t->running = 1;
++#ifdef _WIN32
++        t->host_thread = CreateThread(NULL, spu_host_stack_bytes(), spu_exec_thread_proc, t, STACK_SIZE_PARAM_IS_A_RESERVATION, NULL);
++        const int failed = !t->host_thread;
++#else
++        pthread_attr_t attr;
++        pthread_attr_init(&attr);
++        pthread_attr_setstacksize(&attr, spu_host_stack_bytes());
++        const int failed = pthread_create(&t->host_thread, &attr, spu_exec_thread_proc, t);
++        pthread_attr_destroy(&attr);
++#endif
++        if (failed) {
++            fprintf(stderr, "[native-blocked] host SPU thread creation failed tid=0x%X\n", t->tid);
++            fflush(stderr); ps3_native_stop();
++        }
++    }
++    group_unlock();
++    return 0;
++#else
+     uint32_t id = (uint32_t)ctx->gpr[3];
+     spu_group_t* g = spu_find_group(id);
+     /* An unknown group is ESRCH (it was a bare -1). */
+@@ -1247,6 +1496,7 @@
+     fflush(stderr);
+     ctx->gpr[3] = 0;
+     return 0;
++#endif
+ }
+ 
+ /* sys_spu_thread_group_join(id, *cause, *status) */
+@@ -1400,6 +1650,13 @@
+                     free(t->sctx);
+                     t->sctx = NULL;
+                 }
++                if (t->owned_image) {
++#ifdef PS3_NATIVE_STRICT
++                    ps3_spu_image_forget(t->owned_image);
++                    _sys_free((void*)(uintptr_t)t->owned_image);
++#endif
++                    t->owned_image = 0;
++                }
+                 t->in_use = 0;
+             }
+         }
+@@ -1437,6 +1694,18 @@
+  * the exit code written through. */
+ static int64_t sys_spu_thread_get_exit_status_handler(ppu_context* ctx)
+ {
++#ifdef PS3_NATIVE_STRICT
++    const uint32_t tid = (uint32_t)ctx->gpr[3], output = (uint32_t)ctx->gpr[4];
++    group_lock();
++    const spu_thread_t* t = spu_find_thread(tid);
++    uint32_t result = !t ? CELL_ESRCH : t->running ? CELL_ESTAT : CELL_OK;
++    if (!result) {
++        if (!ps3_native_guest_range_backed(output, 4)) result = CELL_EFAULT;
++        else vm_write_be32(output, (uint32_t)t->exit_status);
++    }
++    group_unlock();
++    return (int64_t)(int32_t)result;
++#else
+     uint32_t tid       = (uint32_t)ctx->gpr[3];
+     uint32_t status_ea = (uint32_t)ctx->gpr[4];
+     spu_thread_t* t = spu_find_thread(tid);
+@@ -1453,6 +1722,7 @@
+     vm_write_be32(status_ea, (uint32_t)t->exit_status);
+     ctx->gpr[3] = 0;
+     return 0;
++#endif
+ }
+ 
+ /* sys_spu_thread_set_argument(tid, arg_ea) — doesn't affect us, log only */
+@@ -1635,6 +1905,20 @@
+  * STOPPED" — sufficient for the common SPURS pattern. */
+ static int64_t sys_spu_thread_group_connect_event_handler(ppu_context* ctx)
+ {
++#ifdef PS3_NATIVE_STRICT
++    const uint32_t id = (uint32_t)ctx->gpr[3], queue = (uint32_t)ctx->gpr[4], type = (uint32_t)ctx->gpr[5];
++    const unsigned slot = type == 1 ? 0 : type == 2 ? 1 : type == 4 ? 2 : 3;
++    uint32_t result = CELL_OK;
++    group_lock();
++    spu_group_t* g = spu_find_group(id);
++    if (!g) result = CELL_ESRCH;
++    else if (slot == 3 || (type == 4 && !(g->type & 0x20))) result = CELL_EINVAL;
++    else if (g->lifecycle_queues[slot]) result = CELL_EBUSY;
++    else if (!queue || queue > SYS_EVENT_QUEUE_MAX || !g_sys_event_queues[queue - 1].active) result = CELL_ESRCH;
++    else g->lifecycle_queues[slot] = queue;
++    group_unlock();
++    return (int64_t)(int32_t)result;
++#else
+     uint32_t group_id = (uint32_t)ctx->gpr[3];
+     uint32_t queue_id = (uint32_t)ctx->gpr[4];
+     spu_group_t* g = spu_find_group(group_id);
+@@ -1648,6 +1932,7 @@
+     fflush(stderr);
+     ctx->gpr[3] = 0;
+     return 0;
++#endif
+ }
+ 
+ /* User-event ports are independent of group lifecycle event connections. */
+@@ -1670,19 +1955,33 @@
+ 
+ static int64_t sys_spu_thread_group_connect_event_all_threads_handler(ppu_context* ctx)
+ {
++#ifdef PS3_NATIVE_STRICT
++    group_lock();
++#endif
+     spu_group_t* g = spu_find_group((uint32_t)ctx->gpr[3]);
++    const uint32_t queue = (uint32_t)ctx->gpr[4];
+     uint64_t requested = ctx->gpr[5];
+     uint32_t output = (uint32_t)ctx->gpr[6];
+     uint32_t result = CELL_OK;
+-    if (!g) result = CELL_ESRCH;
+-    else if (!requested) result = CELL_EINVAL;
++    if (!requested) result = CELL_EINVAL;
++    else if (!g || !queue || queue > SYS_EVENT_QUEUE_MAX || !g_sys_event_queues[queue - 1].active) result = CELL_ESRCH;
+     else if (!output) result = CELL_EFAULT;
++#ifdef PS3_NATIVE_STRICT
++    else if (!ps3_native_guest_range_backed(output, 1)) result = CELL_EFAULT;
++    else if (g->state == SPU_GROUP_STATE_INITIALIZED) result = CELL_ESTAT;
++#endif
+     else {
+         result = CELL_EISCONN;
+         AcquireSRWLockExclusive(&s_spu_port_lock);
+         for (unsigned port = 0; port < 64; ++port) {
+-            if ((requested & (1ull << port)) && !g->user_event_ports[port]) {
+-                g->user_event_ports[port] = (uint32_t)ctx->gpr[4];
++            if (!(requested & (1ull << port)) || g->user_event_ports[port]) continue;
++            int available = 1;
++            for (uint32_t i = 0; i < g->num_threads; ++i) {
++                const uint32_t index = g->thread_indices[i];
++                if (index < MAX_SPU_THREADS && spu_port_queue_locked(&s_spu_threads[index], g->id, port)) available = 0;
++            }
++            if (available) {
++                g->user_event_ports[port] = queue;
+                 vm_base[output] = (uint8_t)port;
+                 result = CELL_OK;
+                 WakeAllConditionVariable(&s_spu_port_bound);
+@@ -1691,6 +1990,9 @@
+         }
+         ReleaseSRWLockExclusive(&s_spu_port_lock);
+     }
++#ifdef PS3_NATIVE_STRICT
++    group_unlock();
++#endif
+     ctx->gpr[3] = (uint64_t)(int64_t)(int32_t)result;
+     return (int64_t)(int32_t)result;
+ }
+@@ -1740,6 +2042,11 @@
+         if (!spu->spu_group_id) {
+             queue = spurs_port_queue(port);
+         } else {
++#ifdef PS3_NATIVE_STRICT
++            AcquireSRWLockExclusive(&s_spu_port_lock);
++            queue = spu_port_queue_locked(spu_find_thread(spu->spu_id), spu->spu_group_id, port);
++            ReleaseSRWLockExclusive(&s_spu_port_lock);
++#else
+             const ULONGLONG deadline = GetTickCount64() + SPU_PORT_BIND_WAIT_MS;
+             AcquireSRWLockExclusive(&s_spu_port_lock);
+             for (;;) {
+@@ -1750,6 +2057,7 @@
+                 SleepConditionVariableSRW(&s_spu_port_bound, &s_spu_port_lock, (DWORD)(deadline - now), 0);
+             }
+             ReleaseSRWLockExclusive(&s_spu_port_lock);
++#endif
+         }
+         result = CELL_ENOTCONN;
+         if (queue) {
+@@ -1764,6 +2072,15 @@
+ 
+ static int64_t sys_spu_thread_group_disconnect_event_handler(ppu_context* ctx)
+ {
++#ifdef PS3_NATIVE_STRICT
++    const uint32_t type = (uint32_t)ctx->gpr[4];
++    const unsigned slot = type == 1 ? 0 : type == 2 ? 1 : type == 4 ? 2 : 3;
++    group_lock();
++    spu_group_t* g = spu_find_group((uint32_t)ctx->gpr[3]);
++    if (g && slot < 3) g->lifecycle_queues[slot] = 0;
++    group_unlock();
++    return g ? CELL_OK : (int64_t)(int32_t)CELL_ESRCH;
++#else
+     uint32_t group_id = (uint32_t)ctx->gpr[3];
+     spu_group_t* g = spu_find_group(group_id);
+     if (g) g->event_queue_id = 0;
+@@ -1771,6 +2088,7 @@
+     fflush(stderr);
+     ctx->gpr[3] = 0;
+     return 0;
++#endif
+ }
+ 
+ /* sys_spu_thread_connect_event(thread_id, eq_id, et) — bind an SPU thread's
+@@ -2044,8 +2362,99 @@
   * sys_spu_segment{ int type; u32 ls_start; int size; u64 src_pa; }  (0x18, src@0x10)
   * PT_LOAD -> COPY segment (src_pa = src + p_offset); a memsz>filesz tail -> a
   * FILL(0) segment, exactly as the SDK counts them. */
@@ -2082,7 +2941,7 @@
      extern uint8_t* vm_base;
      uint32_t img_ea = (uint32_t)ctx->gpr[3];
      uint32_t src_ea = (uint32_t)ctx->gpr[4];
-@@ -2180,6 +2337,7 @@
+@@ -2180,6 +2589,7 @@
      fflush(stderr);
      ctx->gpr[3] = 0;
      return 0;
@@ -2090,7 +2949,52 @@
  }
  
  /* sys_spu_image_open(*img, *path) — load an SPU ELF from the VFS, parse its
-@@ -2677,7 +2835,11 @@
+@@ -2354,6 +2764,24 @@
+ static int64_t sys_process_get_sdk_version_handler(ppu_context* ctx)
+ {
+     uint32_t version_ea = (uint32_t)ctx->gpr[4];
++#ifdef PS3_NATIVE_STRICT
++    if ((uint32_t)ctx->gpr[3] != (uint32_t)sys_process_getpid()) {
++        ctx->gpr[3] = (uint64_t)(int64_t)(int32_t)CELL_ESRCH;
++        return (int64_t)ctx->gpr[3];
++    }
++    if (!ps3_native_guest_range_backed(version_ea, 4)) {
++        ctx->gpr[3] = (uint64_t)(int64_t)(int32_t)CELL_EFAULT;
++        return (int64_t)ctx->gpr[3];
++    }
++    if (!g_ps3_sdk_version_valid) {
++        extern void ps3_native_stop(void);
++        fprintf(stderr, "[native-blocked] executable SDK version is not available from PROC_PARAM\n");
++        fflush(stderr); ps3_native_stop();
++    }
++    vm_write_be32(version_ea, g_ps3_sdk_version);
++    ctx->gpr[3] = 0;
++    return 0;
++#else
+     if (!version_ea) {
+         ctx->gpr[3] = (uint64_t)(int64_t)(int32_t)CELL_EFAULT;
+         return (int64_t)(int32_t)CELL_EFAULT;
+@@ -2363,6 +2791,7 @@
+     vm_write_be32(version_ea, version);
+     ctx->gpr[3] = 0;
+     return 0;
++#endif
+ }
+ 
+ /* sys_process_is_spu_lock_line_reservation_address (14)
+@@ -2630,7 +3059,10 @@
+     lv2_syscall_register(tbl, SYS_SPU_THREAD_GET_EXIT_STATUS, sys_spu_thread_get_exit_status_handler);
+     lv2_syscall_register(tbl, SYS_SPU_THREAD_CONNECT_EVENT,   sys_spu_thread_connect_event_handler);
+     { extern void (*g_spu_out_mbox_hook)(uint32_t,uint32_t,int,uint32_t);
+-      g_spu_out_mbox_hook = ydkj_spu_out_mbox_deliver; }
++#ifndef PS3_NATIVE_STRICT
++      g_spu_out_mbox_hook = ydkj_spu_out_mbox_deliver;
++#endif
++    }
+     { extern int (*g_spu_user_event_hook)(spu_context*, uint32_t);
+       g_spu_user_event_hook = spu_deliver_user_event; }
+     lv2_syscall_register(tbl, SYS_SPU_THREAD_DISCONNECT_EVENT,sys_spu_thread_stub);
+@@ -2677,7 +3109,11 @@
  
  #define LV2_HLE_BRIDGE(fn_name, handler)                                       static void fn_name(ppu_context* ctx) { (void)handler(ctx); }
  
@@ -2242,7 +3146,18 @@
      /* Diagnostic: prove the blocked receiver was WOKEN and is returning an event
       * (vs. staying blocked forever). Distinguishes a wake bug from game logic. */
      /* Was hardcoded to queue 1, which makes every other queue look silent: the
-@@ -909,6 +914,9 @@
+@@ -828,8 +833,10 @@
+ /* Helper to enqueue an event into a queue */
+ static int event_queue_push(sys_event_queue_info* q, const sys_event_t* evt)
+ {
++#ifndef PS3_NATIVE_STRICT
+     { const int qi = (int)(q - g_sys_event_queues);
+       if (qi >= 0 && qi < SYS_EVENT_QUEUE_MAX) { s_last_evt[qi] = *evt; s_have_last_evt[qi] = 1; } }
++#endif
+     /* EVT_PUSHLOG=<qid>: log every push to that queue with the host caller, to
+      * find which producer feeds a queue when nothing logs a port_send. */
+     { static int s_q = -1; if (s_q < 0) { const char* e = getenv("EVT_PUSHLOG"); s_q = e ? atoi(e) : 0; }
+@@ -909,6 +916,9 @@
      int32_t  port_type   = LV2_ARG_S32(ctx, 1);
      uint64_t name        = LV2_ARG_U64(ctx, 2);
  
@@ -2252,7 +3167,7 @@
      evt_table_lock();
  
      int slot = -1;
-@@ -985,6 +993,11 @@
+@@ -985,6 +995,11 @@
      if (p->connected_queue != 0) {
          evt_table_unlock();
          return (int64_t)(int32_t)CELL_EISCONN;
@@ -2264,7 +3179,41 @@
      }
  
      p->connected_queue = (int32_t)queue_id;
-@@ -1646,12 +1659,6 @@
+@@ -1060,6 +1075,25 @@
+ 
+ int64_t sys_event_port_send(ppu_context* ctx)
+ {
++#ifdef PS3_NATIVE_STRICT
++    const uint32_t id = (uint32_t)ctx->gpr[3];
++    uint32_t result = CELL_ESRCH;
++    evt_table_lock();
++    if (id && id <= SYS_EVENT_PORT_MAX && g_sys_event_ports[id - 1].active) {
++        const sys_event_port_info* port = &g_sys_event_ports[id - 1];
++        const uint32_t queue = (uint32_t)port->connected_queue;
++        result = CELL_ENOTCONN;
++        if (queue && queue <= SYS_EVENT_QUEUE_MAX && g_sys_event_queues[queue - 1].active) {
++            extern int32_t sys_process_getpid(void);
++            sys_event_t event;
++            event.source = port->name ? port->name : ((uint64_t)(uint32_t)sys_process_getpid() << 32) | id;
++            event.data1 = ctx->gpr[4]; event.data2 = ctx->gpr[5]; event.data3 = ctx->gpr[6];
++            result = event_queue_push(&g_sys_event_queues[queue - 1], &event) ? CELL_EBUSY : CELL_OK;
++        }
++    }
++    evt_table_unlock();
++    return (int64_t)(int32_t)result;
++#else
+     uint32_t port_id = LV2_ARG_U32(ctx, 0);
+     uint64_t data1   = LV2_ARG_U64(ctx, 1);
+     uint64_t data2   = LV2_ARG_U64(ctx, 2);
+@@ -1148,6 +1182,7 @@
+     }
+ 
+     return CELL_OK;
++#endif
+ }
+ 
+ /* =========================================================================
+@@ -1646,12 +1681,6 @@
      memset(g_sys_event_ports,  0, sizeof(g_sys_event_ports));
      memset(g_sys_event_flags,  0, sizeof(g_sys_event_flags));
  
@@ -2336,14 +3285,17 @@
  
  /* ppu_loader.cpp - PPU reservation bookkeeping. The ppu_memory.h inlines call
   * these on every store so lwarx/stwcx reservations can be broken; with no PPU
-@@ -122,5 +139,8 @@
+@@ -121,6 +138,11 @@
+ uint32_t g_spu_image_src_ea = 0;
  uint32_t g_spu_image_ls_start = 0;
  uint32_t g_spu_image_span = 0;
++int g_ps3_sdk_version_valid = 0; /* No executable metadata in a GPU-only host. */
  void ppu_dump_bctrl_ring(uint32_t a, const char* tag) { (void)a; (void)tag; }
 -uint32_t ps3_spu_image_source_ea(uint32_t img_ea) { return img_ea; }
 +/* A GPU-only host has no PPU image catalog; imports must fail their backing check. */
 +uint32_t ps3_spu_image_source_ea(uint32_t img_ea) { (void)img_ea; return 0; }
 +int ps3_spu_image_record(uint32_t img, uint32_t src) { (void)img; (void)src; return 0; }
++void ps3_spu_image_forget(uint32_t img) { (void)img; }
 +int ps3_native_guest_range_backed(uint32_t addr, uint32_t size) { (void)addr; (void)size; return 0; }
  
 --- a/runtime/syscalls/sys_semaphore.c
@@ -2361,3 +3313,313 @@
          return (int64_t)(int32_t)CELL_EINVAL;
  
      sem_table_lock();
+--- a/runtime/syscalls/sys_ppu_thread.h
++++ b/runtime/syscalls/sys_ppu_thread.h
+@@ -109,6 +109,8 @@
+ int64_t sys_ppu_thread_detach(ppu_context* ctx);
+ int64_t sys_ppu_thread_yield(ppu_context* ctx);
+ int64_t sys_ppu_thread_get_priority(ppu_context* ctx);
++/* Host query of the same registered thread table, without guest scratch output. */
++int ppu_thread_priority(uint64_t tid, int32_t* priority);
+ int64_t sys_ppu_thread_set_priority(ppu_context* ctx);
+ int64_t sys_ppu_thread_rename(ppu_context* ctx);
+ int64_t sys_ppu_thread_get_join_state(ppu_context* ctx);
+--- a/runtime/syscalls/sdk_version_weak.c
++++ b/runtime/syscalls/sdk_version_weak.c
+@@ -12,9 +12,12 @@
+  * definition, not __attribute__((weak)): the runtime lib builds under MSVC,
+  * which has no GNU weak attribute.)
+  *
+- * The value is what a title with no PROC_PARAM segment gets. It is not a
+- * neutral choice -- libsre picks feature sets off it -- so it is a real SDK
+- * version rather than zero. */
++ * Strict execution leaves the value unknown until the loader validates
++ * PROC_PARAM; the compatibility default remains for legacy non-strict ports. */
+ #include <stdint.h>
+ 
++#ifdef PS3_NATIVE_STRICT
++uint32_t g_ps3_sdk_version = 0;
++#else
+ uint32_t g_ps3_sdk_version = 0x00350001;
++#endif
+--- a/runtime/syscalls/lv2_syscall_table.h
++++ b/runtime/syscalls/lv2_syscall_table.h
+@@ -51,6 +51,7 @@
+  * with no such segment gets. libsre picks feature sets off this, so leaving it
+  * unset is not neutral. */
+ extern uint32_t g_ps3_sdk_version;
++extern int g_ps3_sdk_version_valid; /* Loader-validated metadata; strict mode requires it. */
+ 
+ 
+ #define SYS_PPU_THREAD_CREATE           41
+--- a/tools/test_spu_program_pipeline.py
++++ b/tools/test_spu_program_pipeline.py
+@@ -69,12 +69,14 @@
+         workload = workload[workload.index('uint64_t spu_workload_fingerprint('):
+                             workload.index('/* ---- dispatch')]
+         (self.root / 'workload.c').write_text('#include "spu_workload.h"\n#include <stdio.h>\n#include <string.h>\n' + workload)
+-        channels = (runtime / 'spu_channels.c').read_text()
+-        channels = channels[channels.index('typedef void (*spu_fn)'):
+-                            channels.index('/* Which image registered')]
++        source = (runtime / 'spu_channels.c').read_text()
++        channels = source[source.index('typedef void (*spu_fn)'):
++                          source.index('/* Which image registered')]
++        channels += source[source.index('typedef struct { uint32_t src_ea;'):
++                           source.index('static int spu_overlay_resident_verified(spu_context* ctx, unsigned slot)\n{')]
+         # SPU_TLS is defined earlier in spu_channels.c, outside the extracted block.
+         tls = '#if defined(_MSC_VER)\n#define SPU_TLS __declspec(thread)\n#else\n#define SPU_TLS __thread\n#endif\n'
+-        (self.root / 'registry.c').write_text('#include "spu_context.h"\n#include <stdio.h>\n' + tls + channels)
++        (self.root / 'registry.c').write_text('#include "spu_context.h"\n#include "spu_overlay_residency.h"\n#include <stdio.h>\n#include <stdlib.h>\n#include <string.h>\n#include <stdatomic.h>\n' + tls + channels)
+         return runtime
+ 
+     def test_exact_dedup_and_same_address_isolation(self):
+@@ -273,11 +275,16 @@
+                      f'assert(spu_lookup(0x100, id{i}) == f{i});',
+                      # Each context contains a 256 KB local store. Keep the
+                      # four fixtures off Windows' default 1 MB main stack.
+-                     f'static spu_context c{i}; f{i}(&c{i});',
++                     f'static spu_context c{i}; spu_context_init(&c{i}, {i}); c{i}.image_id = id{i};',
++                     f'assert(spu_elf_load_to_ls(image{i}, sizeof image{i}, c{i}.ls, NULL));',
++                     f'assert(spu_overlay_bind_initial_image(&c{i}));',
++                     f'c{i}.ls[0x100] ^= 1; assert(!spu_overlay_bind_initial_image(&c{i})); c{i}.ls[0x100] ^= 1;',
++                     f'f{i}(&c{i});',
+                      f'assert(c{i}.gpr[3]._u32[0] == {immediate});']
+         body += ['assert(f0 != f1 && id0 != id1);', 'assert(spu_workload_count() == 8);']
+         (self.root / 'proof.c').write_text(
+-            '#include "spu_workload.h"\n#include <assert.h>\n'
++            '#include "spu_workload.h"\n#include "spu_overlay_residency.h"\n#include <assert.h>\n#include <stdio.h>\n#include <stdlib.h>\n'
++            '#undef assert\n#define assert(c) do { if (!(c)) { fprintf(stderr, "proof assertion: %s at %d\\n", #c, __LINE__); exit(97); } } while (0)\n'
+             'extern void spu_register_all(void);\n'
+             'extern spu_lifted_entry_fn spu_lookup(uint32_t, int);\n'
+             'SPU_THREAD_LOCAL void (*g_spu_trampoline_fn)(spu_context*);\n'
+@@ -302,7 +309,8 @@
+         self.assertEqual(configured.returncode, 0, configured.stderr + configured.stdout)
+         built = subprocess.run([cmake, '--build', str(build)], capture_output=True, text=True)
+         self.assertEqual(built.returncode, 0, built.stderr + built.stdout)
+-        subprocess.run([str(build / ('proof.exe' if sys.platform == 'win32' else 'proof'))], check=True)
++        proof = subprocess.run([str(build / ('proof.exe' if sys.platform == 'win32' else 'proof'))], capture_output=True, text=True)
++        self.assertEqual(proof.returncode, 0, proof.stdout + proof.stderr)
+         # A changed input must reconfigure and fail coverage instead of linking
+         # the previously successful registration on an incremental build.
+         (self.root / 'input.bin').write_bytes(elf(unsupported=True))
+--- a/tools/build_spu_workloads.py
++++ b/tools/build_spu_workloads.py
+@@ -203,7 +203,7 @@
+     write_registry(args, imgs, text_fps)
+ 
+ 
+-def write_registry(args, imgs, text_fps, image_ids=None):
++def write_registry(args, imgs, text_fps, image_ids=None, code_map=None):
+     L = []
+     L.append(f"/* {os.path.basename(args.out)} -- GENERATED by tools/build_spu_workloads.py.")
+     L.append(f" * Registers the {len(imgs)} lifted SPU images of \"{args.title}\" with the workload")
+@@ -214,6 +214,18 @@
+     L.append(" * Build note: add <repo>/runtime/spu to this target's include dirs (the lifted")
+     L.append(' * sources use bare #include "spu_context.h" etc.). */')
+     L.append('#include "spu_workload.h"')
++    if code_map:
++        L.append('#include "spu_overlay_residency.h"')
++        L.append('#include <stdlib.h>')
++        for img, segments in code_map.items():
++            for index, (address, data) in enumerate(segments):
++                L.append(f'static const uint8_t {img}_code_{index}[] = {{')
++                L.extend('    ' + ','.join(f'0x{b:02X}' for b in data[n:n+32]) + ',' for n in range(0, len(data), 32))
++                L.append('};')
++            L.append(f'static const spu_overlay_code_segment {img}_code[] = {{')
++            for index, (address, data) in enumerate(segments):
++                L.append(f'    {{{address}, {len(data)}, {img}_code_{index}}},')
++            L.append('};')
+     L.append("")
+     L.append("extern void spu_begin_image(int image_id);")
+     L.append("")
+@@ -226,6 +238,8 @@
+     L.append("{")
+     for index, (img, prefix, fp, ent) in enumerate(imgs, 1):
+         i = image_ids[img] if image_ids else index
++        if code_map and img in code_map:
++            L.append(f'    if (!spu_overlay_register_initial_image({i}, {img}_code, {len(code_map[img])})) abort();')
+         L.append(f"    spu_begin_image({i}); {prefix}spu_recomp_register();")
+         L.append(f"    spu_workload_register_img(0x{fp:016X}ULL, {prefix}spu_func_{ent:08X}, {i}, \"{img}\");")
+         if text_fps.get(img):  # same entry, keyed by the text segment (raw SPU proxy-DMA load)
+--- a/tools/spu_program_pipeline.py
++++ b/tools/spu_program_pipeline.py
+@@ -168,7 +168,7 @@
+             if not sep or name not in {p['name'] for p in unique.values()}:
+                 raise ValueError('--extra-funcs requires discovered content name=ADDR[,ADDR...]')
+             extra[name] = [int(s.strip(), 0) for s in value.split(',')]
+-        imgs, text_fps, image_ids = [], {}, {}
++        imgs, text_fps, image_ids, code_map = [], {}, {}, {}
+         from find_spu_functions import detect_functions
+         from build_spu_workloads import debase_includes
+         for digest, program in sorted(unique.items()):
+@@ -228,6 +228,13 @@
+             imgs.append((name, prefix, int(program['fingerprint'], 16), info['entry']))
+             image_ids[name] = program['image_id']
+             text_fps[name] = int(program['text_fingerprint'], 16)
++            merged = []
++            for start, end in sorted(diagnostics['functions']):
++                if merged and start <= merged[-1][1]:
++                    merged[-1][1] = max(end, merged[-1][1])
++                else:
++                    merged.append([start, end])
++            code_map[name] = [(start, blob[offset + start - base:offset + end - base]) for start, end in merged]
+         # Default runtime capacity is 256 registrations, including text aliases.
+         if sum(len({fp, text_fps[name]}) for name, _, fp, _ in imgs) > 256:
+             report['errors'].append('generated registrations exceed default runtime capacity (256)')
+@@ -240,7 +247,7 @@
+         if usable:
+             registry_args = type('RegistryArgs', (), dict(out=str(stage / registry.name), title='discovered SPU programs',
+                                                         register_fn=args.register_fn, constructor=args.constructor))()
+-            registry_writer(registry_args, imgs, text_fps, image_ids)
++            registry_writer(registry_args, imgs, text_fps, image_ids, code_map)
+             sources = [destination / name / 'spu_recomp.c' for name, _, _, _ in imgs] + [registry]
+             # Bracket arguments preserve spaces and avoid expansion of $ in paths.
+             cmake = 'set(SPU_GENERATED_SOURCES\n' + ''.join(f'  [==[{p.as_posix()}]==]\n' for p in sources) + ')\n'
+--- a/runtime/spu/spu_lifted_thread.c
++++ b/runtime/spu/spu_lifted_thread.c
+@@ -3,6 +3,7 @@
+ #include "spu_lifted_thread.h"
+ #include "spu_coherency.h"
+ #include "spu_context.h"
++#include "spu_overlay_residency.h"
+ #include "ps3emu/ps3_tprof.h"   /* PS3_TPROF: in-process thread samples */
+ 
+ #include <stdio.h>
+@@ -10,6 +11,14 @@
+ #include <string.h>
+ 
+ extern uint8_t* vm_base;
++#ifdef PS3_NATIVE_STRICT
++static void deployment_fault(void)
++{
++    extern void ps3_native_stop(void);
++    fprintf(stderr, "[native-blocked] invalid SPU deployment descriptor or source\n");
++    fflush(stderr); ps3_native_stop();
++}
++#endif
+ 
+ /* The lifted-code registry, the dispatcher and the per-context MFC engine
+  * table, all in spu_channels.c. */
+@@ -44,6 +53,26 @@
+  * keeps this working for images built by either convention. */
+ static void spu_deploy_image(spu_context* ctx, uint32_t img_ea)
+ {
++#ifdef PS3_NATIVE_STRICT
++    extern int ps3_native_guest_range_backed(uint32_t, uint32_t);
++    if (!ps3_native_guest_range_backed(img_ea, 16)) deployment_fault();
++    const uint32_t segs = rd_be32(img_ea + 8), count = rd_be32(img_ea + 12);
++    if (!count || count > 32 || !ps3_native_guest_range_backed(segs, count * 24)) deployment_fault();
++    for (uint32_t i = 0; i < count; ++i) {
++        const uint32_t segment = segs + i * 24, type = rd_be32(segment), ls = rd_be32(segment + 4),
++            size = rd_be32(segment + 8), source = rd_be32(segment + 16);
++        if (type == 4) continue;
++        if ((type != 1 && type != 2) || ls >= SPU_LS_SIZE || size > SPU_LS_SIZE - ls || (ls & 15) || (size & 15) ||
++            (type == 1 && !ps3_native_guest_range_backed(source, size))) deployment_fault();
++    }
++    for (uint32_t i = 0; i < count; ++i) {
++        const uint32_t segment = segs + i * 24, type = rd_be32(segment), ls = rd_be32(segment + 4),
++            size = rd_be32(segment + 8), source = rd_be32(segment + 16);
++        if (type == 1) memcpy(ctx->ls + ls, vm_base + source, size);
++        if (type == 2) for (uint32_t byte = 0; byte < size; ++byte)
++            ctx->ls[ls + byte] = (uint8_t)(source >> (24 - 8 * (byte & 3)));
++    }
++#else
+     if (!img_ea || !vm_base) return;
+     uint32_t segs_ea = rd_be32(img_ea + 0x08);
+     int32_t  nsegs   = (int32_t)rd_be32(img_ea + 0x0C);
+@@ -63,6 +92,7 @@
+             memset(&ctx->ls[ls], (int)(src & 0xFFu), size);
+         }
+     }
++#endif
+ }
+ 
+ int spu_lifted_thread_available(uint32_t entry)
+--- a/runtime/spu/spu_overlay_residency.h
++++ b/runtime/spu/spu_overlay_residency.h
+@@ -13,6 +13,7 @@
+     uint32_t lsa, size;
+     const uint8_t* bytes;
+ } spu_overlay_code_segment;
++struct spu_context;
+ 
+ /* Register a streamed code overlay by its DMA source EA, like
+  * spu_overlay_register_region, plus the code bytes its lifted functions were
+@@ -28,6 +29,11 @@
+ int spu_overlay_register_verified_region(uint32_t content_ea, uint32_t load_lsa,
+     uint32_t span, int image_id, const spu_overlay_code_segment* code,
+     unsigned count);
++/* Immutable offline code metadata for the initial image; mutable data gaps are excluded. */
++int spu_overlay_register_initial_image(int image_id, const spu_overlay_code_segment*, unsigned count);
++int spu_overlay_bind_initial_image(struct spu_context*);
++void spu_code_write_check(struct spu_context*, uint32_t lsa, uint32_t size);
++void spu_thread_decrementer_init(struct spu_context*, uint32_t option);
+ 
+ #ifdef __cplusplus
+ }
+--- a/runtime/spu/spu_context.h
++++ b/runtime/spu/spu_context.h
+@@ -311,6 +311,7 @@
+      * --reloc): lifted relocatable code adds it to every address it derives from its own
+      * pc. Set by the dispatcher on entry into such code; only that code reads it. */
+     int32_t reloc_delta;
++    int initial_code_index; /* verified immutable registry index + 1, zero for legacy contexts */
+ 
+     /* Dispatch cache (spu_lifted_lookup, spu_channels.c). dcache_id names this
+      * context's current lifetime: 0 after spu_context_init (or a zeroed
+@@ -505,6 +506,7 @@
+            ((uint32_t)p[2] << 8)  | (uint32_t)p[3];
+ }
+ 
++void spu_code_write_check(spu_context*, uint32_t, uint32_t);
+ static inline void spu_ls_write32(spu_context* ctx, uint32_t lsa, uint32_t val)
+ {
+     lsa &= SPU_LS_MASK;
+@@ -513,6 +515,9 @@
+     p[1] = (uint8_t)(val >> 16);
+     p[2] = (uint8_t)(val >> 8);
+     p[3] = (uint8_t)(val);
++#ifdef PS3_NATIVE_STRICT
++    spu_code_write_check(ctx, lsa, 4);
++#endif
+ }
+ 
+ /* Local-store quadword access.
+@@ -765,6 +770,9 @@
+         p[i*4 + 3] = (uint8_t)w;
+     }
+ #endif
++#ifdef PS3_NATIVE_STRICT
++    spu_code_write_check(ctx, lsa, 16);
++#endif
+     if (__builtin_expect(g_spu_ls_wdiag != 0, 0))
+         spu_ls_write_diag(ctx, lsa, val);
+ }
+--- a/runtime/spu/spu_dma.h
++++ b/runtime/spu/spu_dma.h
+@@ -597,6 +597,9 @@
+           } }
+         /* GET: main memory -> local store */
+         memcpy(ls_ptr, ea_ptr, size);
++#ifdef PS3_NATIVE_STRICT
++        spu_code_write_check(spu, lsa, size);
++#endif
+         /* SPU_STACKEA_WATCH (b): scan the just-loaded payload for a 0xD00Cxxxx
+          * dword = the completion-word EA arriving in a job buffer. */
+         { static int s_se = -1; if (s_se < 0) s_se = getenv("SPU_STACKEA_WATCH") ? 1 : 0;
+--- a/runtime/spu/spu_drain.c
++++ b/runtime/spu/spu_drain.c
+@@ -323,9 +323,13 @@
+  * until iret). */
+ static void spu_irq_regs_save(spu_context* ctx)
+ {
++#ifndef PS3_NATIVE_STRICT
+     ctx->irq_saved = 1;
+     ctx->irq_resume_pc = ctx->srr0;
+     memcpy(ctx->irq_gpr, ctx->gpr, sizeof ctx->irq_gpr);
++#else
++    (void)ctx; /* The original interrupt handler must preserve its own registers. */
++#endif
+ }
+ 
+ /* Called from spu_indirect_branch on every dispatch. Restores + clears when

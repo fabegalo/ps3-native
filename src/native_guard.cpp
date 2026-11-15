@@ -67,6 +67,7 @@ static void filesystem_path(ppu_context* ctx) {
     }
 }
 extern "C" void ps3_native_hle_gate(uint32_t nid, ppu_context* ctx) {
+    if (nid == ps3_compute_nid("cellGcmGetTimeStamp") && ctx->gpr[3] < 2048) return;
     if (nid == ps3_compute_nid("_sys_strlen") && guest_string_size((uint32_t)ctx->gpr[3])) return;
     if (nid == ps3_compute_nid("sys_spu_image_import") && ctx->gpr[5] == 1) return;
     if (nid == ps3_compute_nid("_sys_strncat")) {
@@ -110,9 +111,12 @@ extern "C" void ps3_native_hle_gate(uint32_t nid, ppu_context* ctx) {
         }
     }
     // Expand only after inspecting and testing the upstream implementation.
-    static const char* audited[] = {"sys_initialize_tls", "sys_lwmutex_create", "sys_lwmutex_lock", "sys_lwmutex_unlock",
+    static const char* audited[] = {"sys_prx_get_module_id_by_name", "sys_initialize_tls", "sys_lwmutex_create", "sys_lwmutex_lock", "sys_lwmutex_unlock",
                                     "sys_time_get_system_time", "sys_ppu_thread_get_id",
+                                    "sys_lwcond_create", "sys_lwcond_destroy", "sys_lwcond_signal", "sys_lwcond_signal_all", "sys_lwcond_wait",
                                     "_sys_memset", "_sys_memcpy",
+                                    "_sys_spu_printf_attach_group", "_sys_spu_printf_detach_group",
+                                    "_sys_spu_printf_attach_thread", "_sys_spu_printf_detach_thread",
                                     "_sys_spu_printf_initialize", "_sys_spu_printf_finalize",
                                     "_sys_process_atexitspawn", "_sys_process_at_Exitspawn",
                                     "cellSysmoduleLoadModule", "cellSysmoduleIsLoaded",
@@ -227,6 +231,8 @@ extern "C" void ps3_native_hle_gate(uint32_t nid, ppu_context* ctx) {
 }
 extern "C" void ps3_native_syscall_gate(ppu_context* ctx) {
     const auto number = ctx->gpr[11];
+    if (number == 1) return;
+    if (number == 25) return;
     // Reservation capability is classified by the upstream LV2 address/rights contract.
     if (number == 14) return;
     if (number == 90 && guest_backed((uint32_t)ctx->gpr[3], 4) &&
@@ -234,12 +240,20 @@ extern "C" void ps3_native_syscall_gate(ppu_context* ctx) {
         vm_read32((uint32_t)ctx->gpr[4] + 4) == 0x200) return;
     if (number == 91) return;
     if (number == 130) return;
+    if (number == 138) return;
+    if (number == 251) return;
+    if (number == 185) return;
+    if (number == 173) return;
+    if (number == 186 && (ctx->gpr[4] == 1 || ctx->gpr[4] == 2 || ctx->gpr[4] == 4)) return;
     if (number == 170 && guest_backed((uint32_t)ctx->gpr[6], 12) &&
         vm_read32((uint32_t)ctx->gpr[6] + 8) == 0x18) return;
+    if (number == 172 && guest_backed((uint32_t)ctx->gpr[7], 12) &&
+        (vm_read32((uint32_t)ctx->gpr[7] + 8) & ~2u) == 0 && guest_backed((uint32_t)ctx->gpr[6], 16) &&
+        vm_read32((uint32_t)ctx->gpr[6]) == 0) return;
     if (number == 128 && guest_backed((uint32_t)ctx->gpr[3], 4) &&
         guest_backed((uint32_t)ctx->gpr[4], 16)) return;
     if (number == 134 && guest_backed((uint32_t)ctx->gpr[3], 4) &&
-        ctx->gpr[4] == 1 && ctx->gpr[5] != 0) return;
+        ctx->gpr[4] == 1) return;
     if (number == 136) return;
     if (number == 330) {
         const auto flags = ctx->gpr[4];
