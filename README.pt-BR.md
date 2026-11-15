@@ -1,6 +1,6 @@
 <div align="center">
 
-<img src="docs/assets/ps3-native-banner.webp" alt="Arte conceitual do ps3-native com CELL, SPUs, RSX e execução nativa no PC; não é captura de jogo" width="100%" />
+<img src="docs/assets/ps3-native-banner.png" alt="Arte conceitual do ps3-native com CELL, SPUs, RSX e execução nativa no PC; não é captura de jogo" width="100%" />
 
 # ps3-native
 
