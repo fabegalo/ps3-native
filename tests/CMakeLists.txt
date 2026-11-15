@@ -5,6 +5,7 @@ add_custom_command(OUTPUT "${gen}/ppu_recomp.c" "${gen}/ppu_recomp.h" "${gen}/pp
     "${gen}/spu_bytes.h"
     "${gen}/thread/spu_recomp.c" "${gen}/thread/spu_recomp.h"
     "${gen}/lle_bridge.cpp" "${gen}/lle_recomp.cpp"
+    "${gen}/variants/owner.c" "${gen}/variants/first.c" "${gen}/variants/second.c" "${gen}/variants/registry.c" "${gen}/variants/meta.h"
     COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/generate_fixtures.py" "${PROJECT_SOURCE_DIR}" "${gen}"
     DEPENDS generate_fixtures.py lle_fixture.py "${PROJECT_SOURCE_DIR}/src/ps3native/firmware.py" ${tools})
 set(scaffold "${PS3RECOMP_DIR}/runtime/ppu/ppu_loader.cpp"
@@ -21,7 +22,8 @@ target_include_directories(fixture_ppu PUBLIC "${PROJECT_SOURCE_DIR}/src" "${gen
 target_link_libraries(fixture_ppu PUBLIC ps3recomp_runtime)
 add_executable(ps3-native-ppu ppu_main.cpp)
 target_link_libraries(ps3-native-ppu PRIVATE fixture_ppu)
-add_executable(ps3-native-spu spu_main.c "${gen}/spu_recomp.c")
+add_executable(ps3-native-spu spu_main.c "${gen}/spu_recomp.c"
+    "${gen}/variants/owner.c" "${gen}/variants/first.c" "${gen}/variants/second.c" "${gen}/variants/registry.c")
 target_compile_definitions(ps3-native-spu PRIVATE PS3_NATIVE_STRICT)
 target_link_libraries(ps3-native-spu PRIVATE fixture_ppu)
 add_executable(ps3-native-lle lle_main.cpp "${gen}/lle_bridge.cpp" "${gen}/lle_recomp.cpp")
@@ -64,11 +66,12 @@ if(WIN32)
 endif()
 add_test(NAME ppu.aot COMMAND ps3-native-ppu "${gen}/ppu.elf")
 add_test(NAME spu.aot.dma COMMAND ps3-native-spu)
+add_test(NAME spu.aot.variants COMMAND ps3-native-spu variants)
 add_test(NAME ppu.aot.negative COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/expect_failure.py"
     $<TARGET_FILE:ps3-native-ppu> "${gen}/ppu.elf" wrong-oracle)
 add_test(NAME spu.aot.dma.negative COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/expect_failure.py"
     $<TARGET_FILE:ps3-native-spu> corrupt-input)
-set_tests_properties(ppu.aot spu.aot.dma PROPERTIES TIMEOUT 30)
+set_tests_properties(ppu.aot spu.aot.dma spu.aot.variants PROPERTIES TIMEOUT 30)
 set_tests_properties(ppu.aot.negative spu.aot.dma.negative PROPERTIES TIMEOUT 35)
 add_executable(ps3-native-contracts native_contracts.cpp "${gen}/thread/spu_recomp.c")
 target_include_directories(ps3-native-contracts PRIVATE "${PS3RECOMP_DIR}/libs/input")

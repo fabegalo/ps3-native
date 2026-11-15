@@ -82,3 +82,33 @@ prx.write_bytes(own_prx(module_start=True))
 prepared = prepare_prx(root, prx, out / 'lle-cache', 0x08000000, 'ownSynthetic', module_start=True)
 (out / 'lle_bridge.cpp').write_text('#include "' + (prepared / 'bundle.cpp').as_posix() + '"\n')
 (out / 'lle_recomp.cpp').write_text('#include "' + (prepared / 'lift/ppu_recomp.c').as_posix() + '"\n')
+
+# A real lifted call into two offline variants sharing one local-store address.
+sys.path.insert(0, str(tools))
+from wrap_spu_elf import wrap
+variants = out / 'variants'
+variants.mkdir(exist_ok=True)
+target = 0x3FEC0
+owner_bytes = struct.pack('>II', 0x33000000 | ((((target - 0x100) // 4) & 0xFFFF) << 7), 0)
+payloads = {'owner': owner_bytes, 'first': struct.pack('>II', 0x40800383, 0x35000000),
+            'second': struct.pack('>II', 0x40800483, 0x35000000)}
+images = {name: wrap(data, base=0x100 if name == 'owner' else target) for name, data in payloads.items()}
+hashes = {name: hashlib.sha256(data).hexdigest() for name, data in images.items()}
+for name, data in images.items(): (variants / (name + '.elf')).write_bytes(data)
+bindings = variants / 'bindings.json'
+bindings.write_text(json.dumps({'schema_version':1, 'variants':[
+    {'owner_sha256':hashes['owner'], 'variant_sha256':hashes[name]} for name in ('first','second')]}))
+run('build_spu_workloads.py', '--input', variants / 'owner.elf', '--input', variants / 'first.elf',
+    '--input', variants / 'second.elf', '--code-variants', bindings, '--lifted', variants / 'aot',
+    '--out', variants / 'aot/registry.c', '--register-fn', 'own_variants_register', '--constructor')
+report = json.loads((variants / 'aot/inventory.json').read_text())
+assert report['complete'] and len(report['programs']) == 3 and len(report['code_variants']) == 2
+for name in images:
+    path = variants / 'aot' / ('spu_' + hashes[name]) / 'spu_recomp.c'
+    (variants / (name + '.c')).write_text('#include "' + path.as_posix() + '"\n')
+(variants / 'registry.c').write_text('#include "' + (variants / 'aot/registry.c').as_posix() + '"\n')
+owner_id = next(p['image_id'] for p in report['programs'] if p['sha256'] == hashes['owner'])
+meta = f'#define OWN_VARIANT_OWNER_ID {owner_id}\n#define OWN_VARIANT_ENTRY {target}\n'
+for name, data in payloads.items():
+    meta += f'static const unsigned char own_variant_{name}[] = {{' + ','.join(str(x) for x in data) + '};\n'
+(variants / 'meta.h').write_text(meta)

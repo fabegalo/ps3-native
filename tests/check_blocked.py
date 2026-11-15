@@ -28,6 +28,11 @@ result = subprocess.run([sys.argv[2], 'unsupported'], capture_output=True, timeo
 if result.returncode != 86 or b'[native-blocked] unsupported SPU instruction' not in result.stderr:
     raise AssertionError(('SPU unsupported instruction', result.returncode, result.stderr[-2000:]))
 print('Verified HLE, direct/indirect PPU, LV2 and SPU interpreter/instruction fail-closed paths')
+for mode, expected in (('variant_mutation', b'SPU AOT variant mismatch'), ('variant_unowned', b'unprepared SPU target='),
+                       ('variant_unbound', b'SPU AOT variant owner is not bound')):
+    result = subprocess.run([sys.argv[2], mode], capture_output=True, timeout=15)
+    if result.returncode != 86 or expected not in result.stderr:
+        raise AssertionError((mode, result.returncode, result.stderr[-2000:]))
 result = subprocess.run([sys.argv[2], 'code_mutation'], capture_output=True, timeout=15)
 if result.returncode != 86 or b'[native-blocked] SPU compiled code changed' not in result.stderr:
     raise AssertionError(('SPU compiled code mutation', result.returncode, result.stderr[-2000:]))

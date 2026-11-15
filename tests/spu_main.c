@@ -4,6 +4,7 @@
 #include "spu_workload.h"
 #include "spu_interp.h"
 #include "spu_bytes.h"
+#include "variants/meta.h"
 #include "vm.h"
 #include <stdio.h>
 #include <stdlib.h>
@@ -31,6 +32,27 @@ int main(int argc, char** argv) {
         return 1;
     }
     if (vm_init() != 0) return 1;
+    if (argc > 1 && !strncmp(argv[1], "variant", 7)) {
+        spu_context_init(&ctx, 0); ctx.image_id = OWN_VARIANT_OWNER_ID;
+        memcpy(ctx.ls + 0x100, own_variant_owner, sizeof own_variant_owner);
+        if (!spu_overlay_bind_initial_image(&ctx)) return 24;
+        for (unsigned cycle = 0; cycle < 3; ++cycle) {
+            memcpy(ctx.ls + OWN_VARIANT_ENTRY, cycle == 1 ? own_variant_second : own_variant_first, sizeof own_variant_first);
+            ctx.pc = 0x100; ctx.status = SPU_STATUS_RUNNING;
+            ctx.gpr[3] = spu_splat_u32(0xDEADBEEF);
+            if (cycle == 2 && !strcmp(argv[1], "variant_mutation")) ctx.ls[OWN_VARIANT_ENTRY + 2] ^= 1;
+            if (cycle == 2 && !strcmp(argv[1], "variant_unowned")) {
+                ctx.image_id = 123; ctx.initial_code_index = 0; ctx.pc = OWN_VARIANT_ENTRY;
+            }
+            if (cycle == 2 && !strcmp(argv[1], "variant_unbound")) {
+                ctx.initial_code_index = 0;
+            }
+            spu_run_with_halt(spu_indirect_branch, &ctx);
+            if (ctx.gpr[3]._u32[0] != (cycle == 1 ? 9u : 7u) || ctx.status != SPU_STATUS_STOPPED_BY_STOP) return 25;
+        }
+        puts("SPU AOT variants: original lifted caller, warm-cache swaps and native results verified");
+        vm_shutdown(); return 0;
+    }
     const uint8_t input[16] = {0,0,0,41, 0,0,0,9, 0,0,0,99, 0,0,0,0};
     const uint8_t expected[16] = {0,0,0,42, 0,0,0,10, 0,0,0,100, 0,0,0,1};
     memcpy(vm_base + 0x20000, input, 16);

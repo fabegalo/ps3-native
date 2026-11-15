@@ -1936,15 +1936,16 @@
              /* One compare on the return path; the report itself is rare. */
              if (e->image_id != image_id)
                  spu_report_cross_image(addr, image_id, e->image_id);
-@@ -1749,6 +1787,7 @@
+@@ -1749,6 +1787,8 @@
   * through would execute stale code registered under another image. Task and
   * unbounded overlay misses retain their existing primary-image fallback. */
  static int spu_overlay_resident_verified(spu_context* ctx, unsigned slot);
 +static spu_lifted_fn spu_overlay_bind_payload(spu_context* ctx, uint32_t lsa);
++static spu_lifted_fn spu_overlay_aot_entry(const spu_context* ctx, uint32_t lsa);
  static spu_lifted_fn spu_lifted_lookup_full(const spu_context* ctx, uint32_t lsa, int* reloc)
  {
      /* Every probe below goes through #436's per-thread memo rather than
-@@ -1763,7 +1802,13 @@
+@@ -1763,7 +1803,13 @@
              /* A region registered with its code bytes owns its span even when
               * unverified: other images' functions there would be stale. */
              if (ctx->resident_code[slot].verify_state &&
@@ -1959,8 +1960,14 @@
              const uint32_t canon = ctx->resident_code[slot].canon;
              if (!canon)
                  return (spu_lifted_fn)spu_lookup_memoized(lsa, ctx->resident_code[slot].image_id);
-@@ -1781,6 +1826,9 @@
-     if (ctx->resident_task) fn = spu_lookup_memoized(lsa, ctx->resident_task);
+@@ -1777,10 +1823,13 @@
+             }
+             return (spu_lifted_fn)f;
+         }
+-    spu_fn fn = NULL;
+-    if (ctx->resident_task) fn = spu_lookup_memoized(lsa, ctx->resident_task);
++    spu_fn fn = (spu_fn)spu_overlay_aot_entry(ctx, lsa);
++    if (!fn && ctx->resident_task) fn = spu_lookup_memoized(lsa, ctx->resident_task);
      if (!fn && ctx->resident_ovl) fn = spu_lookup_memoized(lsa, ctx->resident_ovl);
      if (!fn) fn = spu_lookup_memoized(lsa, ctx->image_id);
 +#ifdef PS3_NATIVE_STRICT
@@ -1969,7 +1976,7 @@
      return (spu_lifted_fn)fn;
  }
  
-@@ -1895,7 +1943,8 @@
+@@ -1895,7 +1944,8 @@
   * primary-image miss against the resident overlay's registry. */
  typedef struct { uint32_t src_ea; int image_id; uint8_t sig[16]; int has_sig; uint32_t span;
                   uint32_t load_lsa; unsigned code_count; spu_overlay_code_segment* code;
@@ -1979,7 +1986,7 @@
  /* 6 FMOD codec/DSP overlays + up to 89 WWS job-code modules (all stream into
   * the same job code buffer at LS 0x4000, dispatched by content signature). */
  #define SPU_OVL_SRC_MAX 128
-@@ -1987,7 +2036,7 @@
+@@ -1987,7 +2037,7 @@
   * transfer. Any later GET into the span resets the slot to pending (contiguous
   * continuation) or clears it (anything else), see spu_overlay_note_get. */
  enum { SPU_OVERLAY_PENDING = 1, SPU_OVERLAY_VERIFIED, SPU_OVERLAY_REJECTED };
@@ -1988,7 +1995,7 @@
  int spu_overlay_register_verified_region(uint32_t content_ea, uint32_t load_lsa,
      uint32_t span, int image_id, const spu_overlay_code_segment* code, unsigned count)
  {
-@@ -2016,6 +2065,118 @@
+@@ -2016,6 +2066,118 @@
      return 1;
  }
  
@@ -2107,10 +2114,63 @@
  static int spu_overlay_resident_verified(spu_context* ctx, unsigned slot)
  {
      int* state = &ctx->resident_code[slot].verify_state;
-@@ -2027,6 +2188,47 @@
+@@ -2027,6 +2189,100 @@
          *state = match ? SPU_OVERLAY_VERIFIED : SPU_OVERLAY_REJECTED;
      }
      return *state == SPU_OVERLAY_VERIFIED;
++}
++
++static struct { unsigned owner; uint32_t entry; } s_aot_entries[64];
++static unsigned s_aot_entry_count;
++int spu_overlay_register_aot_entry(int owner_image, uint32_t entry)
++{
++    if (owner_image <= 0 || entry >= SPU_LS_SIZE || (entry & 3) || !spu_lookup(entry, owner_image)) return 0;
++    unsigned owner = (unsigned)s_ovl_src_count;
++    for (unsigned i = 0; i < (unsigned)s_ovl_src_count; ++i)
++        if (s_ovl_src[i].initial && s_ovl_src[i].image_id == owner_image) { owner = i; break; }
++    if (owner == (unsigned)s_ovl_src_count) return 0;
++    const spu_ovl_src* source = &s_ovl_src[owner];
++    for (unsigned i = 0; i < source->code_count; ++i)
++        if (entry >= source->code[i].lsa && entry - source->code[i].lsa < source->code[i].size) return 0;
++    for (unsigned i = 0; i < s_aot_entry_count; ++i)
++        if (s_aot_entries[i].owner == owner && s_aot_entries[i].entry == entry) return 1;
++    if (s_aot_entry_count == 64) return 0;
++    s_aot_entries[s_aot_entry_count].owner = owner;
++    s_aot_entries[s_aot_entry_count++].entry = entry;
++    return 1;
++}
++int spu_overlay_aot_owner_bound(const spu_context* ctx, int owner_image)
++{
++    for (unsigned i = 0; i < s_aot_entry_count; ++i) {
++        const unsigned owner = s_aot_entries[i].owner;
++        const spu_ovl_src* source = &s_ovl_src[owner];
++        if (source->image_id != owner_image) continue;
++        if (ctx->image_id == owner_image && ctx->initial_code_index == owner + 1) return 1;
++        for (unsigned slot = 0; slot < 4; ++slot)
++            if (ctx->resident_code[slot].image_id == owner_image &&
++                ctx->resident_code[slot].source_index == owner && ctx->resident_code[slot].verify_state &&
++                spu_overlay_resident_verified((spu_context*)ctx, slot)) return 1;
++    }
++    return 0;
++}
++static spu_lifted_fn spu_overlay_aot_entry(const spu_context* ctx, uint32_t lsa)
++{
++    spu_lifted_fn found = NULL;
++    /* Registration finishes before SPU threads start. The cached result is the
++     * checking dispatcher; changing LS bytes never caches a selected variant. */
++    for (unsigned i = 0; i < s_aot_entry_count; ++i) {
++        if (s_aot_entries[i].entry != lsa) continue;
++        const unsigned owner = s_aot_entries[i].owner;
++        const spu_ovl_src* source = &s_ovl_src[owner];
++        if (!spu_overlay_aot_owner_bound(ctx, source->image_id)) continue;
++        spu_lifted_fn candidate = (spu_lifted_fn)spu_lookup_memoized(lsa, source->image_id);
++        if (found && candidate != found) {
++            fprintf(stderr, "[native-blocked] ambiguous SPU AOT variant owner target=0x%05X\n", lsa);
++            fflush(stderr); ps3_native_stop();
++        }
++        found = candidate;
++    }
++    return found;
 +}
 +static spu_lifted_fn spu_overlay_bind_payload(spu_context* ctx, uint32_t lsa)
 +{
@@ -2155,7 +2215,7 @@
  }
  
  /* Register one-way runtime entries that replace the guest call stack.
-@@ -2213,6 +2415,10 @@
+@@ -2213,6 +2469,10 @@
          uint32_t base = ctx->resident_code[slot].lsa;
          uint32_t end = base + ctx->resident_code[slot].size;
          if (lsa < end && lsa + size > base) {
@@ -2166,7 +2226,7 @@
              if (lsa < base || ea != ctx->resident_code[slot].source_ea + (lsa - base)) {
                  ctx->resident_code[slot].image_id = 0;
                  spu_dcache_residency_changed(ctx);
-@@ -2223,6 +2429,34 @@
+@@ -2223,6 +2483,34 @@
          }
      }
      int nsrc = __atomic_load_n(&s_ovl_src_count, __ATOMIC_ACQUIRE);
@@ -2201,7 +2261,7 @@
      /* Invalidate destination code/residency above even for an unrelated EA.
       * Acquire count before the signature flag: if this snapshot contains a
       * signature, its earlier flag publication is visible. A racing future
-@@ -2231,6 +2465,10 @@
+@@ -2231,6 +2519,10 @@
          !spu_ovl_ea_known(ea)) return;
      for (int i = 0; i < nsrc; i++) {
          const spu_ovl_src* o = &s_ovl_src[i];
@@ -2212,7 +2272,7 @@
          int hit = o->has_sig ? (size >= 512 && memcmp(ls, o->sig, 16) == 0)
                               : (o->src_ea == ea);
          if (hit) {
-@@ -2686,6 +2924,24 @@
+@@ -2686,6 +2978,24 @@
  
  void spu_indirect_branch(spu_context* ctx)
  {
@@ -2237,7 +2297,7 @@
      /* Real SPU bi/bisl mask the target to the 256 KB local store; the high bits
       * of a computed pointer (e.g. a packed handle like 0x7a028803) are ignored.
       * Without this, any indirect branch through such a value fails the lookup
-@@ -2722,6 +2978,10 @@
+@@ -2722,6 +3032,10 @@
              return;
          }
          if (ctx->pc == SPURS_PM_SELECT_WORKLOAD_LS) {
@@ -2248,7 +2308,7 @@
              /* cellSpursModulePoll: report "no contention — keep running".
               * (The host scheduler admits bounded workers; this service does not preempt.) */
              unsigned n = ++g_spurs_pm_polls;
-@@ -2858,6 +3118,14 @@
+@@ -2858,6 +3172,14 @@
      }
      /* Use the same ownership order as the interpreter's rejoin probe. */
      spu_fn fn = spu_lifted_lookup(ctx, ctx->pc);
@@ -2263,7 +2323,7 @@
      /* The job returned through the link register we planted: it is finished.
       * Its outermost frame ends in `bi $r0`, and r0 was 0 -- so without this the
       * return landed on LS 0, which is the job's OWN entry, and it ran a second
-@@ -3406,4 +3674,4 @@
+@@ -3406,4 +3728,4 @@
  
  #ifdef __cplusplus
  }
@@ -5177,7 +5237,65 @@
  #define SYS_PPU_THREAD_CREATE           41
 --- a/tools/test_spu_program_pipeline.py
 +++ b/tools/test_spu_program_pipeline.py
-@@ -69,12 +69,14 @@
+@@ -1,6 +1,7 @@
+ #!/usr/bin/env python3
+ """Synthetic discovery -> generated registration coverage, no guest assets."""
+ import json
++import hashlib
+ from pathlib import Path
+ import shutil
+ import struct
+@@ -40,6 +41,49 @@
+ 
+ 
+ class Pipeline(unittest.TestCase):
++    def test_code_variants_require_exact_owner_and_complete_generation(self):
++        from wrap_spu_elf import wrap
++        target = 0x3FEC0
++        owner = wrap(struct.pack('>II', 0x33000000 | (((target - 0x100) // 4) << 7), 0), base=0x100)
++        first = wrap(struct.pack('>II', 0x40800383, 0x35000000), base=target)
++        second = wrap(struct.pack('>II', 0x40800483, 0x35000000), base=target)
++        digest = lambda blob: hashlib.sha256(blob).hexdigest()
++        inputs = [('owner.elf', owner), ('first.elf', first), ('second.elf', second)]
++        result = self.run_pipeline(*inputs)
++        self.assertNotEqual(result.returncode, 0)
++        manifest = self.root / 'variants.json'
++        bindings = {'schema_version': 1, 'variants': [
++            {'owner_sha256': digest(owner), 'variant_sha256': digest(v)} for v in (first, second)]}
++        manifest.write_text(json.dumps(bindings))
++        extra = ('--code-variants', str(manifest))
++        result = self.run_pipeline(*inputs, extra=extra)
++        self.assertEqual(result.returncode, 0, result.stderr)
++        self.assertTrue(self.manifest()['complete'])
++        self.assertEqual(len(self.manifest()['code_variants']), 2)
++        registry = (self.output / 'spu_workloads.c').read_text()
++        self.assertIn('memcmp(ctx->ls', registry)
++        for blob in (first, second):
++            self.assertNotIn('spu_' + digest(blob) + '_spu_recomp_register();', registry)
++        # A hash mismatch, missing variant or unsupported variant cannot be rescued by partial mode.
++        changed = bytearray(first)
++        changed[-6] ^= 1
++        for bad_inputs in (inputs[:2], inputs[:1] + [('first.elf', bytes(changed)), inputs[2]]):
++            with self.subTest(inputs=[name for name, _ in bad_inputs]):
++                result = self.run_pipeline(*bad_inputs, partial=True, extra=extra)
++                self.assertNotEqual(result.returncode, 0)
++                self.assertFalse((self.output / 'sources.cmake').exists())
++        unsupported = wrap(struct.pack('>II', 0x01000000, 0x35000000), base=target)
++        bindings['variants'] = [{'owner_sha256': digest(owner), 'variant_sha256': digest(unsupported)}]
++        manifest.write_text(json.dumps(bindings))
++        result = self.run_pipeline(inputs[0], ('unsupported.elf', unsupported), partial=True, extra=extra)
++        self.assertNotEqual(result.returncode, 0)
++        # Even explicitly bound variants cannot replace the owner's executable bytes.
++        overlap = wrap(struct.pack('>II', 0x40800383, 0x35000000), base=0x100)
++        bindings['variants'] = [{'owner_sha256': digest(owner), 'variant_sha256': digest(overlap)}]
++        manifest.write_text(json.dumps(bindings))
++        result = self.run_pipeline(inputs[0], ('overlap.elf', overlap), partial=True, extra=extra)
++        self.assertNotEqual(result.returncode, 0)
++
+     def setUp(self):
+         self.temp = tempfile.TemporaryDirectory()
+         self.addCleanup(self.temp.cleanup)
+@@ -69,12 +113,14 @@
          workload = workload[workload.index('uint64_t spu_workload_fingerprint('):
                              workload.index('/* ---- dispatch')]
          (self.root / 'workload.c').write_text('#include "spu_workload.h"\n#include <stdio.h>\n#include <string.h>\n' + workload)
@@ -5196,7 +5314,7 @@
          return runtime
  
      def test_exact_dedup_and_same_address_isolation(self):
-@@ -112,6 +114,44 @@
+@@ -112,6 +158,44 @@
          registered = next(p for p in report['programs'] if p['status'] == 'registered')
          source = (self.output / registered['name'] / 'spu_recomp.c').read_text()
          self.assertNotIn('TODO spu', source)
@@ -5241,7 +5359,7 @@
  
      def test_fresh_rerun_cannot_register_stale_code(self):
          first = self.run_pipeline(('input.bin', elf(7)))
-@@ -273,11 +313,16 @@
+@@ -273,11 +357,16 @@
                       f'assert(spu_lookup(0x100, id{i}) == f{i});',
                       # Each context contains a 256 KB local store. Keep the
                       # four fixtures off Windows' default 1 MB main stack.
@@ -5260,7 +5378,7 @@
              'extern void spu_register_all(void);\n'
              'extern spu_lifted_entry_fn spu_lookup(uint32_t, int);\n'
              'SPU_THREAD_LOCAL void (*g_spu_trampoline_fn)(spu_context*);\n'
-@@ -302,7 +347,8 @@
+@@ -302,7 +391,8 @@
          self.assertEqual(configured.returncode, 0, configured.stderr + configured.stdout)
          built = subprocess.run([cmake, '--build', str(build)], capture_output=True, text=True)
          self.assertEqual(built.returncode, 0, built.stderr + built.stdout)
@@ -5281,28 +5399,41 @@
      ap.add_argument("--relift", action="store_true", help="re-lift even if a prior lift exists")
      ap.add_argument("--skip-lift", action="store_true",
                      help="do not run the lifter; assume --lifted already populated (still fixes includes + emits registry)")
-@@ -143,6 +145,8 @@
+@@ -139,10 +141,16 @@
+                     help="With --input: {sha256: image_id} pinning every registered program's "
+                          "image id. A registered program missing from the map is an error, so "
+                          "ids are reviewed and stable instead of content-derived")
++    ap.add_argument('--code-variants', metavar='JSON',
++                    help='With --input: exact owner/variant ELF SHA256 bindings for offline-generated code')
+     args = ap.parse_args()
      if args.input:
          from spu_program_pipeline import build_programs
          sys.exit(build_programs(args, write_registry))
++    if args.code_variants:
++        raise SystemExit('--code-variants requires --input')
 +    if args.code_end:
 +        ap.error('--code-end requires --input with content-derived image identities')
  
      elfs = sorted(glob.glob(os.path.join(args.images, "*.elf")))
      if not elfs:
-@@ -203,7 +207,7 @@
+@@ -203,7 +211,9 @@
      write_registry(args, imgs, text_fps)
  
  
 -def write_registry(args, imgs, text_fps, image_ids=None):
-+def write_registry(args, imgs, text_fps, image_ids=None, code_map=None, load_map=None):
++def write_registry(args, imgs, text_fps, image_ids=None, code_map=None, load_map=None, variants=None):
++    variants = variants or []
++    variant_names = {v['variant'] for v in variants}
      L = []
      L.append(f"/* {os.path.basename(args.out)} -- GENERATED by tools/build_spu_workloads.py.")
      L.append(f" * Registers the {len(imgs)} lifted SPU images of \"{args.title}\" with the workload")
-@@ -214,6 +218,18 @@
+@@ -214,6 +224,21 @@
      L.append(" * Build note: add <repo>/runtime/spu to this target's include dirs (the lifted")
      L.append(' * sources use bare #include "spu_context.h" etc.). */')
      L.append('#include "spu_workload.h"')
++    if variants:
++        L += ['#include <stdio.h>', '#include <string.h>', '_Noreturn void ps3_native_stop(void);',
++              'extern void spu_register_function(uint32_t, void (*)(spu_context*));']
 +    if code_map:
 +        L.append('#include "spu_overlay_residency.h"')
 +        L.append('#include <stdlib.h>')
@@ -5318,10 +5449,40 @@
      L.append("")
      L.append("extern void spu_begin_image(int image_id);")
      L.append("")
-@@ -226,6 +242,11 @@
+@@ -221,15 +246,49 @@
+     for img, prefix, fp, ent in imgs:
+         L.append(f"extern void {prefix}spu_func_{ent:08X}(spu_context*);")
+         L.append(f"extern void {prefix}spu_recomp_register(void);")
++    dispatchers = {}
++    for v in variants:
++        for address in v['addresses']:
++            L.append(f"extern void {v['variant']}_spu_func_{address:08X}(spu_context*);")
++            dispatchers.setdefault((v['owner'], address), []).append(v)
++    for name in sorted(variant_names):
++        v = next(v for v in variants if v['variant'] == name)
++        L.append(f'static const uint8_t {name}_variant_bytes[] = {{')
++        data = v['payload']
++        L.extend('    ' + ','.join(f'0x{b:02X}' for b in data[n:n+32]) + ',' for n in range(0, len(data), 32))
++        L.append('};')
++    for (owner, address), choices in sorted(dispatchers.items()):
++        L.append(f'static void {owner}_variant_{address:08X}(spu_context* ctx) {{')
++        L.append(f'    if (!spu_overlay_aot_owner_bound(ctx, {image_ids[owner]})) {{')
++        L += ['        fprintf(stderr, "[native-blocked] SPU AOT variant owner is not bound\\n");',
++              '        fflush(stderr); ps3_native_stop();', '    }']
++        for v in choices:
++            name = v['variant']
++            L.append(f'    if (!memcmp(ctx->ls + {v["load_address"]}, {name}_variant_bytes, sizeof {name}_variant_bytes)) {{')
++            L.append(f'        {name}_spu_func_{address:08X}(ctx); return;')
++            L.append('    }')
++        L += [f'    fprintf(stderr, "[native-blocked] SPU AOT variant mismatch target=0x{address:05X}\\n");',
++              '    fflush(stderr); ps3_native_stop();', '}']
+     L.append("")
+     L.append(f"void {args.register_fn}(void)")
      L.append("{")
      for index, (img, prefix, fp, ent) in enumerate(imgs, 1):
          i = image_ids[img] if image_ids else index
++        if img in variant_names:
++            continue
 +        if code_map and img in code_map:
 +            L.append(f'    if (!spu_overlay_register_initial_image({i}, {img}_code, {len(code_map[img])})) abort();')
 +            if load_map and img in load_map:
@@ -5330,18 +5491,61 @@
          L.append(f"    spu_begin_image({i}); {prefix}spu_recomp_register();")
          L.append(f"    spu_workload_register_img(0x{fp:016X}ULL, {prefix}spu_func_{ent:08X}, {i}, \"{img}\");")
          if text_fps.get(img):  # same entry, keyed by the text segment (raw SPU proxy-DMA load)
+             L.append(f"    spu_workload_register_img(0x{text_fps[img]:016X}ULL, {prefix}spu_func_{ent:08X}, {i}, \"{img}.text\");")
++    for owner, address in sorted(dispatchers):
++        i = image_ids[owner]
++        L.append(f'    spu_begin_image({i}); spu_register_function({address}, {owner}_variant_{address:08X});')
++        L.append(f'    if (!spu_overlay_register_aot_entry({i}, {address})) abort();')
+     L.append("    spu_begin_image(0);")
+     L.append("}")
+     if args.constructor:
 --- a/tools/spu_program_pipeline.py
 +++ b/tools/spu_program_pipeline.py
-@@ -103,7 +103,7 @@
+@@ -95,6 +95,22 @@
+         tool_paths = [Path(__file__).with_name(n) for n in tool_names] + [Path(args.lifter).resolve()]
+         handled = json.loads(Path(args.handled).read_text()) if getattr(args, 'handled', None) else {}
+         pinned_ids = json.loads(Path(args.image_ids).read_text()) if getattr(args, 'image_ids', None) else None
++        variant_config = json.loads(Path(args.code_variants).read_text()) if getattr(args, 'code_variants', None) else None
++        bindings = []
++        if variant_config is not None:
++            if (not isinstance(variant_config, dict) or set(variant_config) != {'schema_version', 'variants'} or
++                    variant_config['schema_version'] != 1 or not isinstance(variant_config['variants'], list) or
++                    not 1 <= len(variant_config['variants']) <= 64):
++                raise ValueError('invalid code-variant manifest')
++            for item in variant_config['variants']:
++                if (not isinstance(item, dict) or set(item) != {'owner_sha256', 'variant_sha256'} or
++                        any(not isinstance(v, str) or not re.fullmatch('[0-9a-f]{64}', v) for v in item.values()) or
++                        item['owner_sha256'] == item['variant_sha256']):
++                    raise ValueError('code variants require distinct exact owner/variant SHA256 values')
++                pair = item['owner_sha256'], item['variant_sha256']
++                if pair in bindings:
++                    raise ValueError('duplicate code-variant binding')
++                bindings.append(pair)
+         if not all(isinstance(v, str) and v for v in handled.values()):
+             raise ValueError('--handled maps sha256 to a non-empty reason')
+         if pinned_ids is not None:
+@@ -103,8 +119,8 @@
                  raise ValueError('--image-ids maps sha256 to distinct positive image ids')
          report['provenance'] = dict(tools={str(p): sha256(p.read_bytes()) for p in tool_paths},
                                      python=sys.version, options=dict(register_fn=args.register_fn, constructor=args.constructor,
 -                                                 extra_funcs=args.extra_funcs, allow_partial=args.allow_partial,
+-                                                 handled=handled, image_ids=pinned_ids))
 +                                                 extra_funcs=args.extra_funcs, code_end=args.code_end, allow_partial=args.allow_partial,
-                                                  handled=handled, image_ids=pinned_ids))
++                                                 handled=handled, image_ids=pinned_ids, code_variants=variant_config))
          unique = {}
          blobs = {}
-@@ -163,12 +163,18 @@
+         layouts = {}
+@@ -135,6 +151,9 @@
+                          fingerprint=f'{fnv1a64(blob):016X}', status='discovered', occurrences=[occurrence])
+                 unique[digest], blobs[digest], layouts[digest] = p, blob, info
+                 report['programs'].append(p)
++        variant_digests = {v for _, v in bindings}
++        if any(o not in unique or v not in unique or o in variant_digests for o, v in bindings):
++            raise ValueError('code variants require discovered owners and variants without chained ownership')
+         # Runtime keys cannot distinguish collisions, including identical text
+         # with differing data or one image's text matching another's full ELF.
+         owners = {}
+@@ -163,12 +182,18 @@
              report['errors'].append('--handled/--image-ids name programs that were not discovered: ' +
                                      ', '.join(sorted(stale)))
          extra = {}
@@ -5361,7 +5565,7 @@
          from find_spu_functions import detect_functions
          from build_spu_workloads import debase_includes
          for digest, program in sorted(unique.items()):
-@@ -181,6 +187,13 @@
+@@ -181,6 +206,13 @@
              (outdir / 'image.elf').write_bytes(blob)
              try:
                  ranges = code_ranges(info)
@@ -5375,7 +5579,17 @@
                  functions, (offset, base, size) = detect_functions(blob, verbose=False)
                  bounds = sorted({(max(s, a), min(e, b)) for s, e in functions for a, b in ranges
                                   if max(s, a) < min(e, b)})
-@@ -228,6 +241,15 @@
+@@ -210,7 +242,8 @@
+                     raise ValueError('lifter did not generate the ELF entry')
+                 if any(not any(a <= s < e <= b for a, b in ranges) for s, e in diagnostics['functions']):
+                     raise ValueError('generated function extends beyond executable ranges')
+-                if (set(diagnostics['call_targets']) | set(diagnostics['branch_targets'])) - starts:
++                variant_entries = {layouts[v]['entry'] for o, v in bindings if o == digest}
++                if (set(diagnostics['call_targets']) | set(diagnostics['branch_targets'])) - starts - variant_entries:
+                     raise ValueError('direct branch/call targets lack generated function entries')
+                 for filename in ['spu_recomp.c', 'spu_recomp.h']:
+                     if not (outdir / filename).is_file():
+@@ -228,6 +261,35 @@
              imgs.append((name, prefix, int(program['fingerprint'], 16), info['entry']))
              image_ids[name] = program['image_id']
              text_fps[name] = int(program['text_fingerprint'], 16)
@@ -5388,15 +5602,35 @@
 +            code_map[name] = [(start, blob[offset + start - base:offset + end - base]) for start, end in merged]
 +            segment = info['executable'][0]
 +            load_map[name] = segment['addr'], segment['filesz'], int(program['text_fingerprint'], 16)
++        prepared_variants = []
++        report['code_variants'] = []
++        entries = set()
++        for owner, variant in bindings:
++            a, b = unique[owner], unique[variant]
++            if a['status'] != 'registered' or b['status'] != 'registered':
++                raise ValueError('code-variant owner and variant must both have complete native lifts')
++            segment = layouts[variant]['executable'][0]
++            start, end = segment['addr'], segment['addr'] + segment['filesz']
++            if any(start < y and x < end for x, y in a['executable_ranges']):
++                raise ValueError('code variant overlaps its owner executable bytes')
++            addresses = [s for s, _ in b['diagnostics']['functions']]
++            entries.update((owner, address) for address in addresses)
++            payload = blobs[variant][segment['off']:segment['off'] + segment['filesz']]
++            prepared_variants.append(dict(owner=a['name'], variant=b['name'], addresses=addresses,
++                                          load_address=start, payload=payload))
++            report['code_variants'].append(dict(owner_sha256=owner, variant_sha256=variant, entries=addresses,
++                                                payload_lsa=start, payload_size=len(payload), payload_sha256=sha256(payload)))
++        if len(entries) > 64:
++            raise ValueError('code variants exceed runtime entry capacity (64)')
          # Default runtime capacity is 256 registrations, including text aliases.
          if sum(len({fp, text_fps[name]}) for name, _, fp, _ in imgs) > 256:
              report['errors'].append('generated registrations exceed default runtime capacity (256)')
-@@ -240,7 +262,7 @@
+@@ -240,7 +302,7 @@
          if usable:
              registry_args = type('RegistryArgs', (), dict(out=str(stage / registry.name), title='discovered SPU programs',
                                                          register_fn=args.register_fn, constructor=args.constructor))()
 -            registry_writer(registry_args, imgs, text_fps, image_ids)
-+            registry_writer(registry_args, imgs, text_fps, image_ids, code_map, load_map)
++            registry_writer(registry_args, imgs, text_fps, image_ids, code_map, load_map, prepared_variants)
              sources = [destination / name / 'spu_recomp.c' for name, _, _, _ in imgs] + [registry]
              # Bracket arguments preserve spaces and avoid expansion of $ in paths.
              cmake = 'set(SPU_GENERATED_SOURCES\n' + ''.join(f'  [==[{p.as_posix()}]==]\n' for p in sources) + ')\n'
@@ -5470,7 +5704,7 @@
  
  /* Register a streamed code overlay by its DMA source EA, like
   * spu_overlay_register_region, plus the code bytes its lifted functions were
-@@ -28,6 +29,13 @@
+@@ -28,6 +29,17 @@
  int spu_overlay_register_verified_region(uint32_t content_ea, uint32_t load_lsa,
      uint32_t span, int image_id, const spu_overlay_code_segment* code,
      unsigned count);
@@ -5478,6 +5712,10 @@
 +int spu_overlay_register_initial_image(int image_id, const spu_overlay_code_segment*, unsigned count);
 +int spu_overlay_register_initial_payload(int image_id, uint32_t lsa, uint32_t size, uint64_t fingerprint);
 +int spu_overlay_bind_initial_image(struct spu_context*);
++/* A generated dispatcher verifies complete offline variants before calling their
++ * lifts. Its entry belongs to this verified resident image, not to a wildcard. */
++int spu_overlay_register_aot_entry(int owner_image, uint32_t entry);
++int spu_overlay_aot_owner_bound(const struct spu_context*, int owner_image);
 +void spu_code_write_check(struct spu_context*, uint32_t lsa, uint32_t size);
 +void spu_code_enter(struct spu_context*, const spu_overlay_code_segment*, int32_t delta);
 +void spu_thread_decrementer_init(struct spu_context*, uint32_t option);

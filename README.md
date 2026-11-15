@@ -231,16 +231,19 @@ control-flow, ISA, frame or gameplay certification.
 
 The added **God of War Collection (BCUS98229, 02.00)** has a read-only catalog and
 four locally decrypted, structurally validated PPU ELFs. Its initial EBOOT has
-9,951 PPU functions compiled locally and 12 SPU programs registered, including
+9,951 PPU functions compiled locally and 13 SPU programs plus two verified AOT
+code variants prepared, including
 the original SPURS firmware. The authorized original `libnet.prx` is also bound
 by AOT: 358 PPU functions, 100 exports and its genuine module-start entry.
 Native startup passes its initialization path and reads `defaultSettings.cxml`.
 Recognizing actual callback-stack allocations fixes an earlier EFAULT that
 prevented SPURS and sound-library initialization. The original six SPURS workers
 now start; the host stereo mixer starts and an eight-channel guest port opens.
-Startup stops on a streamed SPU kernel at LS 0xA00. Offline preparation identifies
-a WWS kernel that generates register save/restore code at LS 0x3FEC0; the current
-AOT contract cannot prepare those runtime-generated variants. No interpreter is used.
+The original WWS kernel now handles DMA interrupts using its register save/restore
+routines at LS 0x3FEC0. Offline-compiled variants check all 320 actual bytes and
+resident ownership on every call, including cache hits; unknown bytes stop.
+Startup now reaches the gated `cellAudioPortStart`, whose eight-channel mixing
+and consumption timing still require audit. No interpreter is used.
 No game frame, selector transition or gameplay is verified. Original and derived
 proprietary files remain outside Git.
 Kernel mutex creation/destruction, uncontended locks, recursion and try-lock

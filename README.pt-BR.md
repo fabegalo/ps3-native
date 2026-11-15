@@ -235,17 +235,20 @@ comprova preparação, sem certificar fluxo completo, ISA, frames ou gameplay.
 
 O novo **God of War Collection (BCUS98229, 02.00)** tem catálogo somente de leitura
 e quatro ELF PPU extraídos localmente e validados estruturalmente. O EBOOT inicial
-tem 9.951 funções PPU compiladas localmente e 12 programas SPU registrados,
+tem 9.951 funções PPU compiladas localmente e 13 programas SPU mais duas variantes
+de código AOT verificadas preparadas,
 incluindo o firmware SPURS original. A `libnet.prx` original autorizada também
 está vinculada por AOT: 358 funções PPU, 100 exports e a entrada original de início.
 O boot passa pelo caminho de inicialização dessa biblioteca e lê
 `defaultSettings.cxml`. Reconhecer as pilhas realmente alocadas para callbacks
 corrige o EFAULT que impedia a inicialização do SPURS e da biblioteca de som.
 Os seis workers SPURS originais agora iniciam; o mixer estéreo do host inicia
-e uma porta guest de oito canais é aberta. O boot para em um kernel SPU
-transferido para LS 0xA00. A preparação offline identifica um kernel WWS que
-gera código de preservação/restauração de registradores em LS 0x3FEC0; o contrato
-AOT atual não prepara essas variantes geradas em execução. Não há interpretação.
+e uma porta guest de oito canais é aberta. O kernel WWS original agora trata
+interrupções DMA usando suas rotinas de preservação/restauração em LS 0x3FEC0.
+As variantes compiladas offline conferem os 320 bytes reais e o vínculo ao dono
+residente a cada chamada, inclusive com cache ativo; bytes desconhecidos param.
+O boot agora alcança `cellAudioPortStart`, ainda bloqueado até auditar a mistura
+de oito canais e o ritmo de consumo. Não há interpretação.
 Nenhum frame, transição para o seletor ou gameplay foi verificado.
 Originais e derivados proprietários permanecem fora do Git.
 Criação/destruição de mutexes do kernel, locks sem disputa, recursão e erros de
