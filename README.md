@@ -58,6 +58,10 @@ python src/ps3native/cli.py run --fixture spu
 python src/ps3native/cli.py system
 ```
 
+Suggested local layout: `content/games/<title>/PS3_GAME/` and
+`firmware/PS3UPDAT.PUP`, both ignored by Git. Originals may also stay on another
+drive; pass their existing paths to `import` without moving or duplicating them.
+
 | Command | Actual M0 behavior |
 | --- | --- |
 | `inspect PATH` | Read-only recursive inventory, file sizes/SHA-256, PARAM.SFO metadata, PUP table/version text and ELF/SELF/PKG identification. JSON output. |

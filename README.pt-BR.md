@@ -58,6 +58,10 @@ python src/ps3native/cli.py run --fixture spu
 python src/ps3native/cli.py system
 ```
 
+Organização local sugerida: `content/games/<jogo>/PS3_GAME/` e
+`firmware/PS3UPDAT.PUP`, ambos ignorados pelo Git. Os originais também podem
+continuar em outro disco; importe o caminho existente sem movê-los ou duplicá-los.
+
 | Comando | Comportamento efetivo no M0 |
 | --- | --- |
 | `inspect CAMINHO` | Inventário recursivo somente leitura: tamanhos, SHA-256, PARAM.SFO, tabela/versão textual do PUP e identificação ELF/SELF/PKG. Saída JSON. |

@@ -93,10 +93,10 @@ def linked(path):
 
 def inventory(source):
     source = Path(source).absolute()
-    # Resolve only after rejecting links/junctions in every existing ancestor.
-    for path in (source, *source.parents):
-        if linked(path):
-            raise ValueError(f'Links/reparse points are not imported: {path}')
+    # Canonicalize parent aliases (macOS /var -> /private/var); reject the
+    # selected root and all links inside it, where traversal changes content.
+    if linked(source):
+        raise ValueError(f'Links/reparse points are not imported: {source}')
     source = source.resolve(strict=True)
     paths = []
     if source.is_dir():

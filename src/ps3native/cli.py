@@ -80,15 +80,15 @@ def main(argv=None):
             atomic_json(args.catalog / (result['id'] + '.json'), result)
         elif args.command == 'prepare':
             result = prepare(ROOT, result, args.cache)
-            print(json.dumps(result, ensure_ascii=False, indent=2))
+            print(json.dumps(result, ensure_ascii=True, indent=2))
             return 3 if not result['runnable'] else 0
         elif args.command == 'run':
             result['blocker'] = 'Generic module binding and fail-closed AOT completeness gate are pending. Only explicit synthetic fixtures execute in M0.'
-            print(json.dumps(result, ensure_ascii=False, indent=2))
+            print(json.dumps(result, ensure_ascii=True, indent=2))
             return 3
-        print(json.dumps(result, ensure_ascii=False, indent=2))
+        print(json.dumps(result, ensure_ascii=True, indent=2))
         return 0
-    except (OSError, ValueError, UnicodeError, struct.error, subprocess.SubprocessError) as exc:
+    except (OSError, ValueError, KeyError, UnicodeError, struct.error, subprocess.SubprocessError) as exc:
         print(f'ps3-native: {exc}', file=sys.stderr)
         return 2
 

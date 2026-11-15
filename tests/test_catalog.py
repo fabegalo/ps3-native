@@ -1,8 +1,10 @@
 import contextlib
 import io
 import json
+import os
 from pathlib import Path
 import struct
+import subprocess
 import sys
 import tempfile
 import unittest
@@ -114,6 +116,25 @@ class CatalogTests(unittest.TestCase):
             self.skipTest('Host does not permit symbolic links')
         with self.assertRaises(ValueError):
             inventory(source)
+        with self.assertRaises(ValueError):
+            inventory(link)
+        link.unlink()
+        alias = self.root / 'parent-alias'
+        alias.symlink_to(source, target_is_directory=True)
+        self.assertEqual(inventory(alias / 'data')['source'], str((source / 'data').resolve()))
+
+    def test_native_launcher_unicode_and_exit_codes(self):
+        fixture_dir = Path(os.environ.get('PS3_NATIVE_FIXTURE_DIR', Path(__file__).resolve().parents[1] / 'build/tests/generated'))
+        exe = fixture_dir.parents[1] / ('ps3-native.exe' if os.name == 'nt' else 'ps3-native')
+        original = self.write('ゲーム ação/EBOOT.BIN', b'SCE\0fixture')
+        result = subprocess.run([str(exe), '--catalog', str(self.root / 'catalog'), 'import', str(original)],
+                                capture_output=True, timeout=15)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        record = json.loads(result.stdout)
+        self.assertEqual(record['source'], str(original.resolve()))
+        result = subprocess.run([str(exe), 'system'], capture_output=True, timeout=15)
+        self.assertEqual(result.returncode, 3)
+        self.assertFalse(json.loads(result.stdout)['runnable'])
 
     def test_missing_empty_content(self):
         with self.assertRaises(OSError):
