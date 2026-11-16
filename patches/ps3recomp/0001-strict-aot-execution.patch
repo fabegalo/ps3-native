@@ -6737,7 +6737,26 @@
  
  #ifdef __cplusplus
  extern "C" {
-@@ -457,7 +458,25 @@
+@@ -217,6 +218,8 @@
+ #define RSX_PRIMITIVE_LINE_LOOP          3
+ #define RSX_PRIMITIVE_LINE_STRIP         4
+ #define RSX_PRIMITIVE_TRIANGLES          5
++#define NV4097_SET_ZCULL_STATS_ENABLE           0x00001804
++
+ #define RSX_PRIMITIVE_TRIANGLE_STRIP     6
+ #define RSX_PRIMITIVE_TRIANGLE_FAN       7
+ #define RSX_PRIMITIVE_QUADS              8
+@@ -298,6 +301,9 @@
+     int two_sided_stencil;
+     u32 back_stencil_func, back_stencil_ref, back_stencil_mask, back_stencil_write_mask;
+     u32 back_stencil_op_fail, back_stencil_op_zfail, back_stencil_op_zpass;
++
++    /* UINT32_MAX until the original command stream specifies collection. */
++    u32 zcull_stats_enable;
+ 
+     /* Culling */
+     int cull_face_enable;
+@@ -457,7 +463,25 @@
  
      /* Texture */
      void (*bind_texture)(void* userdata, u32 unit, const rsx_texture_state* tex);
@@ -7409,23 +7428,27 @@
  
      /* An OFFSCREEN clear is just an ordered op in the current frame's pass
       * chain (demosaic clears each effect pass's surface) -- record it, don't
-@@ -7193,6 +7449,7 @@
+@@ -7193,6 +7449,9 @@
  
  static void d3d12_draw_arrays(void* ud, u32 primitive, u32 first, u32 count)
  {
-+    if (count) s_d3d.zcull_geometry_seen = 1;
++    /* Disabling collection preserves earlier observations until explicit reset. */
++    if (count && (!s_d3d.current_rsx_state || s_d3d.current_rsx_state->zcull_stats_enable))
++        s_d3d.zcull_geometry_seen = 1;
      /* RSX_LIVE_FEED_DBG=1: pair with the [feed] method counts so "the FIFO
       * carries no draw batches" can be checked against "the backend is told
       * to draw" in the same run. */
-@@ -7457,6 +7714,7 @@
+@@ -7457,6 +7716,9 @@
  
  static void d3d12_draw_indexed(void* ud, u32 primitive, u32 first, u32 count)
  {
-+    if (count) s_d3d.zcull_geometry_seen = 1;
++    /* Disabling collection preserves earlier observations until explicit reset. */
++    if (count && (!s_d3d.current_rsx_state || s_d3d.current_rsx_state->zcull_stats_enable))
++        s_d3d.zcull_geometry_seen = 1;
      /* RSX_LIVE_FEED_DBG=1: pair with the [feed] method counts so "the FIFO
       * carries no draw batches" can be checked against "the backend is told
       * to draw" in the same run. */
-@@ -7850,6 +8108,89 @@
+@@ -7850,6 +8112,89 @@
   * -----------------------------------------------------------------------*/
  
  static rsx_backend s_d3d12_backend = {0};
@@ -7515,7 +7538,7 @@
  
  /* ---------------------------------------------------------------------------
   * Public API
-@@ -7858,6 +8199,7 @@
+@@ -7858,6 +8203,7 @@
  int rsx_d3d12_backend_init(u32 width, u32 height, const char* title)
  {
      memset(&s_d3d, 0, sizeof(s_d3d));
@@ -7523,7 +7546,7 @@
      s_d3d.width = width;
      s_d3d.height = height;
      s_d3d.clear_color[0] = 0.0f;
-@@ -7903,6 +8245,9 @@
+@@ -7903,6 +8249,9 @@
      s_d3d12_backend.begin_frame       = d3d12_begin_frame;
      s_d3d12_backend.end_frame         = d3d12_end_frame;
      s_d3d12_backend.present           = d3d12_present;
@@ -7533,7 +7556,7 @@
      s_d3d12_backend.clear             = d3d12_clear;
      s_d3d12_backend.set_render_target = d3d12_set_render_target;
      s_d3d12_backend.set_viewport      = d3d12_set_viewport;
-@@ -7913,6 +8258,7 @@
+@@ -7913,6 +8262,7 @@
      s_d3d12_backend.draw_arrays       = d3d12_draw_arrays;
      s_d3d12_backend.draw_indexed      = d3d12_draw_indexed;
      s_d3d12_backend.bind_texture      = d3d12_bind_texture;
@@ -7541,7 +7564,7 @@
  
      rsx_set_backend(&s_d3d12_backend);
  
-@@ -7930,6 +8276,9 @@
+@@ -7930,6 +8280,9 @@
      wait_for_gpu();
  
      /* Release D3D12 resources */
@@ -7551,7 +7574,7 @@
      if (s_d3d.vertex_buffer) {
          s_d3d.vertex_buffer->lpVtbl->Unmap(s_d3d.vertex_buffer, 0, NULL);
          s_d3d.vertex_buffer->lpVtbl->Release(s_d3d.vertex_buffer);
-@@ -7963,6 +8312,14 @@
+@@ -7963,6 +8316,14 @@
  
  int rsx_d3d12_backend_pump_messages(void)
  {
@@ -7566,7 +7589,7 @@
      MSG msg;
      while (PeekMessageA(&msg, NULL, 0, 0, PM_REMOVE)) {
          if (msg.message == WM_QUIT) return -1;
-@@ -7997,7 +8354,7 @@
+@@ -7997,7 +8358,7 @@
       * empty present is a flip/drain race and wipes the screen for a frame
       * (wave: black flashes and layout flicker between frames). */
      static int s_seen_content = 0;
@@ -7686,7 +7709,26 @@
  
  /* Last NV406E_SET_REFERENCE value seen in the FIFO. The title writes a
   * reference then spins on the GCM control register's `ref` field until the RSX
-@@ -523,6 +574,15 @@
+@@ -51,6 +102,7 @@
+ void rsx_state_init(rsx_state* state)
+ {
+     memset(state, 0, sizeof(rsx_state));
++    state->zcull_stats_enable = UINT32_MAX;
+     /* RSX reset value for the constant vertex attributes is (0,0,0,1); a zeroed
+      * struct would leave w at 0. */
+     for (int _i = 0; _i < RSX_MAX_VERTEX_ATTRIBS; _i++)
+@@ -439,6 +491,10 @@
+     { static int _rt=-1; if(_rt<0){ const char* e=getenv("RSX_TRACE");
+         _rt = e ? (atoi(e) > 1 ? atoi(e) : 250) : 0; }
+       if(_rt){ static int _m=0; if(PS3_LOG_FIRST(_m, _rt)) fprintf(stderr,"[rsxm] method=0x%04X data=0x%08X\n", method, data); } }
++    if (method == NV4097_SET_ZCULL_STATS_ENABLE) {
++        state->zcull_stats_enable = data;
++        return 0;
++    }
+     /* Vertex-program constants and microcode are most of a frame's method
+      * stream (God of War HD: about 140k constant vec4s and 70k microcode
+      * headers a second), and their handlers sat behind every check below.
+@@ -523,6 +579,15 @@
            s_sem_ctx = data;
        }
        if (method == 0x1D6C) { s_sem_off = data; return 0; }
@@ -7702,7 +7744,7 @@
        if ((method == 0x1D70 || method == 0x1D74) && s_sem_ctx == 0xFEED0001u) {
          extern void vm_write32(uint32_t a, uint32_t v);
          extern u32 gcm_io_offset_to_ea(u32 io);
-@@ -542,17 +602,19 @@
+@@ -542,17 +607,19 @@
           * 0x00010000 != 1 and spun forever (gcm/cube sample hang after init).
           * Apply the same swap the hardware does so the pre-swap cancels out. */
          u32 val = (data & 0xff00ff00u) | ((data >> 16) & 0xffu) | ((data & 0xffu) << 16);
@@ -7725,7 +7767,7 @@
          return 0;
        } }
      if ((method >= 0x200 && method <= 0x23C) ||
-@@ -653,7 +715,10 @@
+@@ -653,7 +720,10 @@
                if (!_first) fprintf(stderr, "[RSX] CLEAR_SURFACE new mask=0x%X color=0x%08X\n",
                                     data, state->color_clear_value); } }
          if (s_backend && s_backend->clear) {

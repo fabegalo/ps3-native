@@ -259,6 +259,9 @@ and sensor packets remain blocked. FIFO DMA contexts distinguish device and
 report semaphores; the original initialization now passes its device-ready wait.
 ZCULL statistics can report an empty interval before geometry or after an explicit
 counter reset, with a real GPU timestamp; active-geometry statistics remain blocked.
+The original statistics-enable command is now tracked: disabled collection adds no
+geometry, and disabling it preserves earlier observations until an explicit reset.
+Real GPU regressions check both transitions and retain ZPASS independently.
 RSX owns the 60000/1001 Hz guest video clock. Original display-queue commands wait
 for GPU completion and the next eligible VBlank; D3D12 presents the selected buffer
 and LV2 delivers the original interrupt events. FIFO references require GPU completion.

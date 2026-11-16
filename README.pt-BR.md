@@ -264,7 +264,10 @@ pressão e sensores continuam bloqueados. Contextos DMA da FIFO distinguem semá
 do dispositivo e dos relatórios; a inicialização original passa pela espera de prontidão.
 Estatísticas ZCULL podem informar um intervalo vazio antes de geometria ou após
 reset explícito dos contadores, com timestamp real da GPU; estatísticas de geometria
-ativa continuam bloqueadas. O RSX controla o relógio de vídeo guest de 60000/1001 Hz.
+ativa continuam bloqueadas. O comando original de habilitação das estatísticas agora
+é acompanhado: coleta desativada não acumula geometria; desativá-la preserva as
+observações anteriores até reset explícito. Regressões com GPU real verificam ambas
+as transições e mantêm ZPASS independente. O RSX controla o relógio de vídeo guest de 60000/1001 Hz.
 A fila original aguarda a conclusão da GPU e o próximo VBlank elegível; o D3D12
 apresenta o buffer escolhido e o LV2 entrega os eventos originais de interrupção.
 Referências da FIFO exigem conclusão da GPU. Regressões com GPU real verificam buffers

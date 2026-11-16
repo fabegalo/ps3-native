@@ -8,7 +8,7 @@
     "patches": [
       {
         "path": "patches/ps3recomp/0001-strict-aot-execution.patch",
-        "sha256": "964df9e42ef11e1dc9f03f48539c3c04314d6f8d203f2616c76d2925ffa30c02",
+        "sha256": "00e16e15dc0bf5122019f9e66125d1af23375906ca8cc95a14c1242e5e97b4d0",
         "source_hash_normalization": "LF",
         "files": {
           "runtime/ppu/ppu_hle.cpp": {
@@ -169,11 +169,11 @@
           },
           "libs/video/rsx_commands.h": {
             "before": "49a82d14dec8261c4d0fc7af519760dae319f74c43bca5318cb59c63677ec02f",
-            "after": "6a6ee6ae751c9797fd780c1566aae4bb11d1c9ea516f102133fc3346d0f5fa09"
+            "after": "000503676d528eb71349ae3aafe03cdf23cf7348269a71fb1297149cec9534ec"
           },
           "libs/video/rsx_d3d12_backend.c": {
             "before": "054ee0aa54818beb31873f7b2e2c3526ba83cfeb3e6a16fb6113ba0ace127748",
-            "after": "7d64eb741d2eee1e3118e5a0d28e93c6eca644bdabd5bf447294269c2a11f89e"
+            "after": "380115c0d8ccee98756b1fb68a7bd67118a1db3deb665b7639d684c87a43f77d"
           },
           "tools/wrap_spu_elf.py": {
             "before": "20c3154cbdd22b9eb61f1454b4ca6f8d4b626bb577bae8dd3a9be2fe40cb3c56",
@@ -181,7 +181,7 @@
           },
           "libs/video/rsx_commands.c": {
             "before": "e32ea4691ef4e43bf5d88eac20cc8402b83be48d13c704cdf0ca94a9f829dfcc",
-            "after": "1799218c1875de56dbc54f79da9d69e0d6e08719b934d6b06ccc799c1a7ae292"
+            "after": "aa3b4d6e4a157ceee0e3099e1f6d4429d68a7e73c522ed3a1f9e257a1658ff46"
           },
           "tools/spu_lifter.py": {
             "before": "51af02e6c428f5af27d78a6b4f808f8c66c016e49f5f4b298897d2a68345d826",

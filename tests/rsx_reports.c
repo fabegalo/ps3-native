@@ -219,6 +219,28 @@ int main(int argc, char** argv)
     }
     method(NV4097_SET_STENCIL_TEST_ENABLE, 0);
     if (FAILED(s_d3d.swap_chain->lpVtbl->GetLastPresentCount(s_d3d.swap_chain, &presents_after)) || presents_after != presents_before + 1) return 54;
+    /* Disabled collection is empty even when actual GPU draws occur. Re-enabling
+     * makes a later disable retain the unimplemented active interval. */
+    if (!d3d12_report(NULL, 0x17C8, 2, NULL, NULL)) return 62;
+    method(NV4097_SET_ZCULL_STATS_ENABLE, 0);
+    if (state.zcull_stats_enable) return 63;
+    draw();
+    for (u32 type = 2; type <= 5; ++type) {
+        first = second;
+        if (!d3d12_report(NULL, 0x1800, type << 24, &second, &count) || count || second < first) return 64;
+    }
+    method(NV4097_SET_ZCULL_STATS_ENABLE, 1); draw();
+    method(NV4097_SET_ZCULL_STATS_ENABLE, 0);
+    for (u32 type = 2; type <= 5; ++type) {
+        first = 0xAABBCCDD11223344ull; count = 0xCAFEBABE;
+        if (d3d12_report(NULL, 0x1800, type << 24, &first, &count) ||
+            first != 0xAABBCCDD11223344ull || count != 0xCAFEBABE) return 65;
+    }
+    if (!d3d12_report(NULL, 0x17C8, 2, NULL, NULL)) return 66;
+    draw();
+    if (!d3d12_report(NULL, 0x1800, 2u << 24, &first, &count) || count) return 67;
+    if (FAILED(s_d3d.swap_chain->lpVtbl->GetLastPresentCount(s_d3d.swap_chain, &presents_after)) ||
+        presents_after != presents_before + 1) return 68;
     if (cellGcm_syscall_bringup(0x200000) != 0xC0000000u || vm_commit(VM_RSX_CONTEXT_BASE, VM_RSX_CONTEXT_SIZE) ||
         !cellGcm_syscall_bind_context(VM_RSX_CONTEXT_BASE + 0x40, VM_RSX_CONTEXT_BASE + 0x200000)) return 19;
     if (cellGcmSetDisplayBuffer(0, 0, 256, 64, 64) || cellGcmSetDisplayBuffer(1, 0x10000, 256, 64, 64) ||
