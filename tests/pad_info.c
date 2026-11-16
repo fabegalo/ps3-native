@@ -29,19 +29,26 @@ static void refresh(void)
 }
 int main(void)
 {
+    if ((u32)cellPadSetPortSetting(0, 0) != (u32)CELL_PAD_ERROR_NOT_OPENED) return 10;
     if (vm_init() || vm_commit(0x30000, 0x10000)) return 1;
     s_xi_tried = 1; p_xi_get_state = own_state; p_xi_get_caps = own_caps;
-    if (cellPadInit(4)) return 2;
+    if (cellPadInit(7) || cellPadSetPortSetting(6, CELL_PAD_SETTING_PRESS_ON) ||
+        (u32)cellPadSetPortSetting(7, 0) != (u32)CELL_PAD_ERROR_INVALID_PARAMETER) return 2;
     const u32 out = 0x30104;
     vm_write32(out - 4, 0xA5A5A5A5); vm_write32(out + sizeof(CellPadInfo2), 0xA5A5A5A5);
-    if (cellPadGetInfo2((void*)(uintptr_t)out) || vm_read32(out + 4)) return 3;
+    if (cellPadGetInfo2((void*)(uintptr_t)out) || vm_read32(out) != 7 || vm_read32(out + 4) ||
+        vm_read32(out + 64) != CELL_PAD_SETTING_PRESS_ON || vm_read32(out + 92)) return 3;
     for (unsigned port = 0; port < 7; ++port) if (vm_read32(out + 12 + port * 4)) return 4;
+    if (cellPadSetPortSetting(2, 0xFFFFFFFFu)) return 11;
     attached = 1u << 2; refresh();
     if (cellPadGetInfo2((void*)(uintptr_t)out) || vm_read32(out + 4) != 1 || vm_read32(out + 20) != 3 ||
+        vm_read32(out + 48) != 6 ||
         vm_read32(out + 76) != (CELL_PAD_CAPABILITY_PS3_CONFORMITY | CELL_PAD_CAPABILITY_HP_ANALOG_STICK | CELL_PAD_CAPABILITY_ACTUATOR)) return 5;
     if (cellPadGetInfo2((void*)(uintptr_t)out) || vm_read32(out + 20) != 1) return 6;
     attached = 0; refresh();
-    if (cellPadGetInfo2((void*)(uintptr_t)out) || vm_read32(out + 4) || vm_read32(out + 20) != 2 || vm_read32(out + 76)) return 7;
+    if (cellPadGetInfo2((void*)(uintptr_t)out) || vm_read32(out + 4) || vm_read32(out + 20) != 2 ||
+        vm_read32(out + 48) != 6 || vm_read32(out + 76)) return 7;
+    if (cellPadSetPortSetting(2, 0) || cellPadGetInfo2((void*)(uintptr_t)out) || vm_read32(out + 48)) return 12;
     attached = 1; has_features = 0; refresh();
     if (cellPadGetInfo2((void*)(uintptr_t)out) || vm_read32(out + 4) != 1 ||
         vm_read32(out + 68) != CELL_PAD_CAPABILITY_PS3_CONFORMITY || vm_read32(out - 4) != 0xA5A5A5A5 ||

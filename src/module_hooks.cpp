@@ -28,12 +28,14 @@ extern "C" __attribute__((weak)) const NativeLleModule* ps3_native_firmware_defi
 extern "C" __attribute__((weak)) const NativeLleModule* ps3_native_firmware_extra(size_t) { return nullptr; }
 extern "C" s32 sys_ppu_thread_once(u32, u32);
 extern "C" s32 sys_process_is_stack(u32);
+extern "C" s32 sys_process_get_paramsfo(void*);
 extern "C" int cellGameReleaseCheck(void);
 extern "C" s32 _sys_spu_printf_initialize(u32, u32, u32, u32);
 extern "C" s32 _sys_spu_printf_finalize(void);
 extern "C" u32 ps3_spu_printf_callback(u32);
 extern "C" void* _sys_memset(void*, s32, u32);
 extern "C" void* _sys_memcpy(void*, const void*, u32);
+extern "C" s32 _sys_strncmp(const char*, const char*, u32);
 extern "C" int cellAudioOutputProbe(void);
 extern "C" s32 cellAudioInit(void);
 extern "C" s32 cellAudioPortOpen(const void*, u32*);
@@ -85,6 +87,7 @@ void pad_info2(ppu_context* ctx) {
     }
     ctx->gpr[3] = (u64)(s64)cellPadGetInfo2((CellPadInfo2*)(uintptr_t)(u32)ctx->gpr[3]);
 }
+void pad_setting(ppu_context* ctx) { ctx->gpr[3] = (u64)(s64)cellPadSetPortSetting((u32)ctx->gpr[3], (u32)ctx->gpr[4]); }
 void audio_port_start(ppu_context* ctx) { ctx->gpr[3] = (u64)(s64)cellAudioPortStart((u32)ctx->gpr[3]); }
 void audio_port_stop(ppu_context* ctx) { ctx->gpr[3] = (u64)(s64)cellAudioPortStop((u32)ctx->gpr[3]); }
 void audio_port_close(ppu_context* ctx) { ctx->gpr[3] = (u64)(s64)cellAudioPortClose((u32)ctx->gpr[3]); }
@@ -237,6 +240,11 @@ void system_param(ppu_context* ctx) {
     ctx->gpr[3] = (u64)(s64)cellSysutilGetSystemParamInt((s32)ctx->gpr[3], (u32)ctx->gpr[4]);
 }
 void process_is_stack(ppu_context* ctx) { ctx->gpr[3] = sys_process_is_stack((u32)ctx->gpr[3]); }
+void process_paramsfo(ppu_context* ctx) { ctx->gpr[3] = (u64)(s64)sys_process_get_paramsfo((void*)(uintptr_t)ctx->gpr[3]); }
+void string_compare(ppu_context* ctx) {
+    ctx->gpr[3] = (u64)(s64)_sys_strncmp((const char*)(uintptr_t)ctx->gpr[3],
+        (const char*)(uintptr_t)ctx->gpr[4], (u32)ctx->gpr[5]);
+}
 void game_permit(ppu_context* ctx) {
     if (ctx->gpr[3] > UINT32_MAX || ctx->gpr[4] > UINT32_MAX ||
         !ps3_native_guest_range_backed((u32)ctx->gpr[3], 128) ||
@@ -410,6 +418,7 @@ struct RegisterAdapters {
         ps3_hle_register_ctx(ps3_compute_nid("sceNpTrophyInit"), "sceNpTrophyInit", trophy_initialize);
         ps3_hle_register_ctx(ps3_compute_nid("cellAudioPortOpen"), "cellAudioPortOpen", audio_port_open);
         ps3_hle_register_ctx(ps3_compute_nid("cellPadGetInfo2"), "cellPadGetInfo2", pad_info2);
+        ps3_hle_register_ctx(ps3_compute_nid("cellPadSetPortSetting"), "cellPadSetPortSetting", pad_setting);
         ps3_hle_register_ctx(ps3_compute_nid("cellAudioGetPortConfig"), "cellAudioGetPortConfig", audio_port_config);
         ps3_hle_register_ctx(ps3_compute_nid("cellAudioPortStart"), "cellAudioPortStart", audio_port_start);
         ps3_hle_register_ctx(ps3_compute_nid("cellAudioPortStop"), "cellAudioPortStop", audio_port_stop);
@@ -445,6 +454,8 @@ struct RegisterAdapters {
         ps3_hle_register_ctx(ps3_compute_nid("cellGameBootCheck"), "cellGameBootCheck", game_boot);
         ps3_hle_register_ctx(ps3_compute_nid("cellSysutilGetSystemParamInt"), "cellSysutilGetSystemParamInt", system_param);
         ps3_hle_register_ctx(ps3_compute_nid("sys_process_is_stack"), "sys_process_is_stack", process_is_stack);
+        ps3_hle_register_ctx(ps3_compute_nid("sys_process_get_paramsfo"), "sys_process_get_paramsfo", process_paramsfo);
+        ps3_hle_register_ctx(ps3_compute_nid("_sys_strncmp"), "_sys_strncmp", string_compare);
         ps3_hle_register_ctx(ps3_compute_nid("cellGameContentPermit"), "cellGameContentPermit", game_permit);
         ps3_hle_register_ctx(ps3_compute_nid("cellGameDataCheck"), "cellGameDataCheck", game_data);
         ps3_hle_register_ctx(ps3_compute_nid("cellGameCreateGameData"), "cellGameCreateGameData", game_create);

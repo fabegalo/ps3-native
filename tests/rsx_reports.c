@@ -116,7 +116,12 @@ int main(void)
     }
     if (FAILED(s_d3d.swap_chain->lpVtbl->GetLastPresentCount(s_d3d.swap_chain, &presents_after)) || presents_after != presents_before) return 9;
     method(NV4097_CLEAR_SURFACE, 0xF0);
-    if (!s_d3d12_backend.submit || !s_d3d12_backend.submit(NULL) ||
+    const u64 fence_before = s_d3d.fence_values[s_d3d.frame_index];
+    method(0x1D6C, 0x90);
+    method(0x1D74, 0x12345678);
+    if (memcmp(vm_base + VM_HLE_INJECT_BASE + 0x90, "\x12\x34\x56\x78", 4) ||
+        s_d3d.fence_values[s_d3d.frame_index] <= fence_before ||
+        s_d3d.fence->lpVtbl->GetCompletedValue(s_d3d.fence) < s_d3d.fence_values[s_d3d.frame_index] ||
         FAILED(s_d3d.swap_chain->lpVtbl->GetLastPresentCount(s_d3d.swap_chain, &presents_after)) || presents_after != presents_before) return 17;
     if (!s_pending_display_content || s_d3d.draw_count) return 15;
     rsx_d3d12_backend_present();
@@ -124,6 +129,6 @@ int main(void)
     first = 0xAABBCCDD11223344ull; count = 0xCAFEBABE;
     if (d3d12_report(NULL, 0x1800, 2u << 24, &first, &count) || first != 0xAABBCCDD11223344ull || count != 0xCAFEBABE) return 10;
     rsx_d3d12_backend_shutdown(); vm_shutdown();
-    puts("Verified real GPU samples, ordered timestamps, preserved depth and no implicit present");
+    puts("Verified real GPU samples, timestamps, semaphore completion, preserved depth and no implicit present");
     return 0;
 }

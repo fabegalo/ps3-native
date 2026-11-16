@@ -2,7 +2,7 @@ import subprocess
 import sys
 import os
 
-for mode in ('hle', 'ppu', 'indirect', 'indirect_null', 'ppu_null_read', 'storage_budget', 'syscall', 'unaudited_syscall', 'audio_probe', 'audio_option', 'mutex_shared', 'mutex_adaptive', 'mutex_contended', 'rw_contended', 'tty_channel', 'language_other', 'spu', 'fs_not_ready',
+for mode in ('hle', 'ppu', 'indirect', 'indirect_null', 'ppu_null_read', 'storage_budget', 'syscall', 'unaudited_syscall', 'rsx_memory_query', 'rsx_memory_attributes', 'rsx_context_flags', 'rsx_context_multiple', 'rsx_context_iomap_flags', 'rsx_context_iomap_overlap', 'rsx_context_attribute', 'rsx_context_fifo_pending', 'rsx_context_device_attribute', 'rsx_context_alternate_timing', 'rsx_context_sync_mode', 'rsx_context_tile_compressed', 'rsx_context_semaphore_backend', 'strncmp_invalid', 'audio_probe', 'audio_option', 'mutex_shared', 'mutex_adaptive', 'mutex_contended', 'rw_contended', 'tty_channel', 'language_other', 'spu', 'fs_not_ready',
              'spu_indirect', 'spu_missing', 'spu_missing_async', 'spu_missing_job', 'sysutil_no_dispatcher',
              'provider_not_registered', 'gcm_unaudited', 'gcm_debug_level', 'tile_compressed', 'io_unbacked',
              'callback_missing', 'callback_ct_missing', 'thread_flags', 'thread_exit_unowned', 'raw_spu_unreviewed',
@@ -11,6 +11,8 @@ for mode in ('hle', 'ppu', 'indirect', 'indirect_null', 'ppu_null_read', 'storag
     result = subprocess.run([sys.argv[1], mode], capture_output=True, timeout=15)
     if result.returncode != 86 or b'[native-blocked]' not in result.stderr:
         raise AssertionError((mode, result.returncode, result.stderr[-2000:]))
+    if mode == 'strncmp_invalid' and b'invalid or unbounded string comparison' not in result.stderr:
+        raise AssertionError((mode, 'comparison guard was not reached', result.stderr[-2000:]))
 result = subprocess.run([sys.argv[1], 'tty'], capture_output=True, timeout=15)
 payload = bytes(i % 251 for i in range(0x4011))
 if result.returncode or result.stdout.count(payload) != 1:
@@ -74,3 +76,7 @@ for mode, expected in (('changed_start', b'start descriptor changed'), ('bad_sta
 result = subprocess.run([sys.argv[3], sys.argv[4], 'missing_export'], capture_output=True, timeout=15)
 if result.returncode != 86 or b'[native-blocked] original cellSpurs owner has no prepared export' not in result.stderr:
     raise AssertionError(('PRX ownership fallback', result.returncode, result.stderr[-2000:]))
+for mode in ('gcm_missing_export', 'gcm_missing_private'):
+    result = subprocess.run([sys.argv[3], sys.argv[4], mode], capture_output=True, timeout=15)
+    if result.returncode != 86 or b'original GCM owner has no prepared export' not in result.stderr:
+        raise AssertionError((mode, result.returncode, result.stderr[-2000:]))

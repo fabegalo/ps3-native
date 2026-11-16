@@ -12,6 +12,7 @@ extern "C" {
 #include "thread/spu_recomp.h"
 }
 #include "cellSysutil.h"
+#include "cellGame.h"
 #include "cellGcmSys.h"
 #include "cellSpurs.h"
 #include "cellPad.h"
@@ -71,6 +72,8 @@ uint32_t spu_thread_get_group_id(uint32_t);
 void spu_begin_image(int);
 extern int (*g_spu_user_event_hook)(spu_context*, uint32_t);
 void cellGcm_rsx_process_fifo(void);
+void rsx_raise_user_cmd(u32);
+u32 gcm_io_offset_to_ea(u32);
 int cellGcm_take_flip_pending(void);
 unsigned cellGcm_flip_request_count(void);
 u32 ps3_spu_printf_callback(u32);
@@ -96,8 +99,12 @@ static u32 synthetic_report_target;
 static unsigned synthetic_report_calls;
 static bool synthetic_report_early;
 static unsigned synthetic_submits;
+static u32 synthetic_semaphore_target;
+static bool synthetic_semaphore_early;
 static int synthetic_submit(void*) {
     ++synthetic_submits;
+    if (synthetic_semaphore_target && vm_read32(synthetic_semaphore_target) != 0xA5A5A5A5)
+        synthetic_semaphore_early = true;
     if (cellGcm_take_flip_pending()) synthetic_report_early = true;
     return 1; // Explicit CPU-only completion fixture.
 }
@@ -161,6 +168,199 @@ static void call(ppu_context& ctx, const char* name, uint64_t a0) {
     ps3_hle_call(ps3_compute_nid(name), &ctx);
 }
 int main(int argc, char** argv) {
+    if (argc == 2 && (!strcmp(argv[1], "process_sfo") || !strcmp(argv[1], "strncmp_invalid"))) {
+        if (vm_init() || vm_commit(0x30000, 0x10000)) return 1;
+        g_ppu_main_stack_addr = 0x30000; g_ppu_main_stack_size = 0x10000;
+        ppu_context info{}; info.gpr[1] = 0x3FF00;
+        auto compare = [&](u64 a, u64 b, u64 n) {
+            info.gpr[4] = b; info.gpr[5] = n; call(info, "_sys_strncmp", a); return (s32)info.gpr[3];
+        };
+        vm_write8(0x3FFFF, 'A'); vm_write8(0x3FFFE, 'B');
+        if (!strcmp(argv[1], "strncmp_invalid")) { compare(0x3FFFF, 0x3FFFF, 2); return 2; }
+        if (compare(0, 0, 0) || compare(0x3FFFF, 0x3FFFE, 2) >= 0 ||
+            compare(0x3FFFE, 0x3FFFF, 2) <= 0 || compare(0x3FFFF, 0x3FFFF, 1)) return 6;
+        vm_write32(0x31000, 0xA5A5A5A5);
+        cellGame_set_title_id(""); call(info, "sys_process_get_paramsfo", 0x31000);
+        if ((u32)info.gpr[3] != (u32)CELL_ENOENT || vm_read32(0x31000) != 0xA5A5A5A5) return 2;
+        cellGame_set_title_id("TEST00001");
+        for (u64 invalid : {0ull, 0x3FFE0ull, 0x100031000ull}) {
+            call(info, "sys_process_get_paramsfo", invalid);
+            if ((u32)info.gpr[3] != (u32)CELL_EFAULT) return 3;
+        }
+        vm_write32(0x30FFC, 0xA5A5A5A5); vm_write32(0x31040, 0xA5A5A5A5);
+        call(info, "sys_process_get_paramsfo", 0x31000);
+        if (info.gpr[3] || vm_read8(0x31000) || memcmp(vm_base + 0x31001, "TEST00001", 9) ||
+            vm_read32(0x30FFC) != 0xA5A5A5A5 || vm_read32(0x31040) != 0xA5A5A5A5) return 4;
+        for (u32 i = 10; i < 64; ++i) if (vm_read8(0x31000 + i)) return 5;
+        vm_shutdown(); std::puts("Verified process SFO identity, 64-byte ABI and failed-call preservation"); return 0;
+    }
+    if (argc == 2 && (!strncmp(argv[1], "rsx_memory", 10) || !strncmp(argv[1], "rsx_context", 11))) {
+        if (vm_init() || vm_commit(0x30000, 0x10000)) return 1;
+        g_ppu_main_stack_addr = 0x30000; g_ppu_main_stack_size = 0x10000;
+        lv2_init_syscalls(); ppu_context memory{}; memory.gpr[1] = 0x3FF00;
+        auto allocate = [&](u64 handle, u64 address, u64 size) {
+            memory.gpr[11] = 668; memory.gpr[3] = handle; memory.gpr[4] = address; memory.gpr[5] = size;
+            memory.gpr[6] = !strcmp(argv[1], "rsx_memory_attributes") ? 1 : 0x80000;
+            memory.gpr[7] = 0x300000; memory.gpr[8] = 15; memory.gpr[9] = 8;
+            lv2_syscall(&memory); return (u32)memory.gpr[3];
+        };
+        vm_write32(0x31000, 0xA5A5A5A5); vm_write64(0x31010, 0xA5A5A5A5A5A5A5A5ull);
+        if (!strcmp(argv[1], "rsx_memory_query")) { allocate(0x31000, 0x31010, 0); return 2; }
+        if (!strcmp(argv[1], "rsx_memory_attributes")) { allocate(0x31000, 0x31010, 0x100000); return 2; }
+        for (u64 invalid : {0ull, 0xFFFFFFFEull, 0x100031000ull})
+            if (allocate(invalid, 0x31010, 0x100000) != (u32)CELL_EFAULT) return 3;
+        if (allocate(0x31000, 0x100031010ull, 0x100000) != (u32)CELL_EFAULT ||
+            allocate(0x31000, 0x31000, 0x100000) != (u32)CELL_EFAULT) return 4;
+        for (u64 invalid : {1ull, 0x100001ull, 0x10100000ull, 0x100000000ull})
+            if (allocate(0x31000, 0x31010, invalid) != (u32)-17 || vm_read32(0x31000) != 0xA5A5A5A5 ||
+                vm_read64(0x31010) != 0xA5A5A5A5A5A5A5A5ull) return 5;
+        if (allocate(0x31000, 0x31010, 0x200000) || !vm_read32(0x31000)) return 6;
+        const u64 local = vm_read64(0x31010);
+        if (local > UINT32_MAX || !ps3_native_guest_range_backed((u32)local, 0x200000) ||
+            ps3_native_guest_range_backed((u32)local, 0x200001) || vm_read32((u32)local) ||
+            vm_read32((u32)local + 0x1FFFFC)) return 7;
+        vm_write32((u32)local + 0x1FFFFC, 0xCAFEBABE);
+        if (!strncmp(argv[1], "rsx_context", 11)) {
+            const u32 handle = vm_read32(0x31000);
+            auto context = [&](u64 output, u64 object, u64 flags) {
+                memory.gpr[11] = 670; memory.gpr[3] = output;
+                memory.gpr[4] = 0x31110; memory.gpr[5] = 0x31120; memory.gpr[6] = 0x31130;
+                memory.gpr[7] = object; memory.gpr[8] = flags;
+                lv2_syscall(&memory); return (u32)memory.gpr[3];
+            };
+            vm_write32(0x31100, 0xA5A5A5A5);
+            if (ps3_native_guest_range_backed(VM_RSX_CONTEXT_BASE, 4) ||
+                context(0x100031100ull, handle, 0) != (u32)CELL_EFAULT ||
+                context(0x31110, handle, 0) != (u32)CELL_EFAULT ||
+                context(0x31100, handle + 1, 0) != (u32)CELL_EINVAL ||
+                vm_read32(0x31100) != 0xA5A5A5A5) return 9;
+            if (!strcmp(argv[1], "rsx_context_flags")) { context(0x31100, handle, 0x10); return 2; }
+            if (context(0x31100, handle, 0x20) || !vm_read32(0x31100)) return 10;
+            if (!strcmp(argv[1], "rsx_context_multiple")) { context(0x31100, handle, 0); return 2; }
+            const u32 driver = VM_RSX_CONTEXT_BASE + 0x100000, reports = driver + 0x100000;
+            const u32 queue = vm_read32(driver + 0x12D0);
+            if (vm_read64(0x31110) != VM_RSX_CONTEXT_BASE || vm_read64(0x31120) != driver ||
+                vm_read64(0x31130) != reports || !ps3_native_guest_range_backed(VM_RSX_CONTEXT_BASE, VM_RSX_CONTEXT_SIZE) ||
+                ps3_native_guest_range_backed(VM_RSX_CONTEXT_BASE, VM_RSX_CONTEXT_SIZE + 1) ||
+                vm_read32(driver) != 0x211 || vm_read32(driver + 8) != 0x200000 ||
+                vm_read32(driver + 0x2C) != 0x1000 || vm_read32(driver + 0x34) != 0x1400 || vm_read32(driver + 0x54) != 0x20 ||
+                !queue ||
+                cellGcm_control_guest_addr() != VM_RSX_CONTEXT_BASE + 0x40 ||
+                vm_read64(reports + 0x1400) != UINT64_MAX || vm_read32(reports + 0x1408) ||
+                vm_read32(reports + 0x140C) != UINT32_MAX) return 11;
+            rsx_state state{}; rsx_state_init(&state);
+            rsx_backend semaphore_backend{}; semaphore_backend.submit = synthetic_submit;
+            if (strcmp(argv[1], "rsx_context_semaphore_backend")) rsx_set_backend(&semaphore_backend);
+            synthetic_semaphore_target = reports + 0x20;
+            vm_write32(synthetic_semaphore_target, 0xA5A5A5A5);
+            vm_write32(VM_HLE_INJECT_BASE + 0x20, 0xA5A5A5A5);
+            rsx_process_method(&state, 0x1D6C, 0x20);
+            rsx_process_method(&state, 0x1D74, 0x12345678);
+            if (vm_read32(reports + 0x20) != 0x12345678 ||
+                vm_read32(VM_HLE_INJECT_BASE + 0x20) != 0xA5A5A5A5 || synthetic_semaphore_early || synthetic_submits != 1) return 13;
+            synthetic_semaphore_target = 0; synthetic_submits = 0; rsx_set_backend(nullptr);
+            vm_write32(driver + 0x12C0, 0x80);
+            rsx_raise_user_cmd(0x12345678);
+            memory.gpr[11] = 130; memory.gpr[3] = queue; memory.gpr[4] = 0x31200; memory.gpr[5] = 1000;
+            lv2_syscall(&memory);
+            if (memory.gpr[3] || !memory.gpr[4] || memory.gpr[5] || memory.gpr[6] != 0x80 ||
+                memory.gpr[7] || vm_read32(driver + 0x12CC) != 0x12345678) return 12;
+            memory.gpr[11] = 348; memory.gpr[3] = 0x100000; memory.gpr[4] = 0x400; memory.gpr[5] = 0x31210;
+            lv2_syscall(&memory);
+            if (memory.gpr[3]) return 14;
+            const u32 mapped = vm_read32(0x31210), id = vm_read32(0x31100);
+            auto iomap = [&](u64 object, u64 io, u64 ea, u64 size, u64 flags) {
+                memory.gpr[11] = 672; memory.gpr[3] = object; memory.gpr[4] = io;
+                memory.gpr[5] = ea; memory.gpr[6] = size; memory.gpr[7] = flags;
+                lv2_syscall(&memory); return (u32)memory.gpr[3];
+            };
+            const u64 attributes = 0xE000000000000800ull;
+            if (iomap(id + 1, 0, mapped, 0x100000, attributes) != (u32)CELL_EINVAL ||
+                iomap(id, 1, mapped, 0x100000, attributes) != (u32)CELL_EINVAL ||
+                iomap(id, 0, mapped + 1, 0x100000, attributes) != (u32)CELL_EINVAL ||
+                iomap(id, 0, 0x100000000ull + mapped, 0x100000, attributes) != (u32)CELL_EINVAL ||
+                iomap(id, 0x10000000, mapped, 0x100000, attributes) != (u32)CELL_EINVAL ||
+                iomap(id, 0, mapped, 0x100001, attributes) != (u32)CELL_EINVAL ||
+                iomap(id, 0, 0x59900000, 0x100000, attributes) != (u32)CELL_EINVAL || gcm_io_offset_to_ea(0)) return 15;
+            if (!strcmp(argv[1], "rsx_context_iomap_flags")) { iomap(id, 0, mapped, 0x100000, 1); return 2; }
+            if (iomap(id, 0, mapped, 0x100000, attributes) || gcm_io_offset_to_ea(0xFFFFC) != mapped + 0xFFFFC ||
+                gcm_io_offset_to_ea(0x100000) || vm_read64(reports + 0x1000) != UINT64_MAX) return 16;
+            if (!strcmp(argv[1], "rsx_context_iomap_overlap")) { iomap(id, 0, mapped, 0x100000, attributes); return 2; }
+            auto attribute = [&](u64 object, u64 packet, u64 get, u64 put, u64 value = 0) {
+                memory.gpr[11] = 674; memory.gpr[3] = object; memory.gpr[4] = packet;
+                memory.gpr[5] = get; memory.gpr[6] = put; memory.gpr[7] = value; memory.gpr[8] = 0;
+                lv2_syscall(&memory); return (u32)memory.gpr[3];
+            };
+            if (attribute(id + 1, 1, 4, 8) != (u32)CELL_EINVAL ||
+                attribute(id, 1, 1, 8) != (u32)CELL_EINVAL ||
+                attribute(id, 1, 0x100000000ull, 8) != (u32)CELL_EINVAL ||
+                attribute(id, 1, 0x100000, 8) != (u32)CELL_EINVAL ||
+                vm_read64(VM_RSX_CONTEXT_BASE + 0x40)) return 17;
+            if (!strcmp(argv[1], "rsx_context_attribute")) { attribute(id, 0x106, 0, 0); return 2; }
+            auto sync_mode = [&](u64 head, u64 selector) {
+                memory.gpr[11] = 677; memory.gpr[3] = 0x202; memory.gpr[4] = head;
+                memory.gpr[5] = selector; memory.gpr[6] = 0; memory.gpr[7] = 0;
+                lv2_syscall(&memory); return memory.gpr[3];
+            };
+            if (!strcmp(argv[1], "rsx_context_device_attribute")) { sync_mode(1, 2); return 2; }
+            if (sync_mode(0, 1) != 2 || sync_mode(1, 1) != 2 || sync_mode(2, 1) != 255) return 20;
+            memory.gpr[11] = 677; memory.gpr[3] = 2; memory.gpr[4] = 1;
+            memory.gpr[5] = !strcmp(argv[1], "rsx_context_alternate_timing") ? 1 : 0;
+            memory.gpr[6] = memory.gpr[7] = 0; lv2_syscall(&memory);
+            if (memory.gpr[3]) return 21;
+            if (!strcmp(argv[1], "rsx_context_sync_mode")) { attribute(id, 0x101, 1, 1); return 2; }
+            if (attribute(id, 0x101, 1, 2) || sync_mode(1, 1) != 2 ||
+                attribute(id, 0x101, 2, 2) != (u32)-17) return 22;
+            const u64 tile_range = (1ull << 32) | 0xF0000, tile_format = (0x200ull << 32) | 0x4001E000;
+            if (attribute(id, 0x300, 0, tile_range, tile_format) || !cellGcmGetTileInfo(0)->bound ||
+                cellGcmGetTileInfo(0)->offset || cellGcmGetTileInfo(0)->size != 0x100000 ||
+                cellGcmGetTileInfo(0)->pitch != 0x200 || cellGcmGetTileInfo(0)->format) return 23;
+            if (attribute(id, 0x300, 15, tile_range, tile_format) != (u32)-17 ||
+                attribute(id, 0x300, 0, tile_range, tile_format | 0x800) != (u32)-17 ||
+                !cellGcmGetTileInfo(0)->bound || cellGcmGetTileInfo(0)->size != 0x100000) return 24;
+            if (!strcmp(argv[1], "rsx_context_tile_compressed")) { attribute(id, 0x300, 0, tile_range, tile_format | (7ull << 26)); return 2; }
+            if (attribute(id, 0x300, 0, 0, 0) || cellGcmGetTileInfo(0)->bound) return 25;
+            const u64 main_tile_range = (0x80000002ull << 32) | 0x800F0000;
+            rsx_tile main_tile{};
+            if (attribute(id, 0x300, 0, main_tile_range, tile_format) ||
+                !rsx_tiling_find(1, 0x40, 16, &main_tile) || main_tile.size != 0x100000 || main_tile.pitch != 0x200 ||
+                attribute(id, 0x300, 0, 0, 0) || rsx_tiling_find(1, 0x40, 16, &main_tile)) return 26;
+            if (attribute(id, 0x104, 0, (64ull << 32) | 64, 256ull << 32)) return 27;
+            auto* display = cellGcmGetDisplayBufferByFlipIndex(0);
+            if (!display || display->width != 64 || display->height != 64 || display->pitch != 256 || display->offset ||
+                !attribute(id, 0x104, 0, (65ull << 32) | 64, 256ull << 32) ||
+                !attribute(id, 0x104, 0, (64ull << 32) | 0xFFFFFFFFu, 256ull << 32) ||
+                display->width != 64 || display->height != 64) return 28;
+            rsx_set_backend(&semaphore_backend);
+            const u32 commands[] = {0x40064, 0x30, 0x40068, 1, 0x40064, 0x40, 0x4006C, 2};
+            for (u32 i = 0; i < 8; ++i) vm_write32(mapped + 0x1000 + i * 4, commands[i]);
+            vm_write32(reports + 0x30, 0); vm_write32(reports + 0x40, 0);
+            if (attribute(id, 1, 0x1000, 0x1020)) return 29;
+            cellGcm_rsx_process_fifo();
+            if (vm_read32(VM_RSX_CONTEXT_BASE + 0x44) != 0x1008 || vm_read32(reports + 0x40)) return 30;
+            vm_write32(reports + 0x30, 1); cellGcm_rsx_process_fifo();
+            if (vm_read32(VM_RSX_CONTEXT_BASE + 0x44) != 0x1020 || vm_read32(reports + 0x40) != 2 ||
+                attribute(id, 1, 0, 0)) return 31;
+            rsx_set_backend(nullptr); synthetic_submits = 0;
+            const u32 flip_status = driver + 0x10C0;
+            if (attribute(id, 0x10A, 0, 0, 0x80000000) || vm_read32(flip_status) != 0x80000000 ||
+                attribute(id, 0x10A, 0, 0x80000000, 0x123) || vm_read32(flip_status) != 0x80000123 ||
+                attribute(id, 0x10A, 2, 0, 0) != (u32)-17 || vm_read32(flip_status) != 0x80000123 ||
+                attribute(id, 0x10A, 0, 0x100000000ull, 0) != (u32)-17 || vm_read32(flip_status) != 0x80000123) return 19;
+            rsx_backend fifo_backend{}; fifo_backend.submit = synthetic_submit;
+            rsx_set_backend(&fifo_backend);
+            if (attribute(id, 1, 4, 8) || vm_read32(VM_RSX_CONTEXT_BASE + 0x40) != 8 ||
+                vm_read32(VM_RSX_CONTEXT_BASE + 0x44) != 4 || synthetic_submits != 1 || synthetic_report_early) return 18;
+            if (!strcmp(argv[1], "rsx_context_fifo_pending")) { attribute(id, 1, 0, 0); return 2; }
+            rsx_set_backend(nullptr);
+            vm_shutdown(); std::puts("Verified RSX context backing, ABI, real interrupt delivery and shared control"); return 0;
+        }
+        vm_write32(0x31004, 0xA5A5A5A5);
+        if (allocate(0x31004, 0x31020, 0x100000) != (u32)CELL_ENOMEM || vm_read32(0x31004) != 0xA5A5A5A5 ||
+            vm_read32((u32)local + 0x1FFFFC) != 0xCAFEBABE) return 8;
+        vm_shutdown(); std::puts("Verified real RSX local allocation, capacity, backing, endian outputs and failed-call preservation");
+        return 0;
+    }
     if (argc == 2 && !std::strcmp(argv[1], "audio_host")) {
         if (vm_init()) return 1;
         if (vm_commit(0x30000, 0x10000)) return 4;
@@ -915,6 +1115,25 @@ int main(int argc, char** argv) {
     if (ctx.gpr[3] || vm_read32(reserved_a) || vm_read32(reserved_a + 0xFFFFC)) return 83;
     vm_write32(reserved_a, 0xAABBCCDD);
     if (vm_read32(reserved_a) != 0xAABBCCDD) return 84;
+    const u32 rsx_address = reserved_a + 0x200, rsx_secondary = rsx_address + 16;
+    auto device_map = [&](u64 a, u64 b, u32 device) {
+        ctx.gpr[11] = 675; ctx.gpr[3] = a; ctx.gpr[4] = b; ctx.gpr[5] = device;
+        lv2_syscall(&ctx); return (u32)ctx.gpr[3];
+    };
+    if (ps3_native_guest_range_backed(VM_RSX_DEVICE_BASE, 4)) return 270;
+    vm_write64(rsx_address, 0xA5A5A5A5A5A5A5A5ull); vm_write64(rsx_secondary, 0x123456789ABCDEF0ull);
+    if (device_map(rsx_address, rsx_secondary, 9) != (u32)CELL_EINVAL ||
+        vm_read64(rsx_address) != 0xA5A5A5A5A5A5A5A5ull) return 271;
+    for (u64 bad : {0ull, 0xFFFFFFFEull, 0x100000000ull + rsx_address})
+        if (device_map(bad, rsx_secondary, 8) != (u32)CELL_EFAULT) return 272;
+    if (device_map(rsx_address, 0xFFFFFFFEull, 8) != (u32)CELL_EFAULT ||
+        device_map(rsx_address, rsx_secondary, 8) || vm_read64(rsx_address) != VM_RSX_DEVICE_BASE ||
+        vm_read64(rsx_secondary) != 0x123456789ABCDEF0ull ||
+        !ps3_native_guest_range_backed(VM_RSX_DEVICE_BASE, VM_RSX_DEVICE_SIZE) ||
+        ps3_native_guest_range_backed(VM_RSX_DEVICE_BASE, VM_RSX_DEVICE_SIZE + 1)) return 273;
+    vm_write32(VM_RSX_DEVICE_BASE + VM_RSX_DEVICE_SIZE - 4, 0xCAFEBABE);
+    if (device_map(rsx_address, 0, 8) || vm_read64(rsx_address) != VM_RSX_DEVICE_BASE ||
+        vm_read32(VM_RSX_DEVICE_BASE + VM_RSX_DEVICE_SIZE - 4) != 0xCAFEBABE) return 274;
     const auto semaphore_attr = reserved_a + 0x4000, semaphore_output = reserved_a + 0x4100;
     std::memset(vm_base + semaphore_attr, 0, 32);
     vm_write32(semaphore_attr, 2); vm_write32(semaphore_attr + 4, 0x200);

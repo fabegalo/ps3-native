@@ -246,11 +246,15 @@ The shared preparation also compiles call-return entries for resumed SPU tasks.
 The eight-channel audio port starts with verified stereo mixing and real host
 consumption. SCREAM initializes and startup reads/decompresses data. Controller
 queries report measured host connections/capabilities, without an implicit pad
-or fabricated pressure/sensor support. Startup now stops at the old
-`_cellGcmSetFlipCommand` protocol: its original RSX initialization, semaphore
-synchronization and FIFO subroutine still need integration. The original
-`libgcm_sys` has 262 PPU functions generated and 102 exports prepared offline;
-it is neither compiled into this runner nor bound/executed. Pass
+or fabricated pressure/sensor support. Port settings preserve requested modes
+independently of measured device capabilities, including disconnected ports.
+The original `libgcm_sys` is now compiled, bound and started through AOT
+(262 PPU functions, 102 exports). Its LV2 bridge supplies backed RSX allocations,
+an actual interrupt queue, IO mappings, shared labels/reports, FIFO control,
+uncompressed tiles and display buffers. The VSYNC startup opens the D3D12 window.
+Frontend semaphore acquires wait; backend releases require real GPU completion.
+The latest session stops at `cellPadGetData`, whose packet delivery remains
+gated pending audit. The original flip/interrupt path is not yet verified. Pass
 `run ... --enter-button cross` or `circle` explicitly; no preference is inferred
 from language/region. No interpreter is used.
 No game frame, selector transition or gameplay is verified. Original and derived

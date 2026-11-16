@@ -66,7 +66,7 @@ def run(root, original, build, seconds=20, *, enter_button=None):
     state.mkdir(parents=True, exist_ok=True)
     env = os.environ.copy()
     # Diagnostic overrides in the upstream must not silently change guest behavior.
-    env = {k: v for k, v in env.items() if not k.upper().startswith(('YDKJ_', 'PPU_', 'SPU_', 'SPURS_', 'PS3_', 'PAD_', 'LBP_', 'GH3_', 'FS_', 'RSX_', 'GCM_', 'PSNR_', 'A2O_', 'SYS_HEAP_', 'TTY_'))}
+    env = {k: v for k, v in env.items() if not k.upper().startswith(('YDKJ_', 'PPU_', 'SPU_', 'SPURS_', 'PS3_', 'PAD_', 'D3D12_', 'LBP_', 'GH3_', 'FS_', 'RSX_', 'GCM_', 'PSNR_', 'A2O_', 'SYS_HEAP_', 'TTY_'))}
     if enter_button is not None: env['PS3_ENTER_BUTTON'] = enter_button
     source = Path(original['source'])
     vfs = source.parent if source.name == 'PS3_GAME' or source.is_file() else source

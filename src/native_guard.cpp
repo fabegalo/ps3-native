@@ -4,18 +4,22 @@
 #include <cstdio>
 #include <cstdlib>
 #include <string>
+#include <cstring>
 #include "cellSysmodule.h"
+#include "cellGcmSys.h"
 #include "ps3emu/guest_call.h"
 #include "native_lle.h"
 extern "C" ps3_guest_caller_fn g_ps3_guest_caller;
 extern "C" int ps3_native_context_ready(uint32_t);
 extern "C" int ps3_hle_has(uint32_t);
+extern "C" const char* ps3_hle_symbol_name(uint32_t);
 extern "C" [[noreturn]] void ps3_native_stop(void);
 extern "C" int sys_memory_range_backed(uint32_t, uint32_t);
 extern "C" int ps3_sysprx_heap_range_backed(uint32_t, uint32_t);
 extern "C" int ppu_thread_stack_range_backed(uint32_t, uint32_t);
 extern "C" int ppu_callback_stack_range_backed(uint32_t, uint32_t);
 extern "C" int cellAudioGuestRangeBacked(uint32_t, uint32_t);
+extern "C" int sys_rsx_guest_range_backed(uint32_t, uint32_t);
 extern "C" uint32_t g_ppu_main_stack_addr, g_ppu_main_stack_size;
 static bool guest_backed(uint32_t address, uint32_t size) {
     const uint64_t end = (uint64_t)address + size;
@@ -24,6 +28,7 @@ static bool guest_backed(uint32_t address, uint32_t size) {
          ppu_thread_stack_range_backed(address, size) ||
          ppu_callback_stack_range_backed(address, size) ||
          cellAudioGuestRangeBacked(address, size) ||
+         sys_rsx_guest_range_backed(address, size) ||
          (address >= g_ppu_main_stack_addr && end <= (uint64_t)g_ppu_main_stack_addr + g_ppu_main_stack_size));
 }
 extern "C" int ps3_native_guest_range_backed(uint32_t address, uint32_t size) {
@@ -75,8 +80,33 @@ static void filesystem_path(ppu_context* ctx) {
     }
 }
 extern "C" void ps3_native_hle_gate(uint32_t nid, ppu_context* ctx) {
+    if (ps3_native_lle_library("cellGcmSys")) {
+        const char* symbol = ps3_hle_symbol_name(nid);
+        if (symbol && (!std::strncmp(symbol, "cellGcm", 7) || !std::strncmp(symbol, "_cellGcm", 8))) {
+            std::fprintf(stderr, "[native-blocked] original GCM owner has no prepared export nid=0x%08X\n", nid);
+            std::fflush(stderr); ps3_native_stop();
+        }
+    }
     if (nid == ps3_compute_nid("cellGcmGetTimeStamp") && ctx->gpr[3] < 2048) return;
     if (nid == ps3_compute_nid("_sys_strlen") && guest_string_size((uint32_t)ctx->gpr[3])) return;
+    if (nid == ps3_compute_nid("cellGcmSetFlipMode") && ctx->gpr[3] != CELL_GCM_DISPLAY_VSYNC) {
+        std::fprintf(stderr, "[native-blocked] RSX scanout sync mode needs backend timing support\n");
+        std::fflush(stderr); ps3_native_stop();
+    }
+    if (nid == ps3_compute_nid("_sys_strncmp")) {
+        const u64 a = ctx->gpr[3], b = ctx->gpr[4], limit = ctx->gpr[5];
+        if (a <= UINT32_MAX && b <= UINT32_MAX && limit <= 0x100000) {
+            for (u64 i = 0; i < limit; ++i) {
+                if (a + i > UINT32_MAX || b + i > UINT32_MAX ||
+                    !guest_backed((u32)(a + i), 1) || !guest_backed((u32)(b + i), 1)) break;
+                const u8 left = vm_read8((u32)(a + i)), right = vm_read8((u32)(b + i));
+                if (!left || left != right || i + 1 == limit) return;
+            }
+            if (!limit) return;
+        }
+        std::fprintf(stderr, "[native-blocked] invalid or unbounded string comparison\n");
+        std::fflush(stderr); ps3_native_stop();
+    }
     if (nid == ps3_compute_nid("sys_spu_image_import") && ctx->gpr[5] == 1) return;
     if (nid == ps3_compute_nid("_sys_strncat")) {
         const auto dst = (uint32_t)ctx->gpr[3], src = (uint32_t)ctx->gpr[4];
@@ -123,6 +153,7 @@ extern "C" void ps3_native_hle_gate(uint32_t nid, ppu_context* ctx) {
                                     "sys_lwmutex_destroy",
                                     "sys_time_get_system_time", "sys_ppu_thread_get_id",
                                     "sys_process_is_stack",
+                                    "sys_process_get_paramsfo",
                                     "sys_lwcond_create", "sys_lwcond_destroy", "sys_lwcond_signal", "sys_lwcond_signal_all", "sys_lwcond_wait",
                                     "_sys_memset", "_sys_memcpy",
                                     "_sys_spu_printf_attach_group", "_sys_spu_printf_detach_group",
@@ -139,6 +170,7 @@ extern "C" void ps3_native_hle_gate(uint32_t nid, ppu_context* ctx) {
                                     "cellRtcGetCurrentTick", "cellRtcGetCurrentClockLocalTime", "cellRtcGetDayOfWeek",
                                     "cellPadInit", "cellPadEnd",
                                     "cellPadGetInfo2",
+                                    "cellPadSetPortSetting",
                                     "sceNpInit", "sceNpTerm", "sceNpManagerGetStatus",
                                     "sceNpTrophyInit", "sceNpTrophyTerm",
                                     "cellAudioPortOpen", "cellAudioGetPortConfig",
@@ -256,6 +288,7 @@ extern "C" void ps3_native_syscall_gate(ppu_context* ctx) {
     const auto number = ctx->gpr[11];
     if (number == 1) return;
     if (number == 25) return;
+    if (number == 675 || number == 668 || number == 670 || number == 672 || number == 674 || number == 677) return;
     // Reservation capability is classified by the upstream LV2 address/rights contract.
     if (number == 14) return;
     if (number == 90 && guest_backed((uint32_t)ctx->gpr[3], 4) &&

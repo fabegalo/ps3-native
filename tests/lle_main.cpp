@@ -8,6 +8,7 @@ extern "C" {
 uint8_t* vm_base;
 uint32_t ppu_load_elf(const char*);
 void ps3_hle_call(uint32_t, ppu_context*);
+void ps3_hle_register(uint32_t, const char*, void*);
 int ppu_register_image_region(uint32_t, uint32_t);
 extern PPU_THREAD_LOCAL ppu_context* g_active_ctx;
 }
@@ -18,6 +19,16 @@ int main(int argc, char** argv) {
     const auto* module = ps3_native_firmware_definition();
     if (ppu_register_image_region(0x0D000000, 4096)) return 11;
     if (!module || ps3_native_lle_owns(0xD00DFEED)) return 2;
+    if (argc == 3 && (!std::strcmp(argv[2], "gcm_missing_export") || !std::strcmp(argv[2], "gcm_missing_private"))) {
+        auto owned = *module; owned.library = "cellGcmSys";
+        if (!ps3_native_lle_load(&owned)) return 19;
+        const char* name = !std::strcmp(argv[2], "gcm_missing_export") ? "cellGcmGetTimeStamp" : "_cellGcmInitBody";
+        const auto nid = ps3_compute_nid(name);
+        ps3_hle_register(nid, name, (void*)extra_export);
+        ppu_context ctx{};
+        ps3_hle_call(nid, &ctx);
+        return 20;
+    }
     if (argc == 3 && !std::strcmp(argv[2], "missing_export")) {
         auto owned = *module;
         owned.library = "cellSpurs";

@@ -251,11 +251,16 @@ A preparação compartilhada também compila entradas de retorno de chamadas par
 retomar tarefas SPU. A porta de oito canais inicia com mistura estéreo verificada
 e consumo real no host. SCREAM inicializa e o boot lê/descomprime dados. A consulta
 de controles informa conexões e recursos medidos no host, sem porta implícita
-nem suporte inventado a pressão/sensores. O boot agora para no protocolo antigo
-de `_cellGcmSetFlipCommand`: a inicialização original do RSX, a sincronização por
-semáforos e a subrotina FIFO ainda precisam de integração. A `libgcm_sys` original
-tem 262 funções PPU geradas e 102 exports preparados offline; ela não foi
-compilada neste runner nem vinculada/executada. Use `run ... --enter-button cross`
+nem suporte inventado a pressão/sensores. A configuração de portas preserva os
+modos solicitados separadamente das capacidades medidas, inclusive sem controle conectado.
+A `libgcm_sys` original agora é compilada, vinculada e iniciada por AOT
+(262 funções PPU, 102 exports). Sua ponte LV2 fornece alocações RSX com respaldo,
+fila real de interrupções, mapeamentos IO, labels/relatórios compartilhados,
+controle FIFO, tiles sem compressão e buffers de imagem. O boot em VSYNC abre a janela D3D12.
+Aquisições de semáforo aguardam; liberações de backend exigem conclusão real da GPU.
+A sessão mais recente para em `cellPadGetData`; a entrega de pacotes continua
+bloqueada até sua auditoria. O caminho original de flip/interrupções ainda não
+foi verificado. Use `run ... --enter-button cross`
 ou `circle` explicitamente; idioma/região não inferem a preferência. Não há interpretação.
 Nenhum frame, transição para o seletor ou gameplay foi verificado.
 Originais e derivados proprietários permanecem fora do Git.

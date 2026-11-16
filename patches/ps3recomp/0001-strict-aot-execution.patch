@@ -5,16 +5,22 @@
  /*
   * ps3recomp - PPU HLE bridge (NID -> host function dispatch)
   *
-@@ -76,6 +77,8 @@
+@@ -75,6 +76,14 @@
+         s->nid = nid; s->ctx_n = ctx_n; s->tab_n = tab_n;
      }
      return s;
- }
++}
 +
 +extern "C" int ps3_native_context_ready(uint32_t nid) { return hle_slot(nid)->ctx_i >= 0; }
++extern "C" const char* ps3_hle_symbol_name(uint32_t nid)
++{
++    const HleSlot* slot = hle_slot(nid);
++    if (slot->ctx_i >= 0) return g_ctx[slot->ctx_i].name;
++    return slot->tab_i >= 0 ? g_hle_nids.entries[slot->tab_i].name : nullptr;
+ }
  
  extern "C" void ps3_hle_register_ctx(uint32_t nid, const char* name, hle_ctx_fn fn)
- {
-@@ -211,6 +214,9 @@
+@@ -211,6 +220,9 @@
   */
  static void ps3_hle_unresolved(uint32_t nid, ppu_context* ctx)
  {
@@ -24,7 +30,7 @@
      enum { CELL_ERROR_ERROR = (int)0x8001003Fu };  /* generic CELL failure */
      static int s_fake = -1;
      if (s_fake < 0) {
-@@ -279,8 +285,16 @@
+@@ -279,8 +291,16 @@
      for (int j = 0; j < ht_used; j++) ht_n[j] = 0;
  }
  extern "C" uint32_t ppu_prof_resolve_host(void* ra);
@@ -41,7 +47,7 @@
      if (const hle_fast_fn f = hle_fast(nid))
          if (f(ctx)) return;
  
-@@ -752,6 +766,9 @@
+@@ -752,6 +772,9 @@
  
      ps3_nid_entry* e = hs->tab_i >= 0 ? &g_hle_nids.entries[hs->tab_i] : nullptr;
      if (!e || !e->handler) {
@@ -2909,7 +2915,7 @@
          write_be32(out_addr + 0, total);
          write_be32(out_addr + 4, avail);
      }
-@@ -362,7 +375,7 @@
+@@ -362,12 +375,14 @@
      if (!requested || requested > UINT32_MAX || !alignment ||
          alignment > UINT32_MAX || (alignment & (alignment - 1u))) return 0;
      uint64_t addr = ((uint64_t)s_mapper_bump_ptr + alignment - 1u) & ~(alignment - 1u);
@@ -2918,7 +2924,14 @@
      /* A reservation owns its entire aligned span. Recheck after every skip:
       * an alignment adjustment can move it into another runtime-owned window. */
      const uint64_t reserved[][2] = {
-@@ -390,9 +403,14 @@
+         { VM_HLE_HEAP_BASE, (uint64_t)VM_HLE_HEAP_BASE + VM_HLE_HEAP_SIZE },
+         { VM_AUDIO_BASE, (uint64_t)VM_AUDIO_BASE + VM_AUDIO_SIZE },
++        { VM_RSX_DEVICE_BASE, (uint64_t)VM_RSX_DEVICE_BASE + VM_RSX_DEVICE_SIZE },
++        { VM_RSX_CONTEXT_BASE, (uint64_t)VM_RSX_CONTEXT_BASE + VM_RSX_CONTEXT_SIZE },
+         { VM_SYS_VM_BASE, (uint64_t)VM_SYS_VM_BASE + VM_SYS_VM_SIZE },
+         { VM_HLE_INJECT_BASE, (uint64_t)VM_HLE_INJECT_BASE + VM_HLE_INJECT_SIZE }
+     };
+@@ -390,9 +405,14 @@
      uint64_t size = LV2_ARG_U64(ctx, 0);
      uint64_t alignment = LV2_ARG_U64(ctx, 2);
      uint32_t out = LV2_ARG_PTR(ctx, 3);
@@ -2936,7 +2949,7 @@
      bump_lock();
      int slot = -1;
      for (int i = 0; i < SYS_MEMORY_ALLOC_MAX; ++i)
-@@ -461,22 +479,43 @@
+@@ -461,22 +481,43 @@
  int64_t sys_mmapper_allocate_shared_memory(ppu_context* ctx)
  {
      uint64_t key      = LV2_ARG_U64(ctx, 0);
@@ -2985,7 +2998,7 @@
  
      uint32_t shm_id = (uint32_t)(slot + 1);
      if (id_out != 0) {
-@@ -484,6 +523,38 @@
+@@ -484,6 +525,38 @@
      }
  
      return CELL_OK;
@@ -3024,7 +3037,7 @@
  }
  
  /* ---------------------------------------------------------------------------
-@@ -556,21 +627,49 @@
+@@ -556,21 +629,49 @@
      uint32_t addr   = LV2_ARG_U32(ctx, 0);
      uint32_t shm_id = LV2_ARG_U32(ctx, 1);
      /* uint32_t flags = LV2_ARG_U32(ctx, 2); */
@@ -3083,6 +3096,15 @@
  }
 --- a/libs/video/cellGcmSys.c
 +++ b/libs/video/cellGcmSys.c
+@@ -74,7 +74,7 @@
+  * -----------------------------------------------------------------------*/
+ 
+ static int  s_gcm_initialized = 0;
+-static u32  s_flip_mode   = CELL_GCM_DISPLAY_VSYNC;
++static u32  s_flip_mode[2] = {CELL_GCM_DISPLAY_VSYNC, CELL_GCM_DISPLAY_VSYNC};
+ static u32  s_flip_status = CELL_GCM_FLIP_STATUS_DONE;
+ /* Flip requests (each puts the status back to WAITING) and the request a
+  * pending flip completion was marked for: a completion delivered late must not
 @@ -100,6 +100,10 @@
   * while it's blocked in the FIFO-wrap recycle callback -- would show a
   * clear+few-draws frame as a visible flicker). */
@@ -3131,7 +3153,35 @@
      static int v = -1;
      if (v < 0) v = getenv("GCM_FLIPCB_ONTICK") ? 1 : 0;
      return v;
-@@ -552,6 +570,8 @@
+@@ -372,6 +390,7 @@
+ 
+ /* Report data area (256 slots, each 16 bytes) */
+ static CellGcmReportData s_report_data[CELL_GCM_MAX_REPORT_COUNT];
++static u32 s_kernel_report_base;
+ 
+ /* NV4097_SET_CONTEXT_DMA_REPORT (0x1A8): where NV4097_GET_REPORT writes.
+  * Local (0xFEED0000, the default): the s_report_data slots above, read back
+@@ -397,7 +416,9 @@
+  * recompiled game can poll them via vm_read32; cellGcmGetLabelAddress returns a
+  * guest address into this window (16-byte spaced as on hardware). A host array
+  * pointer would be read as a guest offset and land out of bounds. */
+-#define GCM_LABEL_GUEST_BASE  (VM_HLE_INJECT_BASE + 0x0000u)
++static u32 s_kernel_label_base, s_kernel_control;
++u32 cellGcm_semaphore_address(u32 offset);
++#define GCM_LABEL_GUEST_BASE  (s_kernel_label_base ? s_kernel_label_base : VM_HLE_INJECT_BASE)
+ #define GCM_LABEL_STRIDE      0x10u
+ static u32 s_labels[CELL_GCM_MAX_LABEL_COUNT];
+ 
+@@ -407,7 +428,7 @@
+  * pointer would be read through vm_base as a guest address and never update, so
+  * every FIFO-space / cellGcmFinish wait would hang. Placed just past the 256
+  * label slots (0x03000000..0x03001000). Fields are big-endian (vm_write32). */
+-#define GCM_CONTROL_GUEST_ADDR (VM_HLE_INJECT_BASE + 0x2000u)
++#define GCM_CONTROL_GUEST_ADDR (s_kernel_control ? s_kernel_control : VM_HLE_INJECT_BASE + 0x2000u)
+ 
+ /* Synthetic guest code EA for the FIFO command-buffer-full callback. The title's
+  * inline gcmReserve calls context->callback(context, count) when `current` nears
+@@ -552,6 +573,8 @@
          printf("[cellGcmSys] WARNING: already initialized\n");
          return CELL_GCM_ERROR_FAILURE;
      }
@@ -3140,7 +3190,16 @@
  
      memset(s_display_buffers, 0, sizeof(s_display_buffers));
      memset(s_display_buffer_set, 0, sizeof(s_display_buffer_set));
-@@ -656,8 +676,9 @@
+@@ -593,7 +616,7 @@
+     s_second_v_handler = NULL;
+     s_last_flip_time = get_timestamp_ns();
+     s_flip_status = CELL_GCM_FLIP_STATUS_DONE;
+-    s_flip_mode = CELL_GCM_DISPLAY_VSYNC;
++    s_flip_mode[0] = s_flip_mode[1] = CELL_GCM_DISPLAY_VSYNC;
+     s_debug_level = CELL_GCM_DEBUG_LEVEL0;
+     s_vblank_count = 0;
+     s_io_map_reserved = 0;
+@@ -656,8 +679,9 @@
  u32 cellGcmSetupContext(u32 ctx_out_addr, u32 cmdSize, u32 ioSize, u32 ioAddress,
                          CellGcmGuestAlloc galloc, CellGcmGuestWrite32 gwrite32)
  {
@@ -3152,7 +3211,7 @@
  
      /* PSL1GHT's gcmInitBody passes ioAddress = 0, expecting gcm to allocate the
       * IO region itself (the official SDK has the app allocate and pass it).
-@@ -667,7 +688,7 @@
+@@ -667,7 +691,7 @@
      if (ioAddress == 0 && galloc)
          ioAddress = galloc(ioSize ? ioSize : 0x100000, 0x100000);
  
@@ -3161,7 +3220,7 @@
  
      u32 cmdbuf = ioAddress;                 /* FIFO lives at the IO region start */
      {
-@@ -681,7 +702,7 @@
+@@ -681,7 +705,7 @@
                     s_ring_begin, s_ring_end, seg / 1024, 10);
          }
      }
@@ -3170,7 +3229,7 @@
      if (cdata && gwrite32) {
          gwrite32(cdata + 0x0, cmdbuf);              /* begin   */
          /* end: the wrap JUMP's slot, as in the SDK (#648); with GCM_FIFO_SEGMENT
-@@ -691,7 +712,7 @@
+@@ -691,7 +715,7 @@
          /* Command-buffer-full callback: a guest OPD {func, toc} routed to
           * hle_gcm_callback -> cellGcm_fifo_recycle. Without a real callback the
           * ring never recycles and the FIFO wedges once `current` reaches `end`. */
@@ -3179,7 +3238,16 @@
          if (opd) {
              gwrite32(opd + 0x0, GCM_FIFO_CALLBACK_SENTINEL_EA);  /* func EA */
              gwrite32(opd + 0x4, 0);                              /* toc (unused) */
-@@ -766,7 +787,7 @@
+@@ -753,7 +777,7 @@
+ void cellGcmSetFlipMode(u32 mode)
+ {
+     printf("[cellGcmSys] SetFlipMode(mode=%u)\n", mode);
+-    s_flip_mode = mode;
++    __atomic_store_n(&s_flip_mode[0], mode, __ATOMIC_RELEASE);
+ }
+ 
+ /* NID: 0xC44D8F34 */
+@@ -766,7 +790,7 @@
  #ifdef _WIN32
      __declspec(dllimport) void __stdcall Sleep(unsigned long);
  #endif  /* elsewhere: runtime/platform/win32_compat.h */
@@ -3188,7 +3256,7 @@
          Sleep(1);
      /* A flip still WAITING after the bound is left to the tick. Forcing DONE
       * here skipped its completion: the tick only completes WAITING flips, so
-@@ -796,6 +817,9 @@
+@@ -796,6 +820,9 @@
  /* NID: 0xE315A0B2 */
  u32 cellGcmGetFlipStatus(void)
  {
@@ -3198,7 +3266,7 @@
      /* Avoid host-calling the guest OPDs directly (they're not valid host
       * function pointers). Use cellGcmTickVBlank() / TickFlip() instead,
       * which dispatch via g_ps3_guest_caller — see below. */
-@@ -807,8 +831,8 @@
+@@ -807,8 +834,8 @@
        static int fd = -1; if (fd < 0) fd = getenv("FLIP_DBG") ? 1 : 0;
        if (fd && PS3_LOG_FIRST(n, 24))
            fprintf(stderr, "[FLIP] GetFlipStatus -> %u (0=DONE 1=WAITING)%c",
@@ -3209,7 +3277,7 @@
  }
  
  /* Host-side ticks. The game's host driver (e.g. flow main.cpp) calls
-@@ -990,8 +1014,12 @@
+@@ -990,8 +1017,12 @@
           * the flip handler, and hung with get == put on exactly that. Leave
           * the newer flip WAITING for the next tick. */
          FLIP_LOCK();
@@ -3223,7 +3291,7 @@
          FLIP_UNLOCK();
          if (s_flip_handler_opd && g_ps3_guest_caller) {
              ydkj_restore_handler_opd(s_flip_handler_opd, s_flip_handler_code);
-@@ -1669,6 +1697,14 @@
+@@ -1669,6 +1700,14 @@
   * and halved the frame rate). Call AFTER draining. */
  int cellGcm_take_flip_pending_synced(void)
  {
@@ -3238,7 +3306,16 @@
      if (!s_flip_pending) return 0;
      u32 put = vm_read32(GCM_CONTROL_GUEST_ADDR + 0);
      u32 get = vm_read32(GCM_CONTROL_GUEST_ADDR + 4);
-@@ -2230,6 +2266,40 @@
+@@ -1887,7 +1926,7 @@
+                 if (m == 0x64u) s_sema_offset = v;
+                 else if (m == 0x6Cu) {
+                     atomic_thread_fence(memory_order_release);
+-                    vm_write32(GCM_LABEL_GUEST_BASE + (s_sema_offset & 0xFFFFu), v);
++                    vm_write32(cellGcm_semaphore_address(s_sema_offset), v);
+                     labels++;
+                 } else if (m == 0x01A4u || m == 0x1D6Cu || m == 0x1D70u || m == 0x1D74u) {
+                     rsx_process_method(&s_resync_state, m, v);
+@@ -2230,6 +2269,41 @@
  static void gcm_3d_method(rsx_state* st, u32 m, u32 v, int legacy_state_live)
  {
      extern u32 g_rsx_last_reference;
@@ -3250,7 +3327,8 @@
 +        rsx_backend* backend = rsx_get_backend();
 +        const u32 offset = v & 0xFFFFFFu;
 +        const int main = s_report_dma == 0xFEED0001u || s_report_dma == 0xBAD68000u;
-+        const u32 address = m == 0x1800 && main ? gcm_io2ea(offset) : 0;
++        const u32 address = m == 0x1800 ? (main ? gcm_io2ea(offset) :
++            s_kernel_report_base ? s_kernel_report_base + offset : 0) : 0;
 +        const int valid = m != 0x1800 ||
 +            ((v >> 24) == 1 && !(offset & 15) && (main ? address && ps3_native_guest_range_backed(address, 16) :
 +                (s_report_dma == 0xFEED0000u || s_report_dma == 0x66626660u) && offset / 16 < 2048));
@@ -3260,7 +3338,7 @@
 +            fflush(stderr); ps3_native_stop();
 +        }
 +        if (m == 0x1800) {
-+            if (main) {
++            if (main || s_kernel_report_base) {
 +                u8 payload[16] = {0};
 +                for (u32 i = 0; i < 8; ++i) payload[i] = (u8)(timestamp >> (56 - i * 8));
 +                for (u32 i = 0; i < 4; ++i) payload[8 + i] = (u8)(value >> (24 - i * 8));
@@ -3279,7 +3357,7 @@
      /* #466: rsx_state feeds only the legacy vtable backend. With the draw
       * engine up and no vtable registered, the state it builds is never read,
       * so only the methods with effects outside it are worth handing over.
-@@ -2248,6 +2318,7 @@
+@@ -2248,6 +2322,7 @@
       * tells the title every queried object is occluded. */
      if (m == 0x1A8) s_report_dma = v;
      if (m == 0x1800) {
@@ -3287,7 +3365,7 @@
          const u32 off = v & 0xFFFFFFu, idx = off / 16u;
          const u32 val = (v >> 24) == 1u ? 0xFFFFu : 0u;
          const u64 ts = gcm_report_timestamp();
-@@ -2266,6 +2337,7 @@
+@@ -2266,6 +2341,7 @@
              s_report_data[idx].timestamp = ts;
              s_report_data[idx].value = val;
          }
@@ -3295,7 +3373,7 @@
      }
  }
  
-@@ -2315,6 +2387,10 @@
+@@ -2315,6 +2391,10 @@
   * RSX-thread profiles, so each is read once and cached, like the other knobs. */
  static void gcm_rsx_process_fifo_unlocked(void)
  {
@@ -3306,7 +3384,7 @@
      { static unsigned _n = 0; static unsigned long long _t0 = 0;
        extern unsigned long long ps3_ms_now(void);
        _n++;
-@@ -2547,7 +2623,32 @@
+@@ -2547,7 +2627,32 @@
          if (park_off && (s_fifo_getoff != park_off || !is_jump || jump_tgt != park_off))
              park_off = 0;
  
@@ -3339,7 +3417,7 @@
              /* lv1 driver flip: statically-linked libgcm cellGcmSetFlip writes
               * this word into the FIFO instead of calling any import. Fire the
               * flip (status/count/handler) and STOP this drain so the ticker's
-@@ -2596,6 +2697,9 @@
+@@ -2596,6 +2701,9 @@
               * 3 MB ring at boot, wraps, and a walker stopping at every flip
               * then crawled ~1 KB a tick while the title wrote over the
               * commands ahead of it. */
@@ -3349,7 +3427,41 @@
              if (gcm_fifo_backlog(put, s_fifo_getoff) < GCM_FIFO_CATCHUP_BYTES)
                  { why = "flip"; break; }
              continue;
-@@ -3550,29 +3654,53 @@
+@@ -2722,7 +2830,7 @@
+                     if (!dea) break;
+                     u32 m = (type == 0) ? method + i * 4 : method;
+                     u32 v = vm_read32(dea);
+-                    u32 la = GCM_LABEL_GUEST_BASE + (s_sema_offset & 0xFFFFu);
++                    u32 la = cellGcm_semaphore_address(s_sema_offset);
+                     { static int sn = 0, recdbg = -1; if (recdbg < 0) recdbg = getenv("GCM_RECDBG") ? 1 : 0;
+                       if (recdbg && PS3_LOG_FIRST(sn, 12))
+                         fprintf(stderr, "[SEMA] m=0x%02X v=0x%08X off=0x%X\n", m, v, s_sema_offset); }
+@@ -2755,8 +2863,12 @@
+              * ever writes would wedge the drain permanently, and RELEASE on
+              * its own is the half that unblocks a waiting guest. */
+             static int blk = -1; static unsigned blk_ms;
++#ifdef PS3_NATIVE_STRICT
++            blk = 1; blk_ms = 0;
++#else
+             if (blk < 0) { const char* e = getenv("GCM_SEMA_ACQUIRE"); blk = e ? atoi(e) : 0;
+                            const char* t = getenv("GCM_SEMA_ACQUIRE_MS"); blk_ms = t ? (unsigned)atoi(t) : 0; }
++#endif
+             if (blk) {
+                 /* GCM_SEMA_ACQUIRE_MS=<ms>: a bounded wait. The hardware waits
+                  * for ever; an emulated producer that never comes (a boot-time
+@@ -3330,6 +3442,11 @@
+     if (bufferId >= CELL_GCM_MAX_DISPLAY_BUFFER_NUM)
+         return CELL_GCM_ERROR_INVALID_VALUE;
+ 
++#ifdef PS3_NATIVE_STRICT
++    if (!width || !height || (pitch & 3) || width > pitch / 4 ||
++        (u64)offset + (u64)(height - 1) * pitch + (u64)width * 4 > s_config.localSize)
++        return CELL_GCM_ERROR_INVALID_VALUE;
++#endif
+     s_display_buffers[bufferId].offset = offset;
+     s_display_buffers[bufferId].pitch  = pitch;
+     s_display_buffers[bufferId].width  = width;
+@@ -3550,29 +3667,53 @@
  /* NID: 0xA2478CA3 */
  s32 cellGcmSetPrepareFlip(void* ctx, u32 bufferId)
  {
@@ -3426,7 +3538,7 @@
  }
  
  /* NID: 0x1BFAB6EE */
-@@ -3717,6 +3845,9 @@
+@@ -3717,6 +3858,9 @@
          return CELL_OK;
      }
  
@@ -3436,7 +3548,7 @@
      /* Auto-map unmapped main memory. On real hardware PSL1GHT pre-maps its
       * whole RSX heap in gcmInitBody, so its libraries never call MapMainMemory
       * before handing an EA to the RSX (Tiny3D's command ring lives in an
-@@ -4114,12 +4245,16 @@
+@@ -4114,12 +4258,16 @@
      if (index >= CELL_GCM_MAX_REPORT_COUNT)
          return 0;
  
@@ -3453,7 +3565,7 @@
  }
  
  /* ---------------------------------------------------------------------------
-@@ -4127,11 +4262,13 @@
+@@ -4127,11 +4275,13 @@
   * -----------------------------------------------------------------------*/
  
  /* NID: 0x0B4B62D5 */
@@ -3471,7 +3583,7 @@
  
      if (ps3_log_verbose())
          printf("[cellGcmSys] SetTile(index=%u, loc=%u, offset=0x%X, size=0x%X, pitch=%u)\n",
-@@ -4145,7 +4282,7 @@
+@@ -4145,7 +4295,7 @@
      s_tiles[index].bank   = bank;
      /* SetTile binds too (as it does on RPCS3), so a
       * title that never calls BindTile still has its tiles in force. */
@@ -3480,7 +3592,7 @@
  
      /* Build tile register value (simplified) */
      s_tiles[index].tile  = (location << 0) | (pitch << 8);
-@@ -4153,6 +4290,10 @@
+@@ -4153,6 +4303,10 @@
      gcm_tile_publish(index);
  
      return CELL_OK;
@@ -3491,7 +3603,7 @@
  }
  
  /* NID: 0x06EDEA25 */
-@@ -4311,7 +4452,7 @@
+@@ -4311,7 +4465,7 @@
                         u32 pitch, u8 comp, u16 base, u8 bank)
  {
      /* Delegates to existing SetTile */
@@ -3500,7 +3612,16 @@
  }
  
  /* Default FIFO size — configures command buffer size before init */
-@@ -4591,7 +4732,20 @@
+@@ -4407,7 +4561,7 @@
+     printf("[cellGcmSys] Terminate\n");
+ 
+     s_gcm_initialized = 0;
+-    s_flip_mode   = CELL_GCM_DISPLAY_VSYNC;
++    s_flip_mode[0] = s_flip_mode[1] = CELL_GCM_DISPLAY_VSYNC;
+     s_flip_status = CELL_GCM_FLIP_STATUS_DONE;
+     s_debug_level = CELL_GCM_DEBUG_LEVEL0;
+     s_vblank_count = 0;
+@@ -4591,7 +4745,20 @@
  s32 cellGcmSetFlipImmediate(u32 bufferId)
  {
      printf("[cellGcmSys] SetFlipImmediate(bufferId=%u)\n", bufferId);
@@ -3521,6 +3642,123 @@
  }
  
  /* Set flip status directly */
+@@ -4750,7 +4917,7 @@
+ u32 cellGcm_syscall_bringup(u32 local_size)
+ {
+     if (!s_gcm_initialized)
+-        cellGcmInit(0x10000, 0, 0);
++        if (cellGcmInit(0x10000, 0, 0) != CELL_OK) return 0;
+     if (local_size)
+         s_config.localSize = local_size;
+     s_gcm_syscall_mode = 1;
+@@ -4762,12 +4929,49 @@
+  * `lwz r3,0x18(r9)` / `addi r3,r3,64`), so the syscall returns this minus 0x40
+  * and the driver's own flushes land exactly where the walker reads. */
+ u32 cellGcm_control_guest_addr(void) { return GCM_CONTROL_GUEST_ADDR; }
++u32 cellGcm_syscall_sync_mode(u32 head) { return __atomic_load_n(&s_flip_mode[head], __ATOMIC_ACQUIRE); }
++void cellGcm_syscall_set_sync_mode(u32 head, u32 mode) { __atomic_store_n(&s_flip_mode[head], mode, __ATOMIC_RELEASE); }
++int cellGcm_syscall_bind_context(u32 control, u32 reports)
++{
++    if (!control || !reports || s_kernel_control) return 0;
++    s_kernel_control = control;
++    s_kernel_label_base = reports;
++    s_kernel_report_base = reports + 0x1400u;
++    return 1;
++}
++u32 cellGcm_semaphore_address(u32 offset)
++{
++#ifdef PS3_NATIVE_STRICT
++    if (s_kernel_label_base && (offset > 0xFFCu || (offset & 3))) {
++        extern void ps3_native_stop(void);
++        fprintf(stderr, "[native-blocked] RSX semaphore offset exceeds context storage\n");
++        fflush(stderr); ps3_native_stop();
++    }
++#endif
++    return GCM_LABEL_GUEST_BASE + (offset & 0xFFFFFFu);
++}
+ 
+ /* sys_rsx_context_iomap / iounmap: the same 1MB-page offset table
+  * cellGcmMapEaIoAddress fills, which is what gcm_io2ea() and every offset
+  * resolution read. */
+ void cellGcm_syscall_iomap(u32 ea, u32 io, u32 size)
+ {
++#ifdef PS3_NATIVE_STRICT
++    extern void ps3_native_stop(void);
++    AcquireSRWLockExclusive(&s_gcm_fifo_lock);
++    for (int i = 0; i < CELL_GCM_MAX_IO_MAPPINGS; ++i) {
++        const IoMapping* old = &s_io_mappings[i];
++        if (old->active && (((u64)io < (u64)old->io + old->size && (u64)old->io < (u64)io + size) ||
++            ((u64)ea < (u64)old->ea + old->size && (u64)old->ea < (u64)ea + size))) {
++            fprintf(stderr, "[native-blocked] overlapping RSX IO mappings require ordered remap support\n");
++            fflush(stderr); ps3_native_stop();
++        }
++    }
++    if (!find_free_mapping()) {
++        fprintf(stderr, "[native-blocked] RSX IO mapping table capacity exhausted\n");
++        fflush(stderr); ps3_native_stop();
++    }
++#endif
+     populate_offset_table(ea, io, size);
+     /* A free slot, not s_io_mappings[count]: an unmap leaves a hole, and the
+      * count then indexes a live slot. */
+@@ -4777,6 +4981,9 @@
+         s_io_mapping_count++;
+     }
+     if (!s_config.ioSize) { s_config.ioAddress = ea; s_config.ioSize = size; }
++#ifdef PS3_NATIVE_STRICT
++    ReleaseSRWLockExclusive(&s_gcm_fifo_lock);
++#endif
+ }
+ 
+ void cellGcm_syscall_iounmap(u32 io, u32 size)
+@@ -4790,10 +4997,46 @@
+ /* sys_rsx_context_attribute(0x001): the driver's explicit FIFO reset. Move the
+  * walker with it -- leaving s_fifo_getoff where it was makes the next drain walk
+  * from a stale offset through whatever the driver has since overwritten. */
++#ifdef PS3_NATIVE_STRICT
++static void gcm_syscall_require_idle(void)
++{
++    extern void ps3_native_stop(void);
++    rsx_backend* backend = rsx_get_backend();
++    if (s_fifo_getoff != vm_read32(GCM_CONTROL_GUEST_ADDR) ||
++        (backend && (!backend->submit || !backend->submit(backend->userdata)))) {
++        fprintf(stderr, "[native-blocked] RSX context change would discard uncompleted commands\n");
++        fflush(stderr); ps3_native_stop();
++    }
++}
++int cellGcm_syscall_tile(u32 index, u32 location, u32 offset, u32 size, u32 pitch, u32 base, u32 bank, int bound)
++{
++    if (bound) {
++        const u32 limit = location ? 0x10000000u : s_config.localSize;
++        if (!size || !pitch || cellGcmGetTiledPitchSize(pitch) != pitch || (u64)offset + size > limit) return CELL_EINVAL;
++        if (location) {
++            for (u32 page = offset & ~0xFFFFFu; (u64)page < (u64)offset + size; page += 0x100000)
++                if (!gcm_io2ea(page)) return CELL_EINVAL;
++        }
++    }
++    AcquireSRWLockExclusive(&s_gcm_fifo_lock);
++    gcm_syscall_require_idle();
++    s32 result = bound ? gcm_set_tile((u8)index, (u8)location, offset, size, pitch, 0, (u16)base, (u8)bank, 1)
++                       : cellGcmUnbindTile((u8)index);
++    ReleaseSRWLockExclusive(&s_gcm_fifo_lock);
++    return result;
++}
++#endif
+ void cellGcm_syscall_set_fifo(u32 put, u32 get)
+ {
++#ifdef PS3_NATIVE_STRICT
++    AcquireSRWLockExclusive(&s_gcm_fifo_lock);
++    gcm_syscall_require_idle();
++#endif
+     vm_write32(GCM_CONTROL_GUEST_ADDR + 0, put);
+     vm_write32(GCM_CONTROL_GUEST_ADDR + 4, get);
+     s_fifo_getoff  = get;
+     s_fifo_calloff = 0;
+-}
++#ifdef PS3_NATIVE_STRICT
++    ReleaseSRWLockExclusive(&s_gcm_fifo_lock);
++#endif
++}
 --- a/libs/system/sysPrxForUser.c
 +++ b/libs/system/sysPrxForUser.c
 @@ -7,6 +7,7 @@
@@ -3577,7 +3815,15 @@
  }
  
  s32 sys_process_get_number_of_object(u32 object_type, u32* count)
-@@ -380,15 +411,25 @@
+@@ -373,6 +404,7 @@
+ 
+ s32 _sys_strncmp(const char* s1, const char* s2, u32 size)
+ {
++    if (!size) return 0;
+     const char* a = (const char*)yz_g2h(s1); const char* b = (const char*)yz_g2h(s2);
+     if (!a || !b) return -1;
+     return strncmp(a, b, size);
+@@ -380,15 +412,25 @@
  
  void* _sys_memset(void* dst, s32 val, u32 size)
  {
@@ -3603,7 +3849,7 @@
      return dst;
  }
  
-@@ -455,44 +496,33 @@
+@@ -455,44 +497,33 @@
      return CELL_EAGAIN;
  }
  
@@ -3672,7 +3918,7 @@
  }
  
  s32 sys_lwmutex_create(sys_lwmutex_t_hle* lwmutex, const sys_lwmutex_attribute_t* attr)
-@@ -867,6 +897,14 @@
+@@ -867,6 +898,14 @@
  static u32 s_heap_bump = 0;
  static u32 s_heap_bin[YZ_BINS];          /* guest EA of each free list head */
  
@@ -3687,7 +3933,7 @@
  static u32 yz_bin_for(u32 need)
  {
      u32 b = 4;                            /* 16 bytes minimum */
-@@ -877,6 +915,7 @@
+@@ -877,6 +916,7 @@
  static u32 yz_heap_alloc(u32 size, u32 align)
  {
      if (align < 16) align = 16;
@@ -3695,7 +3941,7 @@
      /* Anything larger than the window can never fit, and letting it through
       * wrapped `need` (size + align + 16 in 32 bits) to a tiny bin: a block far
       * smaller than the caller asked for. */
-@@ -896,6 +935,7 @@
+@@ -896,6 +936,7 @@
           * YZ_HEAP_END and hand out an address outside the window. */
          if ((1u << b) > YZ_HEAP_END - s_heap_bump) { slot_unlock(); return 0; }
          raw = s_heap_bump;
@@ -3703,6 +3949,32 @@
          s_heap_bump += (1u << b);
      }
      slot_unlock();
+@@ -1163,8 +1204,24 @@
+ 
+ s32 sys_process_get_paramsfo(void* buf)
+ {
++#ifdef PS3_NATIVE_STRICT
++    extern const char* cellGame_get_title_id(void);
++    extern void ppu_write_coherent(u32, const void*, u32);
++    extern int ps3_native_guest_range_backed(u32, u32);
++    const uintptr_t address = (uintptr_t)buf;
++    if (address > UINT32_MAX || !ps3_native_guest_range_backed((u32)address, 64)) return CELL_EFAULT;
++    const char* title = cellGame_get_title_id();
++    if (!title || strlen(title) != 9) return CELL_ENOENT;
++    for (unsigned i = 0; i < 9; ++i)
++        if (!(title[i] >= 'A' && title[i] <= 'Z') && !(title[i] >= '0' && title[i] <= '9')) return CELL_ENOENT;
++    u8 data[64] = {0};
++    memcpy(data + 1, title, 9);
++    ppu_write_coherent((u32)address, data, sizeof(data));
++    return CELL_OK;
++#else
+     /* PARAM.SFO data — return a minimal valid SFO with title ID */
+     if (!buf) return CELL_EFAULT;
+     memset(yz_g2h(buf), 0, 256);
+     return CELL_OK;
+-}
++#endif
++}
 --- a/libs/video/cellVideoOut.c
 +++ b/libs/video/cellVideoOut.c
 @@ -84,6 +84,8 @@
@@ -5061,17 +5333,54 @@
      /* EVT_PUSHLOG=<qid>: log every push to that queue with the host caller, to
       * find which producer feeds a queue when nothing logs a port_send. */
      { static int s_q = -1; if (s_q < 0) { const char* e = getenv("EVT_PUSHLOG"); s_q = e ? atoi(e) : 0; }
-@@ -909,6 +916,9 @@
-     int32_t  port_type   = LV2_ARG_S32(ctx, 1);
-     uint64_t name        = LV2_ARG_U64(ctx, 2);
+@@ -903,11 +910,9 @@
+     return event_queue_push(q, &evt);
+ }
  
-+    if (!id_out_addr || id_out_addr > UINT32_MAX - 3) return (int64_t)(int32_t)CELL_EFAULT;
-+    if (port_type != SYS_EVENT_PORT_LOCAL && port_type != 2) return (int64_t)(int32_t)CELL_EINVAL;
-+
+-int64_t sys_event_port_create(ppu_context* ctx)
+-{
+-    uint32_t id_out_addr = LV2_ARG_PTR(ctx, 0);
+-    int32_t  port_type   = LV2_ARG_S32(ctx, 1);
+-    uint64_t name        = LV2_ARG_U64(ctx, 2);
++uint32_t sys_event_port_create_direct(int32_t port_type, uint64_t name)
++{
++    if (port_type != SYS_EVENT_PORT_LOCAL && port_type != 2) return 0;
+ 
      evt_table_lock();
  
-     int slot = -1;
-@@ -985,6 +995,11 @@
+@@ -917,7 +922,7 @@
+     }
+     if (slot < 0) {
+         evt_table_unlock();
+-        return (int64_t)(int32_t)CELL_EAGAIN;
++        return 0;
+     }
+ 
+     sys_event_port_info* p = &g_sys_event_ports[slot];
+@@ -930,11 +935,18 @@
+     uint32_t port_id = (uint32_t)(slot + 1);
+     fprintf(stderr, "[evt] port_create -> id=%u type=%d name=0x%llX\n",
+             port_id, (int)port_type, (unsigned long long)name);
+-    if (id_out_addr != 0) {
+-        write_be32(id_out_addr, port_id);
+-    }
+-
+     evt_table_unlock();
++    return port_id;
++}
++int64_t sys_event_port_create(ppu_context* ctx)
++{
++    const uint32_t out = LV2_ARG_PTR(ctx, 0);
++    const int32_t type = LV2_ARG_S32(ctx, 1);
++    if (!out || out > UINT32_MAX - 3) return (int64_t)(int32_t)CELL_EFAULT;
++    if (type != SYS_EVENT_PORT_LOCAL && type != 2) return (int64_t)(int32_t)CELL_EINVAL;
++    const uint32_t id = sys_event_port_create_direct(type, LV2_ARG_U64(ctx, 2));
++    if (!id) return (int64_t)(int32_t)CELL_EAGAIN;
++    write_be32(out, id);
+     return CELL_OK;
+ }
+ 
+@@ -985,6 +997,11 @@
      if (p->connected_queue != 0) {
          evt_table_unlock();
          return (int64_t)(int32_t)CELL_EISCONN;
@@ -5083,7 +5392,7 @@
      }
  
      p->connected_queue = (int32_t)queue_id;
-@@ -1060,6 +1075,25 @@
+@@ -1060,6 +1077,25 @@
  
  int64_t sys_event_port_send(ppu_context* ctx)
  {
@@ -5109,7 +5418,7 @@
      uint32_t port_id = LV2_ARG_U32(ctx, 0);
      uint64_t data1   = LV2_ARG_U64(ctx, 1);
      uint64_t data2   = LV2_ARG_U64(ctx, 2);
-@@ -1148,6 +1182,7 @@
+@@ -1148,6 +1184,7 @@
      }
  
      return CELL_OK;
@@ -5117,7 +5426,7 @@
  }
  
  /* =========================================================================
-@@ -1646,12 +1681,6 @@
+@@ -1646,12 +1683,6 @@
      memset(g_sys_event_ports,  0, sizeof(g_sys_event_ports));
      memset(g_sys_event_flags,  0, sizeof(g_sys_event_flags));
  
@@ -6430,7 +6739,46 @@
      print(f"Wrote {args.out} ({len(elf)} bytes, "
 --- a/libs/video/rsx_commands.c
 +++ b/libs/video/rsx_commands.c
-@@ -653,7 +653,10 @@
+@@ -523,6 +523,15 @@
+           s_sem_ctx = data;
+       }
+       if (method == 0x1D6C) { s_sem_off = data; return 0; }
++#ifdef PS3_NATIVE_STRICT
++      if (method == 0x1D70 || method == 0x1D74) {
++        if (!s_backend || !s_backend->submit || !s_backend->submit(s_backend->userdata)) {
++            extern void ps3_native_stop(void);
++            fprintf(stderr, "[native-blocked] RSX backend semaphore requires verified GPU completion\n");
++            fflush(stderr); ps3_native_stop();
++        }
++      }
++#endif
+       if ((method == 0x1D70 || method == 0x1D74) && s_sem_ctx == 0xFEED0001u) {
+         extern void vm_write32(uint32_t a, uint32_t v);
+         extern u32 gcm_io_offset_to_ea(u32 io);
+@@ -542,17 +551,19 @@
+          * 0x00010000 != 1 and spun forever (gcm/cube sample hang after init).
+          * Apply the same swap the hardware does so the pre-swap cancels out. */
+         u32 val = (data & 0xff00ff00u) | ((data >> 16) & 0xffu) | ((data & 0xffu) << 16);
+-        vm_write32(VM_HLE_INJECT_BASE + (s_sem_off & 0x00FFFFFFu), val);
++        extern u32 cellGcm_semaphore_address(u32);
++        vm_write32(cellGcm_semaphore_address(s_sem_off), val);
+         { static u32 seen[64]; static int ns = 0; int k = 0;   /* TEMP: distinct release offsets */
+           for (; k < ns; k++) if (seen[k] == s_sem_off) break;
+           if (k == ns && ns < 64) { seen[ns++] = s_sem_off;
+               fprintf(stderr, "[RSX] first back-end release @off 0x%X val 0x%08X\n", s_sem_off, val); } }
+-        { static int _l=0; if(PS3_LOG_FIRST(_l, 8)) fprintf(stderr,"[RSX] label write @0x%08X = 0x%08X (sync fence, raw 0x%08X)\n", VM_HLE_INJECT_BASE+(s_sem_off&0xFFFFFF), val, data); }
++        { static int _l=0; if(PS3_LOG_FIRST(_l, 8)) fprintf(stderr,"[RSX] label write @0x%08X = 0x%08X (sync fence, raw 0x%08X)\n", cellGcm_semaphore_address(s_sem_off), val, data); }
+         return 0;
+       }
+       if (method == 0x1D74) {
+         extern void vm_write32(uint32_t a, uint32_t v);
+-        vm_write32(VM_HLE_INJECT_BASE + (s_sem_off & 0x00FFFFFFu), data);
++        extern u32 cellGcm_semaphore_address(u32);
++        vm_write32(cellGcm_semaphore_address(s_sem_off), data);
+         return 0;
+       } }
+     if ((method >= 0x200 && method <= 0x23C) ||
+@@ -653,7 +664,10 @@
                if (!_first) fprintf(stderr, "[RSX] CLEAR_SURFACE new mask=0x%X color=0x%08X\n",
                                     data, state->color_clear_value); } }
          if (s_backend && s_backend->clear) {
@@ -6654,23 +7002,26 @@
  
      /* Build in a local host struct, then copy to guest memory big-endian. */
      CellPadInfo2 _in; CellPadInfo2* info = &_in;
-@@ -1276,17 +1344,23 @@
+@@ -1275,18 +1343,24 @@
+     info->max_connect = s_max_connect;
  
      u32 connected = 0;
-     for (u32 i = 0; i < s_max_connect && i < PAD_MAX_HOST_PORTS; i++) {
+-    for (u32 i = 0; i < s_max_connect && i < PAD_MAX_HOST_PORTS; i++) {
 -        /* Always present a virtual pad on port 0 (standard emulator behavior) so
 -         * boot flows that block until a controller is connected can proceed even
 -         * with no physical device attached. */
 -        if (s_host_state[i].connected || i == 0) {
++    for (u32 i = 0; i < s_max_connect && i < CELL_PAD_MAX_PORT_NUM; i++) {
++        info->port_setting[i] = s_port_setting[i];
 +        /* Native execution reports the measured host state; the unverified
 +         * legacy path retains its implicit virtual port. */
-+        if (s_host_state[i].connected
++        if ((i < PAD_MAX_HOST_PORTS && s_host_state[i].connected)
 +#ifndef PS3_NATIVE_STRICT
 +            || i == 0
 +#endif
 +            ) {
              info->port_status[i]       = CELL_PAD_STATUS_CONNECTED | pad_status_take(i);
-             info->port_setting[i]      = s_port_setting[i];
+-            info->port_setting[i]      = s_port_setting[i];
 +            info->device_capability[i] = s_host_state[i].capabilities;
 +#ifndef PS3_NATIVE_STRICT
              info->device_capability[i] = CELL_PAD_CAPABILITY_PS3_CONFORMITY
@@ -6690,6 +7041,31 @@
  
      /* copy to guest big-endian (CellPadInfo2 is all u32 fields) */
      {
+@@ -1368,13 +1443,17 @@
+     printf("[cellPad] SetPortSetting(port=%u, setting=0x%X)\n",
+            port_no, port_setting);
+ 
+-    if (!s_pad_initialized)
+-        return CELL_PAD_ERROR_NOT_OPENED;
+-
+-    if (port_no >= CELL_PAD_MAX_PORT_NUM)
+-        return CELL_PAD_ERROR_INVALID_PARAMETER;
+-
+-    s_port_setting[port_no] = port_setting;
++    pad_lock();
++    if (!s_pad_initialized) {
++        pad_unlock(); return CELL_PAD_ERROR_NOT_OPENED;
++    }
++
++    if (port_no >= CELL_PAD_MAX_PORT_NUM) {
++        pad_unlock(); return CELL_PAD_ERROR_INVALID_PARAMETER;
++    }
++
++    s_port_setting[port_no] = port_setting & (CELL_PAD_SETTING_PRESS_ON | CELL_PAD_SETTING_SENSOR_ON);
++    pad_unlock();
+     return CELL_OK;
+ }
+ 
 --- a/runtime/spu/spu_dispatch_mt.c
 +++ b/runtime/spu/spu_dispatch_mt.c
 @@ -23,6 +23,9 @@
@@ -8027,3 +8403,382 @@
  #define SCE_NP_TROPHY_ERROR_INVALID_ARGUMENT        0x80551603
  #define SCE_NP_TROPHY_ERROR_OUT_OF_MEMORY           0x80551604
  #define SCE_NP_TROPHY_ERROR_INVALID_CONTEXT         0x80551605
+--- a/runtime/memory/vm.h
++++ b/runtime/memory/vm.h
+@@ -67,6 +67,11 @@
+ #define VM_AUDIO_BASE       0x58000000u
+ #define VM_AUDIO_PORT_SIZE  0x00200000u
+ #define VM_AUDIO_SIZE       0x01000000u
++/* Kernel-owned RSX device mapping; returned as an opaque guest allocation. */
++#define VM_RSX_DEVICE_BASE  0x59000000u
++#define VM_RSX_DEVICE_SIZE  0x00100000u
++#define VM_RSX_CONTEXT_BASE (VM_RSX_DEVICE_BASE + VM_RSX_DEVICE_SIZE)
++#define VM_RSX_CONTEXT_SIZE 0x00300000u
+ #define VM_SYS_VM_BASE      0x60000000u
+ #define VM_SYS_VM_SIZE      0x10000000u
+ 
+--- a/libs/video/sys_rsx.c
++++ b/libs/video/sys_rsx.c
+@@ -59,8 +59,36 @@
+ #include <stdio.h>
+ #include <stdlib.h>
+ #include <string.h>
++#ifdef PS3_NATIVE_STRICT
++_Noreturn void ps3_native_stop(void);
++#endif
+ 
+ #include "../../runtime/syscalls/sys_event.h"
++
++static int s_device_mapped;
++static u32 s_local_address, s_local_bytes, s_local_handle;
++static u32 s_context_id;
++static int s_context_ready;
++#ifdef _WIN32
++static SRWLOCK s_device_lock = SRWLOCK_INIT;
++static void device_lock(void) { AcquireSRWLockExclusive(&s_device_lock); }
++static void device_unlock(void) { ReleaseSRWLockExclusive(&s_device_lock); }
++#else
++#include <pthread.h>
++static pthread_mutex_t s_device_lock = PTHREAD_MUTEX_INITIALIZER;
++static void device_lock(void) { pthread_mutex_lock(&s_device_lock); }
++static void device_unlock(void) { pthread_mutex_unlock(&s_device_lock); }
++#endif
++int sys_rsx_guest_range_backed(u32 address, u32 size)
++{
++    if (!size) return 0;
++    const u32 local_size = __atomic_load_n(&s_local_bytes, __ATOMIC_ACQUIRE);
++    return (__atomic_load_n(&s_device_mapped, __ATOMIC_ACQUIRE) &&
++        address >= VM_RSX_DEVICE_BASE && (u64)address + size <= (u64)VM_RSX_DEVICE_BASE + VM_RSX_DEVICE_SIZE) ||
++        (__atomic_load_n(&s_context_ready, __ATOMIC_ACQUIRE) && address >= VM_RSX_CONTEXT_BASE &&
++            (u64)address + size <= (u64)VM_RSX_CONTEXT_BASE + VM_RSX_CONTEXT_SIZE) ||
++        (local_size && address >= s_local_address && (u64)address + size <= (u64)s_local_address + local_size);
++}
+ 
+ /* RsxDriverInfo fields libgcm's interrupt thread depends on. Offsets confirmed
+  * against RPCS3's struct RsxDriverInfo (Emu/Cell/lv2/sys_rsx.h).
+@@ -121,8 +149,13 @@
+  * it with a 24-bit offset), so +0x30000 onward is ours.
+  * -----------------------------------------------------------------------*/
+ #define RSX_DEVICE_EA       (VM_HLE_INJECT_BASE + 0x30000u)   /* dev_id 8 page */
++#ifdef PS3_NATIVE_STRICT
++#define RSX_DRIVER_INFO_EA  (VM_RSX_CONTEXT_BASE + 0x100000u)
++#define RSX_REPORTS_EA      (VM_RSX_CONTEXT_BASE + 0x200000u)
++#else
+ #define RSX_DRIVER_INFO_EA  (VM_HLE_INJECT_BASE + 0x31000u)   /* RsxDriverInfo  */
+ #define RSX_REPORTS_EA      (VM_HLE_INJECT_BASE + 0x38000u)   /* report/label   */
++#endif
+ #define RSX_DRIVER_INFO_SZ  0x7000u
+ #define RSX_REPORTS_SZ      0x8000u
+ 
+@@ -185,6 +218,7 @@
+  * -----------------------------------------------------------------------*/
+ 
+ static uint32_t s_isr_qid = 0;
++static uint32_t s_isr_port;
+ 
+ /* Push one RSX event, filtered by the handler mask gcm publishes at +0x12C0,
+  * exactly as rsx::thread::send_event does. Sending an unmasked event is not
+@@ -196,7 +230,16 @@
+     uint32_t mask = vm_read32(RSX_DRIVER_INFO_EA + RSX_DI_HANDLERS);
+     flags &= (uint64_t)mask;
+     if (!flags) return;
++#ifdef PS3_NATIVE_STRICT
++    ppu_context event = {0};
++    event.gpr[3] = s_isr_port; event.gpr[5] = flags;
++    if (sys_event_port_send(&event) != CELL_OK) {
++        fprintf(stderr, "[native-blocked] RSX interrupt could not enter its event queue\n");
++        fflush(stderr); ps3_native_stop();
++    }
++#else
+     sys_event_queue_push_by_id(s_isr_qid, 0, 0, flags, 0);
++#endif
+ }
+ 
+ /* The RSX raises this when the FIFO executes GCM_SET_USER_COMMAND (method
+@@ -252,6 +295,34 @@
+  * take it from there rather than inventing a second one. */
+ static int64_t sc_rsx_memory_allocate(ppu_context* ctx)
+ {
++#ifdef PS3_NATIVE_STRICT
++    extern int ps3_native_guest_range_backed(u32, u32);
++    if (ctx->gpr[3] > UINT32_MAX || ctx->gpr[4] > UINT32_MAX ||
++        !ps3_native_guest_range_backed((u32)ctx->gpr[3], 4) ||
++        !ps3_native_guest_range_backed((u32)ctx->gpr[4], 8)) return CELL_EFAULT;
++    const u64 size = ctx->gpr[5];
++    if (!size || ctx->gpr[6] != 0x80000 || ctx->gpr[7] != 0x300000 || ctx->gpr[8] != 15 || ctx->gpr[9] != 8) {
++        fprintf(stderr, "[native-blocked] RSX memory query or allocation attributes require audit\n");
++        fflush(stderr); ps3_native_stop();
++    }
++    if ((size & 0xFFFFFu) || size > 0x10000000u) return -17; /* LV1_ILLEGAL_PARAMETER_VALUE */
++    const u32 handle_ea = (u32)ctx->gpr[3], address_ea = (u32)ctx->gpr[4];
++    if ((u64)handle_ea < (u64)address_ea + 8 && (u64)address_ea < (u64)handle_ea + 4) return CELL_EFAULT;
++    device_lock();
++    if (__atomic_load_n(&s_local_bytes, __ATOMIC_ACQUIRE)) { device_unlock(); return CELL_ENOMEM; }
++    const u32 local = cellGcm_syscall_bringup((u32)size);
++    if (!local || (u64)local + size > 0x100000000ull || vm_commit(local, (u32)size) != CELL_OK) {
++        device_unlock(); return CELL_ENOMEM;
++    }
++    memset(vm_base + local, 0, (size_t)size);
++    s_local_address = local;
++    s_local_handle = 1; /* One live local-memory object, identified by its table slot. */
++    __atomic_store_n(&s_local_bytes, (u32)size, __ATOMIC_RELEASE);
++    vm_write32(handle_ea, s_local_handle);
++    vm_write64(address_ea, local);
++    device_unlock();
++    return CELL_OK;
++#else
+     u32 h_ea    = (u32)ctx->gpr[3];
+     u32 addr_ea = (u32)ctx->gpr[4];
+     u32 size    = (u32)ctx->gpr[5];
+@@ -267,6 +338,7 @@
+                         "local=0x%08X handle=0x%08X\n",
+                 size, (u32)ctx->gpr[6], local, RSX_MEM_HANDLE);
+     return CELL_OK;
++#endif
+ }
+ 
+ static int64_t sc_rsx_memory_free(ppu_context* ctx) { (void)ctx; return CELL_OK; }
+@@ -276,6 +348,65 @@
+  *                               u64 mem_handle, u64 system_mode) */
+ static int64_t sc_rsx_context_allocate(ppu_context* ctx)
+ {
++#ifdef PS3_NATIVE_STRICT
++    extern int ps3_native_guest_range_backed(u32, u32);
++    extern int cellGcm_syscall_bind_context(u32, u32);
++    const u32 widths[4] = {4, 8, 8, 8};
++    for (unsigned i = 0; i < 4; ++i) {
++        const u64 a = ctx->gpr[3 + i];
++        if (a > UINT32_MAX || !ps3_native_guest_range_backed((u32)a, widths[i])) return CELL_EFAULT;
++        for (unsigned j = 0; j < i; ++j)
++            if (a < ctx->gpr[3 + j] + widths[j] && ctx->gpr[3 + j] < a + widths[i]) return CELL_EFAULT;
++    }
++    /* The original library's default branch requests bit 0x20; local FIFO (0x10) remains unaudited. */
++    if (ctx->gpr[8] != 0 && ctx->gpr[8] != 0x20) {
++        fprintf(stderr, "[native-blocked] RSX context system mode requires audit value=0x%llX\n", (unsigned long long)ctx->gpr[8]);
++        fflush(stderr); ps3_native_stop();
++    }
++    device_lock();
++    if (!s_local_bytes || ctx->gpr[7] != s_local_handle) { device_unlock(); return CELL_EINVAL; }
++    if (s_context_id) {
++        fprintf(stderr, "[native-blocked] multiple RSX contexts require independent backend state\n");
++        fflush(stderr); ps3_native_stop();
++    }
++    if (vm_commit(VM_RSX_CONTEXT_BASE, VM_RSX_CONTEXT_SIZE) != CELL_OK) { device_unlock(); return CELL_ENOMEM; }
++    memset(vm_base + VM_RSX_CONTEXT_BASE, 0, VM_RSX_CONTEXT_SIZE);
++    const u32 port = sys_event_port_create_direct(SYS_EVENT_PORT_LOCAL, 0);
++    const u32 queue = port ? sys_event_queue_create_direct(0, 32) : 0;
++    if (queue) g_sys_event_queues[queue - 1].protocol = 2; /* SYS_SYNC_PRIORITY */
++    ppu_context event = {0}; event.gpr[3] = port; event.gpr[4] = queue;
++    const int connected = queue && sys_event_port_connect_local(&event) == CELL_OK;
++    if (!connected || !cellGcm_syscall_bind_context(VM_RSX_CONTEXT_BASE + 0x40u, RSX_REPORTS_EA)) {
++        if (connected) { event.gpr[3] = port; sys_event_port_disconnect(&event); }
++        if (queue) { event.gpr[3] = queue; event.gpr[4] = 0; sys_event_queue_destroy(&event); }
++        if (port) { event.gpr[3] = port; sys_event_port_destroy(&event); }
++        device_unlock(); return CELL_ENOMEM;
++    }
++    /* Layout and nominal console rates are the original driver interface. */
++    vm_write32(RSX_DRIVER_INFO_EA, RSX_DRIVER_VERSION);
++    vm_write32(RSX_DRIVER_INFO_EA + 4, RSX_GPU_VERSION);
++    vm_write32(RSX_DRIVER_INFO_EA + 8, s_local_bytes);
++    vm_write32(RSX_DRIVER_INFO_EA + 0x10, 500000000u);
++    vm_write32(RSX_DRIVER_INFO_EA + 0x14, 650000000u);
++    vm_write32(RSX_DRIVER_INFO_EA + 0x2C, 0x1000);
++    vm_write32(RSX_DRIVER_INFO_EA + 0x34, 0x1400);
++    vm_write32(RSX_DRIVER_INFO_EA + 0x54, (u32)ctx->gpr[8]);
++    vm_write32(RSX_DRIVER_INFO_EA + RSX_DI_HANDLER_QUEUE, queue);
++    for (u32 i = 0; i < 64; ++i) vm_write64(RSX_REPORTS_EA + 0x1000 + i * 16, UINT64_MAX);
++    for (u32 i = 0; i < 2048; ++i) {
++        vm_write64(RSX_REPORTS_EA + 0x1400 + i * 16, UINT64_MAX);
++        vm_write32(RSX_REPORTS_EA + 0x140C + i * 16, UINT32_MAX);
++    }
++    s_context_id = s_local_handle + 1;
++    s_isr_port = port; s_isr_qid = queue;
++    __atomic_store_n(&s_context_ready, 1, __ATOMIC_RELEASE);
++    vm_write32((u32)ctx->gpr[3], s_context_id);
++    vm_write64((u32)ctx->gpr[4], VM_RSX_CONTEXT_BASE);
++    vm_write64((u32)ctx->gpr[5], RSX_DRIVER_INFO_EA);
++    vm_write64((u32)ctx->gpr[6], RSX_REPORTS_EA);
++    device_unlock();
++    return CELL_OK;
++#else
+     u32 id_ea  = (u32)ctx->gpr[3];
+     u32 dma_ea = (u32)ctx->gpr[4];
+     u32 di_ea  = (u32)ctx->gpr[5];
+@@ -306,6 +437,7 @@
+             RSX_DRIVER_INFO_EA, RSX_REPORTS_EA,
+             (unsigned long long)ctx->gpr[8]);
+     return CELL_OK;
++#endif
+ }
+ 
+ static int64_t sc_rsx_context_free(ppu_context* ctx) { (void)ctx; return CELL_OK; }
+@@ -315,11 +447,26 @@
+  * r30=r28=ea, r29=io, r31=size and passes r4=r29(io), r5=r28(ea), r6=r31. */
+ static int64_t sc_rsx_context_iomap(ppu_context* ctx)
+ {
++#ifdef PS3_NATIVE_STRICT
++    extern int sys_memory_range_backed(u32, u32);
++    const u64 io64 = ctx->gpr[4], ea64 = ctx->gpr[5], bytes = ctx->gpr[6];
++    if (!__atomic_load_n(&s_context_ready, __ATOMIC_ACQUIRE) || ctx->gpr[3] != s_context_id || !bytes ||
++        (io64 & 0xFFFFF) || (ea64 & 0xFFFFF) || (bytes & 0xFFFFF) ||
++        io64 > 0x10000000ull || bytes > 0x10000000ull - io64 ||
++        ea64 > UINT32_MAX || bytes > 0x100000000ull - ea64 ||
++        !sys_memory_range_backed((u32)ea64, (u32)bytes)) return CELL_EINVAL;
++    if (ctx->gpr[7] != 0xE000000000000800ull) {
++        fprintf(stderr, "[native-blocked] RSX IO mapping attributes require audit\n");
++        fflush(stderr); ps3_native_stop();
++    }
++#endif
+     u32 io   = (u32)ctx->gpr[4];
+     u32 ea   = (u32)ctx->gpr[5];
+     u32 size = (u32)ctx->gpr[6];
+ 
++    device_lock();
+     cellGcm_syscall_iomap(ea, io, size);
++    device_unlock();
+     if (rsx_dbg())
+         fprintf(stderr, "[sys_rsx] iomap io=0x%08X <- ea=0x%08X size=0x%X\n",
+                 io, ea, size);
+@@ -336,15 +483,70 @@
+ /* 674: sys_rsx_context_attribute(u32 ctx, u32 packet_id, u64 a3..a6) */
+ static int64_t sc_rsx_context_attribute(ppu_context* ctx)
+ {
++#ifdef PS3_NATIVE_STRICT
++    extern u32 gcm_io_offset_to_ea(u32);
++    if (!__atomic_load_n(&s_context_ready, __ATOMIC_ACQUIRE) || ctx->gpr[3] != s_context_id) return CELL_EINVAL;
++    if (ctx->gpr[4] == 0x104) {
++        if (ctx->gpr[5] > 7 || ctx->gpr[8]) return -17;
++        return cellGcmSetDisplayBuffer((u32)ctx->gpr[5], (u32)ctx->gpr[7], (u32)(ctx->gpr[7] >> 32),
++            (u32)(ctx->gpr[6] >> 32), (u32)ctx->gpr[6]);
++    }
++    if (ctx->gpr[4] == 0x300) {
++        extern int cellGcm_syscall_tile(u32, u32, u32, u32, u32, u32, u32, int);
++        const u64 tile = ctx->gpr[6], format = ctx->gpr[7];
++        const u32 descriptor = (u32)(tile >> 32), limit = (u32)tile;
++        if (ctx->gpr[5] >= CELL_GCM_MAX_TILE_COUNT || ctx->gpr[8]) return -17;
++        if (!(descriptor & 3)) return cellGcm_syscall_tile((u32)ctx->gpr[5], 0, 0, 0, 0, 0, 0, 0);
++        const u32 location = (descriptor & 3) - 1, offset = descriptor & 0x7FFF0000u;
++        const u32 end = (limit & 0x7FFF0000u) + 0x10000u;
++        const u32 pitch = (u32)(format >> 32), comp = ((u32)format >> 26) & 15;
++        const u32 base = (u32)format & 0x7FFu, bank = (descriptor >> 4) & 3;
++        if (location > 1 || end <= offset || (pitch & 0xFF) || !pitch || base + ((end - offset - 1) >> 16) >= 2048 ||
++            descriptor != (offset | (bank << 4) | (location + 1) | (location << 31)) ||
++            limit != ((end - 0x10000) | (location << 31)) ||
++            (u32)format != (base | ((base + ((end - offset - 1) >> 16)) << 13) | (comp << 26) | (1u << 30))) return -17;
++        if (comp) {
++            fprintf(stderr, "[native-blocked] compressed RSX tiles need validated compression semantics\n");
++            fflush(stderr); ps3_native_stop();
++        }
++        return cellGcm_syscall_tile((u32)ctx->gpr[5], location, offset, end - offset, pitch, base, bank, 1);
++    }
++    if (ctx->gpr[4] == 0x101) {
++        extern void cellGcm_syscall_set_sync_mode(u32, u32);
++        if (ctx->gpr[5] > 1 || ctx->gpr[6] < 1 || ctx->gpr[6] > 4) return -17;
++        if (ctx->gpr[6] != CELL_GCM_DISPLAY_VSYNC || ctx->gpr[7] || ctx->gpr[8]) {
++            fprintf(stderr, "[native-blocked] RSX scanout sync mode needs backend timing support\n");
++            fflush(stderr); ps3_native_stop();
++        }
++        cellGcm_syscall_set_sync_mode((u32)ctx->gpr[5], (u32)ctx->gpr[6]);
++        return CELL_OK;
++    }
++    if (ctx->gpr[4] == 0x10A) {
++        if (ctx->gpr[5] >= 2 || ctx->gpr[6] > UINT32_MAX || ctx->gpr[7] > UINT32_MAX) return -17;
++        device_lock();
++        const u32 address = RSX_DRIVER_INFO_EA + RSX_DI_HEAD_BASE + (u32)ctx->gpr[5] * RSX_DI_HEAD_STRIDE + RSX_DI_HEAD_FLIPFLAGS;
++        vm_write32(address, (vm_read32(address) & (u32)ctx->gpr[6]) | (u32)ctx->gpr[7]);
++        device_unlock(); return CELL_OK;
++    }
++    if (ctx->gpr[4] != 1) {
++        fprintf(stderr, "[native-blocked] RSX context attribute requires audit packet=0x%llX args=%llX,%llX,%llX,%llX\n",
++            (unsigned long long)ctx->gpr[4], (unsigned long long)ctx->gpr[5], (unsigned long long)ctx->gpr[6],
++            (unsigned long long)ctx->gpr[7], (unsigned long long)ctx->gpr[8]);
++        fflush(stderr); ps3_native_stop();
++    }
++    const u64 get = ctx->gpr[5], put = ctx->gpr[6];
++    if (get > UINT32_MAX || put > UINT32_MAX || ((get | put) & 3) ||
++        !gcm_io_offset_to_ea((u32)get) || !gcm_io_offset_to_ea((u32)put)) return CELL_EINVAL;
++#endif
+     u32 pkt = (u32)ctx->gpr[4];
+     uint64_t a3 = ctx->gpr[5], a4 = ctx->gpr[6], a5 = ctx->gpr[7];
+ 
+     switch (pkt) {
+-    case 0x001:                       /* FIFO: a3 = put, a4 = get (IO offsets) */
+-        cellGcm_syscall_set_fifo((u32)a3, (u32)a4);
++    case 0x001:                       /* FIFO: a3 = get, a4 = put (IO offsets) */
++        cellGcm_syscall_set_fifo((u32)a4, (u32)a3);
+         if (rsx_dbg())
+             fprintf(stderr, "[sys_rsx] FIFO put=0x%08X get=0x%08X\n",
+-                    (u32)a3, (u32)a4);
++                    (u32)a4, (u32)a3);
+         return CELL_OK;
+ 
+     case 0x104: {                     /* display buffer set */
+@@ -382,6 +584,24 @@
+  * unmap) and copes with a failure, so report only the device we have. */
+ static int64_t sc_rsx_device_map(ppu_context* ctx)
+ {
++#ifdef PS3_NATIVE_STRICT
++    extern int ps3_native_guest_range_backed(u32, u32);
++    if (ctx->gpr[3] > UINT32_MAX || ctx->gpr[4] > UINT32_MAX ||
++        !ps3_native_guest_range_backed((u32)ctx->gpr[3], 8) ||
++        (ctx->gpr[4] && !ps3_native_guest_range_backed((u32)ctx->gpr[4], 8))) return CELL_EFAULT;
++    if (ctx->gpr[5] != 8) return CELL_EINVAL;
++    device_lock();
++    if (!__atomic_load_n(&s_device_mapped, __ATOMIC_ACQUIRE)) {
++        if (vm_commit(VM_RSX_DEVICE_BASE, VM_RSX_DEVICE_SIZE) != CELL_OK) {
++            device_unlock(); return CELL_ENOMEM;
++        }
++        memset(vm_base + VM_RSX_DEVICE_BASE, 0, VM_RSX_DEVICE_SIZE);
++        __atomic_store_n(&s_device_mapped, 1, __ATOMIC_RELEASE);
++    }
++    vm_write64((u32)ctx->gpr[3], VM_RSX_DEVICE_BASE);
++    device_unlock();
++    return CELL_OK;
++#else
+     u32 a_ea = (u32)ctx->gpr[3], b_ea = (u32)ctx->gpr[4];
+     uint64_t dev = ctx->gpr[5];
+ 
+@@ -396,10 +616,32 @@
+     if (rsx_dbg())
+         fprintf(stderr, "[sys_rsx] device_map(dev=8) -> 0x%08X\n", RSX_DEVICE_EA);
+     return CELL_OK;
++#endif
+ }
+ 
+ static int64_t sc_rsx_device_unmap(ppu_context* ctx) { (void)ctx; return CELL_OK; }
+-static int64_t sc_rsx_attribute(ppu_context* ctx)    { (void)ctx; return CELL_OK; }
++static int64_t sc_rsx_attribute(ppu_context* ctx)
++{
++#ifdef PS3_NATIVE_STRICT
++    extern u32 cellGcm_syscall_sync_mode(u32);
++    if (ctx->gpr[3] == 2 && !ctx->gpr[5] && !ctx->gpr[6] && !ctx->gpr[7]) {
++        if (ctx->gpr[4] > 1) return -17;
++        /* LV1 222EEC clears the alternate timing flag; it is only sampled in modes 1/3 (224948). */
++        if (cellGcm_syscall_sync_mode((u32)ctx->gpr[4]) == CELL_GCM_DISPLAY_VSYNC) return CELL_OK;
++    }
++    /* Original LV2 E9C20 -> LV1 210814/223454 reads the per-head sync mode. */
++    if (ctx->gpr[3] == 0x202 && ctx->gpr[5] == 1 && !ctx->gpr[6] && !ctx->gpr[7]) {
++        if (ctx->gpr[4] > 1) return 255;
++        return cellGcm_syscall_sync_mode((u32)ctx->gpr[4]);
++    }
++    fprintf(stderr, "[native-blocked] RSX device attribute requires audit packet=0x%llX args=%llX,%llX,%llX,%llX\n",
++        (unsigned long long)ctx->gpr[3], (unsigned long long)ctx->gpr[4], (unsigned long long)ctx->gpr[5],
++        (unsigned long long)ctx->gpr[6], (unsigned long long)ctx->gpr[7]);
++    fflush(stderr); ps3_native_stop();
++#else
++    (void)ctx; return CELL_OK;
++#endif
++}
+ 
+ /* ---------------------------------------------------------------------------
+  * Registration
+--- a/runtime/syscalls/sys_event.h
++++ b/runtime/syscalls/sys_event.h
+@@ -174,6 +174,7 @@
+ /* Create a queue without a guest context (for HLE libs that must hand the
+  * game a queue id, e.g. cellAudioCreateNotifyEventQueue). 0 = table full. */
+ uint32_t sys_event_queue_create_direct(uint64_t key, int32_t size);
++uint32_t sys_event_port_create_direct(int32_t type, uint64_t name);
+ 
+ /* Mark a queue as having no producer left and release anyone blocked on it.
+  * Used by cellSpursFinalize: after it, no job completion can ever arrive, and
