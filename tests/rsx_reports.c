@@ -4,6 +4,8 @@
 #include "rsx_test_programs.h"
 #include "cellGcmSys.h"
 #include "vm.h"
+#include "zcull_scene.h"
+#include "zcull_cases.h"
 
 uint8_t* vm_base;
 /* This fixture owns real VM commits; inspect their host backing instead of
@@ -25,9 +27,13 @@ int ps3_native_guest_range_backed(u32 address, u32 size)
 extern int cellGcm_syscall_bind_context(u32, u32);
 extern u32 cellGcm_syscall_bringup(u32);
 extern void cellGcm_rsx_process_fifo(void);
+extern void cellGcm_syscall_set_fifo(u32, u32);
 static rsx_state state;
+static u8 scene_vp[32];
 static void method(u32 address, u32 value)
 {
+    if (address >= NV4097_SET_TRANSFORM_PROGRAM && address < NV4097_SET_TRANSFORM_PROGRAM + sizeof scene_vp)
+        rsx_test_put_le32(scene_vp + address - NV4097_SET_TRANSFORM_PROGRAM, value);
     if (rsx_process_method(&state, address, value)) {
         fprintf(stderr, "unhandled fixture method 0x%X\n", address); exit(1);
     }
@@ -41,6 +47,19 @@ static void word(u32 address, u32 value)
     u8* p = vm_base + address;
     for (u32 i = 0; i < 4; ++i) p[i] = (u8)(value >> (24 - i * 8));
 }
+static void local_word(u32 offset, u32 value) { word(0xC0000000u + offset, value); }
+static u32 fifo_size;
+static void fifo_emit(u32 address, u32 value)
+{
+    if (fifo_size + 8 > 0x70000) exit(2);
+    word(0x10000000u + fifo_size, 0x40000u | address);
+    word(0x10000004u + fifo_size, value); fifo_size += 8;
+}
+static u32 guest_word(u32 address)
+{
+    const u8* p = vm_base + address;
+    return (u32)p[0] << 24 | (u32)p[1] << 16 | (u32)p[2] << 8 | p[3];
+}
 static void draw(void)
 {
     method(NV4097_SET_BEGIN_END, RSX_PRIMITIVE_QUADS);
@@ -50,6 +69,32 @@ static void draw(void)
 static int report(u64* timestamp, u32* value)
 {
     return s_d3d12_backend.report(s_d3d12_backend.userdata, 0x1800, 1u << 24, timestamp, value);
+}
+static void probe_emit(u32 address, u32 value)
+{
+    if (address == 0x17C8 || address == 0x17CC) {
+        if (!d3d12_report(NULL, address, value, NULL, NULL)) exit(2);
+    } else method(address, value);
+}
+static int probe_bind(u32 index, u32 offset, u32 start)
+{
+    const CellGcmZcullInfo region = {offset,64,64,start,2,0,0,1,4,128,255,1};
+    return rsx_zcull_set(index, &region, 0x200000) == 0;
+}
+static int probe_read(const char* name, u32 type, u32 expected)
+{
+    u64 timestamp = 0xAABBCCDD11223344ull; u32 value = 0xCAFEBABE;
+    const int available = d3d12_report(NULL, 0x1800, type << 24 | 0x640, &timestamp, &value);
+    if (available) {
+        printf("{\"backend\":\"d3d12\",\"case\":\"%s\",\"type\":%u,\"available\":true,"
+               "\"timestamp\":\"%016llx\",\"value\":\"%08x\",\"zpass_expected\":%u}\n",
+               name, type, (unsigned long long)timestamp, value, expected);
+    } else {
+        printf("{\"backend\":\"d3d12\",\"case\":\"%s\",\"type\":%u,\"available\":false,"
+               "\"timestamp\":null,\"value\":null,\"zpass_expected\":%u}\n", name, type, expected);
+    }
+    return type == 1 ? available && value == expected :
+        !available && timestamp == 0xAABBCCDD11223344ull && value == 0xCAFEBABE;
 }
 static DWORD WINAPI submit_from_worker(void* unused)
 {
@@ -63,47 +108,18 @@ int main(int argc, char** argv)
         cellGcmInit(0x100000, 0x100000, 0x10000000) ||
         rsx_d3d12_backend_init(64, 64, "ps3-native GPU report regression")) return 1;
     rsx_state_init(&state);
-    method(NV4097_SET_SURFACE_FORMAT, 0x148);
-    method(NV4097_SET_SURFACE_COLOR_AOFFSET, 0);
-    method(NV4097_SET_SURFACE_ZETA_OFFSET, 0x100000);
-    method(NV4097_SET_SURFACE_PITCH_A, 256);
-    method(NV4097_SET_SURFACE_PITCH_Z, 256);
-    method(NV4097_SET_SURFACE_CLIP_HORIZONTAL, 64u << 16);
-    method(NV4097_SET_SURFACE_CLIP_VERTICAL, 64u << 16);
-    method(NV4097_SET_SURFACE_COLOR_TARGET, 1);
-    method(NV4097_SET_VIEWPORT_HORIZONTAL, 64u << 16);
-    method(NV4097_SET_VIEWPORT_VERTICAL, 64u << 16);
-    method(NV4097_SET_SCISSOR_HORIZONTAL, 64u << 16);
-    method(NV4097_SET_SCISSOR_VERTICAL, 64u << 16);
-    scalar(0xA20, 32); scalar(0xA24, 32); scalar(0xA28, 0.5f); scalar(0xA2C, 0);
-    scalar(0xA30, 32); scalar(0xA34, -32); scalar(0xA38, 0.5f); scalar(0xA3C, 0);
-    method(NV4097_SET_DEPTH_TEST_ENABLE, 1);
-    method(NV4097_SET_DEPTH_FUNC, 0x201);
-    method(NV4097_SET_DEPTH_MASK, 1);
-    method(NV4097_SET_CULL_FACE_ENABLE, 0);
-    method(NV4097_SET_COLOR_MASK, 0x01010101);
-    method(NV4097_SET_SHADER_CONTROL, 0x40);
-    rsx_test_fp_mov_r0_col0(vm_base + 0xC0030000u, RSX_TEST_FP_SWZ_IDENT);
-    method(NV4097_SET_SHADER_PROGRAM, 0x30001);
-    static const float xy[4][2] = {{-1,1},{1,1},{1,-1},{-1,-1}};
-    for (u32 i = 0; i < 4; ++i) {
-        const float vertex[8] = {xy[i][0],xy[i][1],0,1,1,1,1,1};
-        for (u32 k = 0; k < 8; ++k) {
-            u32 bits; memcpy(&bits, vertex + k, 4); word(0xC0020000u + i * 32 + k * 4, bits);
-        }
-    }
-    u8 vp[32];
-    rsx_test_vp_mov_out(vp, 0, RSX_TEST_VP_SWZ_IDENT, 0, 0);
-    rsx_test_vp_mov_out(vp + 16, 3, RSX_TEST_VP_SWZ_IDENT, 1, 1);
-    method(NV4097_SET_TRANSFORM_PROGRAM_LOAD, 0);
-    for (u32 i = 0; i < 8; ++i) {
-        u32 value; memcpy(&value, vp + i * 4, 4); method(NV4097_SET_TRANSFORM_PROGRAM + i * 4, value);
-    }
-    method(NV4097_SET_TRANSFORM_PROGRAM_START, 0);
-    for (u32 i = 0; i < 2; ++i) {
-        const u32 attribute = i ? 3 : 0;
-        method(NV4097_SET_VERTEX_DATA_ARRAY_OFFSET + attribute * 4, 0x20000 + i * 16);
-        method(NV4097_SET_VERTEX_DATA_ARRAY_FORMAT + attribute * 4, 2 | (4 << 4) | (32 << 8));
+    zcull_probe_scene(method, local_word, 0);
+    u8 expected_vp[32], expected_fp[16];
+    rsx_test_vp_mov_out(expected_vp, 0, RSX_TEST_VP_SWZ_IDENT, 0, 0);
+    rsx_test_vp_mov_out(expected_vp + 16, 3, RSX_TEST_VP_SWZ_IDENT, 1, 1);
+    rsx_test_fp_mov_r0_col0(expected_fp, RSX_TEST_FP_SWZ_IDENT);
+    if (memcmp(scene_vp, expected_vp, 32) || memcmp(vm_base + 0xC0030000u, expected_fp, 16)) return 82;
+    if (argc == 2 && !strcmp(argv[1], "probe")) {
+        puts("{\"probe\":\"ps3-native-zcull-v1\",\"backend\":\"d3d12\",\"width\":64,\"height\":64,\"samples\":1}");
+        const int passed = zcull_probe_cases(probe_emit, probe_read, probe_bind, 0);
+        if (passed) puts("{\"probe_complete\":true,\"counter_semantics_verified\":false}");
+        rsx_d3d12_backend_shutdown(); vm_shutdown();
+        return passed ? 0 : 83;
     }
     UINT presents_before = 0, presents_after = 0;
     if (FAILED(s_d3d.swap_chain->lpVtbl->GetLastPresentCount(s_d3d.swap_chain, &presents_before))) return 2;
@@ -111,6 +127,17 @@ int main(int argc, char** argv)
     if (!d3d12_report(NULL, 0x17C8, 1, NULL, NULL) || !d3d12_report(NULL, 0x17CC, 1, NULL, NULL)) return 3;
     method(NV4097_SET_COLOR_CLEAR_VALUE, 0xFF000000);
     method(NV4097_SET_ZSTENCIL_CLEAR_VALUE, 0xFFFFFF00);
+    if (argc == 2 && (!strncmp(argv[1], "report_", 7) || !strncmp(argv[1], "conditional_", 12))) {
+        if (cellGcm_syscall_bringup(0x200000) != 0xC0000000u || vm_commit(VM_RSX_CONTEXT_BASE, VM_RSX_CONTEXT_SIZE) ||
+            !cellGcm_syscall_bind_context(VM_RSX_CONTEXT_BASE + 0x40, VM_RSX_CONTEXT_BASE + 0x200000)) return 86;
+        fifo_emit(0x1A8, 0xFEED0001u);
+        if (!strcmp(argv[1], "report_unmapped")) fifo_emit(0x1800, 0x01900000);
+        else if (!strcmp(argv[1], "report_misaligned")) fifo_emit(0x1800, 0x01000001);
+        else if (!strcmp(argv[1], "conditional_unmapped")) fifo_emit(0x1E98, 0x02900000);
+        else if (!strcmp(argv[1], "conditional_mode")) fifo_emit(0x1E98, 0x03000000);
+        else return 87;
+        cellGcm_syscall_set_fifo(fifo_size, 0); cellGcm_rsx_process_fifo(); return 88;
+    }
     if (argc == 2) {
         CellGcmZcullInfo uninitialized = {0x100000,64,64,0,2,0,0,1,5,128,255,1};
         if (rsx_zcull_set(0, &uninitialized, 0x200000)) return 60;
@@ -121,7 +148,7 @@ int main(int argc, char** argv)
     method(NV4097_CLEAR_SURFACE, 0xF3);
     for (u32 type = 2; type <= 5; ++type) {
         count = 0xCAFEBABE;
-        if (!d3d12_report(NULL, 0x1800, type << 24, &first, &count) || count || first < second ||
+        if (d3d12_report(NULL, 0x1800, type << 24, &first, &count) || first != second || count != 0xCAFEBABE ||
             FAILED(s_d3d.swap_chain->lpVtbl->GetLastPresentCount(s_d3d.swap_chain, &presents_after)) ||
             presents_after != presents_before) return 18;
         second = first;
@@ -171,12 +198,15 @@ int main(int argc, char** argv)
     u32 preserved = 0;
     if (!report(&first, &preserved) || !d3d12_report(NULL, 0x17C8, 2, NULL, NULL) ||
         !report(&second, &count) || count != preserved || second < first) return 27;
-    for (u32 type = 2; type <= 5; ++type)
-        if (!d3d12_report(NULL, 0x1800, type << 24, &first, &count) || count || first < second) return 28;
+    for (u32 type = 2; type <= 5; ++type) {
+        first = 0xAABBCCDD11223344ull; count = 0xCAFEBABE;
+        if (d3d12_report(NULL, 0x1800, type << 24, &first, &count) ||
+            first != 0xAABBCCDD11223344ull || count != 0xCAFEBABE) return 28;
+    }
     draw(); first = 0xAABBCCDD11223344ull; count = 0xCAFEBABE;
     if (d3d12_report(NULL, 0x1800, 2u << 24, &first, &count) || first != 0xAABBCCDD11223344ull || count != 0xCAFEBABE ||
         !d3d12_report(NULL, 0x17C8, 3, NULL, NULL) || !report(&first, &count) || count ||
-        !d3d12_report(NULL, 0x1800, 2u << 24, &second, &count) || count || second < first) return 29;
+        d3d12_report(NULL, 0x1800, 2u << 24, &second, &count)) return 29;
     CellGcmZcullInfo region = {0x100000,64,64,0,2,0,0,1,5,128,255,1};
     method(NV4097_SET_SURFACE_FORMAT, 0x148);
     method(NV4097_SET_ZSTENCIL_CLEAR_VALUE, 0xFFFFFF07);
@@ -219,15 +249,16 @@ int main(int argc, char** argv)
     }
     method(NV4097_SET_STENCIL_TEST_ENABLE, 0);
     if (FAILED(s_d3d.swap_chain->lpVtbl->GetLastPresentCount(s_d3d.swap_chain, &presents_after)) || presents_after != presents_before + 1) return 54;
-    /* Disabled collection is empty even when actual GPU draws occur. Re-enabling
-     * makes a later disable retain the unimplemented active interval. */
+    /* Packed NV47 counters remain unsupported after reset and while disabled;
+     * neither an empty draw interval nor ZPASS establishes their bit layout. */
     if (!d3d12_report(NULL, 0x17C8, 2, NULL, NULL)) return 62;
     method(NV4097_SET_ZCULL_STATS_ENABLE, 0);
     if (state.zcull_stats_enable) return 63;
     draw();
     for (u32 type = 2; type <= 5; ++type) {
-        first = second;
-        if (!d3d12_report(NULL, 0x1800, type << 24, &second, &count) || count || second < first) return 64;
+        first = 0xAABBCCDD11223344ull; count = 0xCAFEBABE;
+        if (d3d12_report(NULL, 0x1800, type << 24, &first, &count) ||
+            first != 0xAABBCCDD11223344ull || count != 0xCAFEBABE) return 64;
     }
     method(NV4097_SET_ZCULL_STATS_ENABLE, 1); draw();
     method(NV4097_SET_ZCULL_STATS_ENABLE, 0);
@@ -238,16 +269,48 @@ int main(int argc, char** argv)
     }
     if (!d3d12_report(NULL, 0x17C8, 2, NULL, NULL)) return 66;
     draw();
-    if (!d3d12_report(NULL, 0x1800, 2u << 24, &first, &count) || count) return 67;
+    first = 0xAABBCCDD11223344ull; count = 0xCAFEBABE;
+    if (d3d12_report(NULL, 0x1800, 2u << 24, &first, &count) ||
+        first != 0xAABBCCDD11223344ull || count != 0xCAFEBABE) return 67;
     if (FAILED(s_d3d.swap_chain->lpVtbl->GetLastPresentCount(s_d3d.swap_chain, &presents_after)) ||
         presents_after != presents_before + 1) return 68;
+    /* Conditional rendering reads a completed report once per SET_RENDER_ENABLE,
+     * latches that predicate, and preserves the accumulating ZPASS count. */
+    const u32 predicate = 0x10010000;
+    method(NV4097_SET_DEPTH_TEST_ENABLE, 1); method(NV4097_SET_DEPTH_MASK, 0);
+    method(NV4097_SET_ZSTENCIL_CLEAR_VALUE, 0xFFFFFF00); method(NV4097_CLEAR_SURFACE, 3);
+    if (!d3d12_report(NULL, 0x17C8, 1, NULL, NULL) || !d3d12_report(NULL, 0x17CC, 1, NULL, NULL)) return 69;
+    word(predicate + 8, 0);
+    if (!rsx_set_conditional_render(&state, 2, predicate) ||
+        rsx_set_conditional_render(&state, 2, predicate + 1) ||
+        rsx_set_conditional_render(&state, 2, 0x40000000) ||
+        rsx_set_conditional_render(&state, 3, predicate)) return 70;
+    draw(); if (!report(&first, &count) || count) return 71;
+    word(predicate + 8, 4096);
+    draw(); if (!report(&first, &count) || count) return 72;
+    if (!rsx_set_conditional_render(&state, 2, predicate)) return 73;
+    draw(); if (!report(&first, &count) || count != 4096) return 74;
+    word(predicate + 8, 0);
+    draw(); if (!report(&first, &count) || count != 8192) return 75;
+    if (!rsx_set_conditional_render(&state, 2, predicate)) return 76;
+    draw(); if (!report(&first, &count) || count != 8192) return 77;
+    method(NV4097_SET_RENDER_ENABLE, 1u << 24);
+    draw(); if (!report(&first, &count) || count != 12288) return 78;
+    for (u32 i = 0; i < 32; ++i) {
+        if (!d3d12_report(NULL, 0x17C8, 1, NULL, NULL)) return 79;
+        draw(); draw();
+        if (!s_d3d.draw_count || !report(&first, &count) || count != 8192 ||
+            !report(&second, &count) || count != 8192 || second < first) return 80;
+        if (!d3d12_report(NULL, 0x17C8, 1, NULL, NULL) || !report(&first, &count) || count) return 81;
+    }
     if (cellGcm_syscall_bringup(0x200000) != 0xC0000000u || vm_commit(VM_RSX_CONTEXT_BASE, VM_RSX_CONTEXT_SIZE) ||
         !cellGcm_syscall_bind_context(VM_RSX_CONTEXT_BASE + 0x40, VM_RSX_CONTEXT_BASE + 0x200000)) return 19;
     if (cellGcmSetDisplayBuffer(0, 0, 256, 64, 64) || cellGcmSetDisplayBuffer(1, 0x10000, 256, 64, 64) ||
         cellGcmSetDisplayBuffer(2, 0x40000, 256, 64, 64)) return 26;
     for (u32 i = 0; i < 64 * 64; ++i) word(0xC0040000u + i * 4, 0xFF00FF00);
+    const int rt_before_zero_clear = off_rt_find(0);
     method(NV4097_CLEAR_SURFACE, 0);
-    if (s_d3d.draw_count || off_rt_find(0) >= 0) return 31;
+    if (s_d3d.draw_count || off_rt_find(0) != rt_before_zero_clear) return 31;
     method(NV4097_SET_SURFACE_FORMAT, 0x148);
     method(NV4097_SET_SURFACE_COLOR_AOFFSET, 0);
     method(NV4097_SET_COLOR_CLEAR_VALUE, 0xFFFF0000);
@@ -296,6 +359,50 @@ int main(int argc, char** argv)
     char title[256];
     GetWindowTextA(s_d3d.hwnd, title, sizeof title);
     if (!strstr(title, "draws:")) return 58;
+    /* Actual FIFO -> report DMA -> coherent guest publication -> conditional draw. */
+    UINT publication_presents = 0;
+    if (FAILED(s_d3d.swap_chain->lpVtbl->GetLastPresentCount(s_d3d.swap_chain, &publication_presents))) return 85;
+    zcull_probe_scene(fifo_emit, local_word, 0);
+    fifo_emit(0x1A8, 0xFEED0001u); fifo_emit(0x17C8, 1); fifo_emit(0x17CC, 1);
+    fifo_emit(0xA70, 0); fifo_emit(0x1D8C, 0xFFFFFF00); fifo_emit(0x1D94, 3);
+    probe_draw(fifo_emit); fifo_emit(0x1800, 0x01080000);
+    fifo_emit(0x1E98, 0x02080000); probe_draw(fifo_emit); fifo_emit(0x1800, 0x01080010);
+    fifo_emit(0x17C8, 1); fifo_emit(0xA6C, 0x200); fifo_emit(0x1E98, 0x01000000);
+    probe_draw(fifo_emit); fifo_emit(0x1800, 0x01080020);
+    fifo_emit(0xA6C, 0x201); fifo_emit(0x1E98, 0x02080020);
+    probe_draw(fifo_emit); fifo_emit(0x1800, 0x01080030);
+    fifo_emit(0x1E98, 0x01000000); probe_draw(fifo_emit); fifo_emit(0x1800, 0x01080040);
+    fifo_emit(0x1A8, 0x66626660u); fifo_emit(0x1800, 0x01000640);
+    memset(vm_base + 0x1007FFF0, 0xA5, 0x70);
+    const u64 publication_fence = s_d3d.report_completed_fence;
+    cellGcm_syscall_set_fifo(fifo_size, 0);
+    cellGcm_rsx_process_fifo();
+    const u32 expected_counts[5] = {4096,8192,0,0,4096};
+    u64 previous_timestamp = 0;
+    for (u32 i = 0; i < 5; ++i) {
+        const u32 address = 0x10080000 + i * 16;
+        const u64 timestamp = (u64)guest_word(address) << 32 | guest_word(address + 4);
+        if (!timestamp || timestamp < previous_timestamp || guest_word(address + 8) != expected_counts[i] ||
+            guest_word(address + 12)) return 84;
+        previous_timestamp = timestamp;
+    }
+    if (guest_word(0x1007FFF0) != 0xA5A5A5A5 || guest_word(0x10080050) != 0xA5A5A5A5 ||
+        guest_word(VM_RSX_CONTEXT_BASE + 0x200000 + 0x1400 + 0x648) != 4096 ||
+        guest_word(VM_RSX_CONTEXT_BASE + 0x200000 + 0x1400 + 0x64C) ||
+        s_d3d.report_completed_fence <= publication_fence ||
+        s_d3d.fence->lpVtbl->GetCompletedValue(s_d3d.fence) < s_d3d.report_completed_fence ||
+        FAILED(s_d3d.swap_chain->lpVtbl->GetLastPresentCount(s_d3d.swap_chain, &presents_after)) ||
+        presents_after != publication_presents) {
+        fprintf(stderr, "publication guard=%X/%X local=%X/%X fence=%llu/%llu/%llu present=%u/%u\n",
+            guest_word(0x1007FFF0), guest_word(0x10080050),
+            guest_word(VM_RSX_CONTEXT_BASE + 0x200000 + 0x1400 + 0x648),
+            guest_word(VM_RSX_CONTEXT_BASE + 0x200000 + 0x1400 + 0x64C),
+            (unsigned long long)publication_fence,
+            (unsigned long long)s_d3d.fence_values[s_d3d.frame_index],
+            (unsigned long long)s_d3d.fence->lpVtbl->GetCompletedValue(s_d3d.fence),
+            presents_before, presents_after);
+        return 85;
+    }
     rsx_d3d12_backend_shutdown(); vm_shutdown();
     puts("Verified real GPU samples, timestamps, semaphore completion, preserved depth and no implicit present");
     return 0;

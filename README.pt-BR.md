@@ -270,12 +270,12 @@ Pacotes básicos de controle agora entregam botões/sticks medidos e erros de co
 a vibração valida a ABI de 8 bytes e o resultado do host. Pacotes estendidos de
 pressão e sensores continuam bloqueados. Contextos DMA da FIFO distinguem semáforos
 do dispositivo e dos relatórios; a inicialização original passa pela espera de prontidão.
-Estatísticas ZCULL podem informar um intervalo vazio antes de geometria ou após
-reset explícito dos contadores, com timestamp real da GPU; estatísticas de geometria
-ativa continuam bloqueadas. O comando original de habilitação das estatísticas agora
-é acompanhado: coleta desativada não acumula geometria; desativá-la preserva as
-observações anteriores até reset explícito. Regressões com GPU real verificam ambas
-as transições e mantêm ZPASS independente. O RSX controla o relógio de vídeo guest de 60000/1001 Hz.
+ZPASS usa consultas de oclusão concluídas no D3D12 e timestamps reais da GPU em
+nanossegundos; a época desse relógio não foi comparada ao NV47. Os tipos 2–5 sempre
+param, inclusive após reset e em intervalos vazios/desativados: a resposta zero
+anterior foi removida porque seus bits não foram verificados. Habilitação, desativação
+e reset preservam a ordem e o acumulador independente de ZPASS. O RSX controla o
+relógio de vídeo guest de 60000/1001 Hz.
 A fila original aguarda a conclusão da GPU e o próximo VBlank elegível; o D3D12
 apresenta o buffer escolhido e o LV2 entrega os eventos originais de interrupção.
 Referências da FIFO exigem conclusão da GPU. Regressões com GPU real verificam buffers
@@ -292,12 +292,37 @@ entre trocas de região. Regressões reais na RTX 4070 verificam amostras, stenc
 religação e rejeição de superfícies sem inicialização ou incompatíveis. Aliases,
 formatos e contadores sem suporte param explicitamente. Uma regressão com duas
 threads reproduz e corrige o deadlock entre FIFO e título da janela: somente a
-thread da janela atualiza seu título. O boot real agora alcança novos desenhos e
-para no `ZCULL_STATS` ativo (`0x1800`, argumento `0x02000640`), cuja semântica do
-contador de hardware ainda não foi validada. Nenhuma nova apresentação do jogo
-ou menu foi verificado.
+thread da janela atualiza seu título. O diagnóstico anterior chegou ao intervalo
+com geometria ativa de `ZCULL_STATS` (`0x1800`, argumento `0x02000640`). O boot real
+atual para na primeira consulta desse tipo, sem publicar um valor de reset não
+verificado. Nenhuma nova apresentação ou menu foi verificado. Conditional rendering
+resolve o endereço DMA do relatório, aguarda a GPU e mantém o predicado até o próximo
+comando de habilitação. Testes reais de GPU/FIFO verificam geometria visível/oculta,
+acúmulo, relatórios guest em memória principal/local, endianess, fences e limites.
+Somente um contexto RSX LV2 ativo tem suporte; troca de contextos, Z16/MSAA vinculados,
+aliases de regiões e importação de profundidade sem inicialização continuam pendentes.
 Use `run ... --enter-button cross`
 ou `circle` explicitamente; idioma/região não inferem a preferência. Não há interpretação.
+A auditoria usa [RSXZCULL.cpp do RPCS3 em 8d6b42e](https://github.com/RPCS3/rpcs3/blob/8d6b42e78adae5cc4685b45ecf2f370273e91810/rpcs3/Emu/RSX/RSXZCULL.cpp),
+seus chamadores RSX/LV2/Vulkan, [as definições PSL1GHT](https://github.com/ps3dev/PSL1GHT/blob/master/ppu/include/rsx/gcm_sys.h)
+e os PRs [10823](https://github.com/RPCS3/rpcs3/pull/10823) e [12645](https://github.com/RPCS3/rpcs3/pull/12645).
+Nenhum código GPL foi incorporado.
+
+| Relatório | Comportamento da referência | Evidência no ps3-native |
+| --- | --- | --- |
+| 1: ZPASS | Amostras reais ou aproximação booleana opcional | Contagens reais de GPU, uma amostra; sem substituição booleana |
+| 2/3/4: ZCULL_STATS/1/2 | Explicitamente não implementados; sentinelas conforme ativação | Bits NV47 desconhecidos; nenhum resultado guest publicado |
+| 5: ZCULL_STATS3 | Aproximação por visibilidade invertida | Semântica de hardware desconhecida; nenhum resultado guest publicado |
+
+`ps3-native-rsx-reports probe` gera JSONL da mesma cena 64×64 usada por
+`tests/zcull_ps3_probe.c`, incluindo oito regiões, visibilidade, reset e troca de
+superfícies. Com PSL1GHT aberto já instalado, `make -f tests/zcull_probe.mk` prepara
+o ELF opcional; capture stdout com um carregador homebrew existente. PSL1GHT e PS3
+real não estavam disponíveis aqui: esse ELF **não foi compilado nem validado no
+console**. `python tests/compare_zcull_probe.py native.log ps3.log` compara valores
+por caso, sem igualar épocas dos relógios; saída 2 significa medição ausente ou
+lacunas nos contadores. Coincidir nessa sonda finita não certifica fidelidade NV47.
+
 Nenhuma transição para o seletor ou gameplay foi verificado.
 Originais e derivados proprietários permanecem fora do Git.
 Criação/destruição de mutexes do kernel, waiters em FIFO/prioridade guest, cancelamento

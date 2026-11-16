@@ -3599,7 +3599,7 @@
      /* Pace: leave each published value observable for >= ~200us of spins
       * (equality-waiters at any poll rate see every value; still ~5000/s so
       * loading's fence storms clear in seconds, not minutes). */
-@@ -2230,6 +2377,48 @@
+@@ -2230,6 +2377,61 @@
  static void gcm_3d_method(rsx_state* st, u32 m, u32 v, int legacy_state_live)
  {
      extern u32 g_rsx_last_reference;
@@ -3610,6 +3610,19 @@
 +        extern void ps3_native_stop(void);
 +        fprintf(stderr, "[native-blocked] retained RSX targets require an audited local-memory DMA context\n");
 +        fflush(stderr); ps3_native_stop();
++    }
++    if (m == NV4097_SET_RENDER_ENABLE) {
++        extern void ps3_native_stop(void);
++        const u32 mode = v >> 24, offset = v & 0xFFFFFFu;
++        const int main = s_report_dma == 0xFEED0001u || s_report_dma == 0xBAD68000u;
++        const int local = s_report_dma == 0xFEED0000u || s_report_dma == 0x66626660u;
++        const u32 address = main ? gcm_io2ea(offset) : s_kernel_report_base ? s_kernel_report_base + offset : 0;
++        if ((mode == 2 && ((!local && !main) || (!main && offset / 16 >= 2048))) ||
++            !rsx_set_conditional_render(st, mode, address)) {
++            fprintf(stderr, "[native-blocked] invalid conditional render method argument=0x%X dma=0x%X\n", v, s_report_dma);
++            fflush(stderr); ps3_native_stop();
++        }
++        return;
 +    }
 +    if (m == 0x17C8 || m == 0x17CC || m == 0x1800) {
 +        extern void ps3_native_stop(void);
@@ -3648,7 +3661,7 @@
      /* #466: rsx_state feeds only the legacy vtable backend. With the draw
       * engine up and no vtable registered, the state it builds is never read,
       * so only the methods with effects outside it are worth handing over.
-@@ -2248,6 +2437,7 @@
+@@ -2248,6 +2450,7 @@
       * tells the title every queried object is occluded. */
      if (m == 0x1A8) s_report_dma = v;
      if (m == 0x1800) {
@@ -3656,7 +3669,7 @@
          const u32 off = v & 0xFFFFFFu, idx = off / 16u;
          const u32 val = (v >> 24) == 1u ? 0xFFFFu : 0u;
          const u64 ts = gcm_report_timestamp();
-@@ -2266,6 +2456,7 @@
+@@ -2266,6 +2469,7 @@
              s_report_data[idx].timestamp = ts;
              s_report_data[idx].value = val;
          }
@@ -3664,7 +3677,7 @@
      }
  }
  
-@@ -2315,6 +2506,10 @@
+@@ -2315,6 +2519,10 @@
   * RSX-thread profiles, so each is read once and cached, like the other knobs. */
  static void gcm_rsx_process_fifo_unlocked(void)
  {
@@ -3675,7 +3688,7 @@
      { static unsigned _n = 0; static unsigned long long _t0 = 0;
        extern unsigned long long ps3_ms_now(void);
        _n++;
-@@ -2547,7 +2742,90 @@
+@@ -2547,7 +2755,90 @@
          if (park_off && (s_fifo_getoff != park_off || !is_jump || jump_tgt != park_off))
              park_off = 0;
  
@@ -3766,7 +3779,7 @@
              /* lv1 driver flip: statically-linked libgcm cellGcmSetFlip writes
               * this word into the FIFO instead of calling any import. Fire the
               * flip (status/count/handler) and STOP this drain so the ticker's
-@@ -2596,6 +2874,9 @@
+@@ -2596,6 +2887,9 @@
               * 3 MB ring at boot, wraps, and a walker stopping at every flip
               * then crawled ~1 KB a tick while the title wrote over the
               * commands ahead of it. */
@@ -3776,7 +3789,7 @@
              if (gcm_fifo_backlog(put, s_fifo_getoff) < GCM_FIFO_CATCHUP_BYTES)
                  { why = "flip"; break; }
              continue;
-@@ -2715,14 +2996,16 @@
+@@ -2715,14 +3009,16 @@
                  s_report_hold_pass = 1;
                  break;
              }
@@ -3795,7 +3808,7 @@
                      { static int sn = 0, recdbg = -1; if (recdbg < 0) recdbg = getenv("GCM_RECDBG") ? 1 : 0;
                        if (recdbg && PS3_LOG_FIRST(sn, 12))
                          fprintf(stderr, "[SEMA] m=0x%02X v=0x%08X off=0x%X\n", m, v, s_sema_offset); }
-@@ -2731,8 +3014,28 @@
+@@ -2731,8 +3027,28 @@
                          ps3_ft_span(PS3_FT_SEMA, 0, s_sema_offset, v, s_ft_sema_t0, ps3_ft_now());
                          s_ft_sema_t0 = 0;
                      }
@@ -3826,7 +3839,7 @@
                          /* The RSX has fetched past a RELEASE before its
                           * semaphore write lands, so a guest that sees the
                           * label must also see `get` past the command. `get`
-@@ -2755,8 +3058,12 @@
+@@ -2755,8 +3071,12 @@
               * ever writes would wedge the drain permanently, and RELEASE on
               * its own is the half that unblocks a waiting guest. */
              static int blk = -1; static unsigned blk_ms;
@@ -3839,7 +3852,7 @@
              if (blk) {
                  /* GCM_SEMA_ACQUIRE_MS=<ms>: a bounded wait. The hardware waits
                   * for ever; an emulated producer that never comes (a boot-time
-@@ -3330,11 +3637,24 @@
+@@ -3330,11 +3650,24 @@
      if (bufferId >= CELL_GCM_MAX_DISPLAY_BUFFER_NUM)
          return CELL_GCM_ERROR_INVALID_VALUE;
  
@@ -3864,7 +3877,7 @@
  
      /* Tell the live engine too, or it has no registered scanout to present and
       * falls back to whatever surface happens to be current. Display buffers are
-@@ -3550,29 +3870,53 @@
+@@ -3550,29 +3883,53 @@
  /* NID: 0xA2478CA3 */
  s32 cellGcmSetPrepareFlip(void* ctx, u32 bufferId)
  {
@@ -3941,7 +3954,7 @@
  }
  
  /* NID: 0x1BFAB6EE */
-@@ -3717,6 +4061,9 @@
+@@ -3717,6 +4074,9 @@
          return CELL_OK;
      }
  
@@ -3951,7 +3964,7 @@
      /* Auto-map unmapped main memory. On real hardware PSL1GHT pre-maps its
       * whole RSX heap in gcmInitBody, so its libraries never call MapMainMemory
       * before handing an EA to the RSX (Tiny3D's command ring lives in an
-@@ -4114,12 +4461,16 @@
+@@ -4114,12 +4474,16 @@
      if (index >= CELL_GCM_MAX_REPORT_COUNT)
          return 0;
  
@@ -3968,7 +3981,7 @@
  }
  
  /* ---------------------------------------------------------------------------
-@@ -4127,11 +4478,13 @@
+@@ -4127,11 +4491,13 @@
   * -----------------------------------------------------------------------*/
  
  /* NID: 0x0B4B62D5 */
@@ -3986,7 +3999,7 @@
  
      if (ps3_log_verbose())
          printf("[cellGcmSys] SetTile(index=%u, loc=%u, offset=0x%X, size=0x%X, pitch=%u)\n",
-@@ -4145,7 +4498,7 @@
+@@ -4145,7 +4511,7 @@
      s_tiles[index].bank   = bank;
      /* SetTile binds too (as it does on RPCS3), so a
       * title that never calls BindTile still has its tiles in force. */
@@ -3995,7 +4008,7 @@
  
      /* Build tile register value (simplified) */
      s_tiles[index].tile  = (location << 0) | (pitch << 8);
-@@ -4153,6 +4506,10 @@
+@@ -4153,6 +4519,10 @@
      gcm_tile_publish(index);
  
      return CELL_OK;
@@ -4006,7 +4019,7 @@
  }
  
  /* NID: 0x06EDEA25 */
-@@ -4168,20 +4525,9 @@
+@@ -4168,20 +4538,9 @@
          printf("[cellGcmSys] SetZcull(index=%u, offset=0x%X, %ux%u)\n",
                 index, offset, width, height);
  
@@ -4030,7 +4043,7 @@
  }
  
  /* NID: 0x2BB1F1E5 */
-@@ -4203,8 +4549,8 @@
+@@ -4203,8 +4562,8 @@
          return CELL_GCM_ERROR_INVALID_VALUE;
  
      if (ps3_log_verbose()) printf("[cellGcmSys] BindZcull(index=%u)\n", index);
@@ -4041,7 +4054,7 @@
  }
  
  /* NID: 0x75843042 */
-@@ -4226,8 +4572,8 @@
+@@ -4226,8 +4585,8 @@
          return CELL_GCM_ERROR_INVALID_VALUE;
  
      if (ps3_log_verbose()) printf("[cellGcmSys] UnbindZcull(index=%u)\n", index);
@@ -4052,7 +4065,7 @@
  }
  
  /* ---------------------------------------------------------------------------
-@@ -4311,7 +4657,7 @@
+@@ -4311,7 +4670,7 @@
                         u32 pitch, u8 comp, u16 base, u8 bank)
  {
      /* Delegates to existing SetTile */
@@ -4061,7 +4074,7 @@
  }
  
  /* Default FIFO size — configures command buffer size before init */
-@@ -4407,7 +4753,7 @@
+@@ -4407,7 +4766,7 @@
      printf("[cellGcmSys] Terminate\n");
  
      s_gcm_initialized = 0;
@@ -4070,7 +4083,7 @@
      s_flip_status = CELL_GCM_FLIP_STATUS_DONE;
      s_debug_level = CELL_GCM_DEBUG_LEVEL0;
      s_vblank_count = 0;
-@@ -4424,7 +4770,7 @@
+@@ -4424,7 +4783,7 @@
      __atomic_store_n(&s_io_mapping_hw, 0, __ATOMIC_RELAXED);
      memset(s_tiles, 0, sizeof(s_tiles));
      gcm_tiles_publish();
@@ -4079,7 +4092,7 @@
      memset(s_report_data, 0, sizeof(s_report_data));
      s_report_dma = 0xFEED0000u;
      memset(s_labels, 0, sizeof(s_labels));
-@@ -4508,7 +4854,7 @@
+@@ -4508,7 +4867,7 @@
          printf("[cellGcmSys] WARNING: GetZcullInfo index %u out of range\n", index);
          return NULL;
      }
@@ -4088,7 +4101,7 @@
  }
  
  /* Return display buffer info by index */
-@@ -4591,7 +4937,20 @@
+@@ -4591,7 +4950,20 @@
  s32 cellGcmSetFlipImmediate(u32 bufferId)
  {
      printf("[cellGcmSys] SetFlipImmediate(bufferId=%u)\n", bufferId);
@@ -4109,7 +4122,7 @@
  }
  
  /* Set flip status directly */
-@@ -4750,7 +5109,7 @@
+@@ -4750,7 +5122,7 @@
  u32 cellGcm_syscall_bringup(u32 local_size)
  {
      if (!s_gcm_initialized)
@@ -4118,7 +4131,7 @@
      if (local_size)
          s_config.localSize = local_size;
      s_gcm_syscall_mode = 1;
-@@ -4762,12 +5121,50 @@
+@@ -4762,12 +5134,50 @@
   * `lwz r3,0x18(r9)` / `addi r3,r3,64`), so the syscall returns this minus 0x40
   * and the driver's own flushes land exactly where the walker reads. */
  u32 cellGcm_control_guest_addr(void) { return GCM_CONTROL_GUEST_ADDR; }
@@ -4169,7 +4182,7 @@
      populate_offset_table(ea, io, size);
      /* A free slot, not s_io_mappings[count]: an unmap leaves a hole, and the
       * count then indexes a live slot. */
-@@ -4777,6 +5174,9 @@
+@@ -4777,6 +5187,9 @@
          s_io_mapping_count++;
      }
      if (!s_config.ioSize) { s_config.ioAddress = ea; s_config.ioSize = size; }
@@ -4179,7 +4192,7 @@
  }
  
  void cellGcm_syscall_iounmap(u32 io, u32 size)
-@@ -4790,10 +5190,69 @@
+@@ -4790,10 +5203,69 @@
  /* sys_rsx_context_attribute(0x001): the driver's explicit FIFO reset. Move the
   * walker with it -- leaving s_fifo_getoff where it was makes the next drain walk
   * from a stale offset through whatever the driver has since overwritten. */
@@ -6748,26 +6761,32 @@
  
  #ifdef __cplusplus
  extern "C" {
-@@ -217,6 +218,8 @@
+@@ -217,6 +218,10 @@
  #define RSX_PRIMITIVE_LINE_LOOP          3
  #define RSX_PRIMITIVE_LINE_STRIP         4
  #define RSX_PRIMITIVE_TRIANGLES          5
 +#define NV4097_SET_ZCULL_STATS_ENABLE           0x00001804
++#define NV4097_SET_RENDER_ENABLE                0x00001E98
++#define NV4097_SET_ZCULL_EN                     0x00001D84
 +
  #define RSX_PRIMITIVE_TRIANGLE_STRIP     6
  #define RSX_PRIMITIVE_TRIANGLE_FAN       7
  #define RSX_PRIMITIVE_QUADS              8
-@@ -298,6 +301,9 @@
+@@ -298,6 +303,13 @@
      int two_sided_stencil;
      u32 back_stencil_func, back_stencil_ref, back_stencil_mask, back_stencil_write_mask;
      u32 back_stencil_op_fail, back_stencil_op_zfail, back_stencil_op_zpass;
 +
 +    /* UINT32_MAX until the original command stream specifies collection. */
 +    u32 zcull_stats_enable;
++    u32 zcull_enable;
++    int conditional_render_enabled;
++    u32 conditional_report_address;
++    int conditional_result_pending, conditional_render_passed;
  
      /* Culling */
      int cull_face_enable;
-@@ -457,7 +463,25 @@
+@@ -457,7 +469,27 @@
  
      /* Texture */
      void (*bind_texture)(void* userdata, u32 unit, const rsx_texture_state* tex);
@@ -6790,6 +6809,8 @@
 +void rsx_zcull_reset(void);
 +int rsx_zcull_set(u32 index, const CellGcmZcullInfo* region, u32 local_size);
 +int rsx_zcull_find(u32 offset);
++/* The FIFO resolves the report DMA/offset; the RSX owns the condition. */
++int rsx_set_conditional_render(rsx_state* state, u32 mode, u32 report_address);
  
  /* Register a backend. Call before any RSX processing. */
  void rsx_set_backend(rsx_backend* backend);
@@ -6826,7 +6847,7 @@
  /* Per-draw SRV windows: each VP draw gets 16 consecutive descriptors (t0-t15)
   * so multi-unit fragment programs see all their textures. */
  #define DRAW_SRV_BASE 256
-@@ -292,6 +296,16 @@
+@@ -292,6 +296,17 @@
      ID3D12Resource*            render_targets[FRAME_COUNT];
      ID3D12CommandAllocator*    cmd_allocators[FRAME_COUNT];
      ID3D12GraphicsCommandList* cmd_list;
@@ -6835,6 +6856,7 @@
 +    ID3D12Resource* report_readback;
 +    u64 report_frequency;
 +    u64 report_timestamp;
++    u64 report_completed_fence;
 +    u32 report_value;
 +    int report_enabled;
 +    int report_timestamp_requested;
@@ -6843,7 +6865,7 @@
  
      /* Synchronization */
      ID3D12Fence* fence;
-@@ -418,6 +432,40 @@
+@@ -418,6 +433,40 @@
  } D3D12State;
  
  static D3D12State s_d3d;
@@ -6884,7 +6906,7 @@
  char g_rsx_title_base[128] = "ps3recomp";
  static u32 s_dbg_last_draws = 0;
  static u64 s_req_verts = 0, s_req_draws = 0, s_drop_draws = 0;
-@@ -655,6 +703,12 @@
+@@ -655,6 +704,12 @@
  /* ---------------------------------------------------------------------------
   * Win32 window
   * -----------------------------------------------------------------------*/
@@ -6897,7 +6919,7 @@
  
  static LRESULT CALLBACK d3d12_wndproc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
  {
-@@ -1409,11 +1463,18 @@
+@@ -1409,11 +1464,18 @@
  {
      u32 fi = s_d3d.frame_index;
      s_d3d.fence_values[fi]++;
@@ -6918,7 +6940,7 @@
          /* NEVER wait unbounded here: this runs on the vblank ticker, which also
           * drives the guest's vblank handlers, the FIFO drain, and the fence
           * publication. A device removal (TDR) leaves the D3D12 fence unsignaled
-@@ -1424,8 +1485,15 @@
+@@ -1424,8 +1486,15 @@
           * carry on (subsequent D3D calls fail visibly but the game keeps
           * running headless). */
          for (int tries = 0; tries < 3; tries++) {
@@ -6935,7 +6957,7 @@
              HRESULT rr = s_d3d.device->lpVtbl->GetDeviceRemovedReason(s_d3d.device);
              printf("[D3D12] wait_for_gpu STUCK %ds: want %llu got %llu removed=0x%08lX\n",
                     2 * (tries + 1),
-@@ -1436,6 +1504,9 @@
+@@ -1436,6 +1505,9 @@
              if (rr != 0 /* S_OK: device still alive, keep waiting a bit */)
                  break;
          }
@@ -6945,7 +6967,7 @@
      }
  }
  
-@@ -3656,9 +3727,19 @@
+@@ -3656,9 +3728,19 @@
  {
      const rsx_state* st = s_d3d.current_rsx_state;
      dr->zeta_off = 0;
@@ -6965,7 +6987,7 @@
      dr->no_color = st->color_target == 0 && dr->zeta_off != 0;
  }
  
-@@ -3700,6 +3781,19 @@
+@@ -3700,6 +3782,19 @@
                  st->surface_format, st->color_target, st->surface_color_offset[0], st->surface_color_offset[1],
                  st->surface_zeta_offset, st->surface_clip_w, st->surface_clip_h,
                  cellGcmOffsetIsDisplay(raw), cellGcmOffsetIsDisplay(raw) ? 0 : raw); } } }
@@ -6985,7 +7007,7 @@
      if (cellGcmOffsetIsDisplay(raw)) return 0;
      /* RT_DISPLAY_BY_SIZE=1: also treat a single-target surface whose clip
       * exactly matches the display resolution as the backbuffer.
-@@ -3738,6 +3832,10 @@
+@@ -3738,6 +3833,10 @@
  
  static int off_rt_find(u32 off)
  {
@@ -6996,7 +7018,7 @@
      if (!off) return -1;
      for (int i = 0; i < MAX_OFF_RTS; i++)
          if (s_d3d.off_rt[i].res && s_d3d.off_rt[i].off == off) return i;
-@@ -3776,6 +3874,10 @@
+@@ -3776,6 +3875,10 @@
          for (int i = 0; i < MAX_OFF_RTS; i++)
              if (!s_d3d.off_rt[i].res) { slot = i; break; }
          if (slot < 0) {   /* evict an entry not used this frame */
@@ -7007,7 +7029,7 @@
              for (int i = 0; i < MAX_OFF_RTS; i++)
                  if (!s_d3d.off_rt[i].used) { slot = i; break; }
              if (slot < 0) return -1;
-@@ -3820,7 +3922,18 @@
+@@ -3820,7 +3923,18 @@
                    (want_fmt == DXGI_FORMAT_R32G32B32A32_FLOAT) ? 16u :
                    (want_fmt == DXGI_FORMAT_R32_FLOAT) ? 4u : 4u;
          u32 pitch = (w * bpp + 255) & ~255u;
@@ -7027,7 +7049,7 @@
          if (vm_base && src != 0xFFFFFFFFu) {
              D3D12_HEAP_PROPERTIES hu = {0}; hu.Type = D3D12_HEAP_TYPE_UPLOAD;
              D3D12_RESOURCE_DESC bd = {0};
-@@ -4005,13 +4118,20 @@
+@@ -4005,13 +4119,20 @@
          OffDS* z = &s_d3d.off_ds[i];
          z->last_frame = s_d3d.frame_count;
          if (w <= z->w && h <= z->h) return i;
@@ -7048,7 +7070,7 @@
          }
      }
      if (s_d3d.off_ds[i].res) {
-@@ -4045,6 +4165,7 @@
+@@ -4045,6 +4166,7 @@
      z->off = off; z->w = w; z->h = h;
      z->st = D3D12_RESOURCE_STATE_DEPTH_WRITE;
      z->cleared = 0; z->gen = 0; z->conv_gen = 0xFFFFFFFFu;
@@ -7056,7 +7078,7 @@
      z->last_frame = s_d3d.frame_count;
      D3D12_DEPTH_STENCIL_VIEW_DESC dv = {0};
      dv.Format = DXGI_FORMAT_D24_UNORM_S8_UINT;
-@@ -4167,6 +4288,7 @@
+@@ -4167,6 +4289,7 @@
   * render-to-texture pass) must still run -- it is what fills the texture a
   * later batch samples -- but presenting it would show a half-built frame. */
  static int s_present_this_frame = 1;
@@ -7064,7 +7086,7 @@
  
  /* Resolve a DRAW_*_TEX value: a hex raw offset, or the literal "duck" for the
   * content-identified duck texture. */
-@@ -4530,6 +4652,12 @@
+@@ -4530,6 +4653,12 @@
  {
      double _rf0 = perf_on() ? perf_now() : 0.0;
      u32 fi = s_d3d.frame_index;
@@ -7077,7 +7099,7 @@
  
      /* Drain the GPU before touching shared upload resources (vp_vb vertices,
       * vp_cb constants, per-frame texture staging): the previous frame's draws
-@@ -4810,8 +4938,12 @@
+@@ -4810,8 +4939,12 @@
          for (int _m = 0; _m < 3; _m++)
              if (dr->is_vp && dr->rt_mrt[_m])
                  off_rt_get(dr->rt_mrt[_m], dr->rt_w, dr->rt_h, dr->rt_fmt);
@@ -7092,7 +7114,7 @@
          for (int _u = 0; _u < 16; _u++) dr->tex_ds[_u] = -1;   /* set below for draws */
      }
      for (u32 _d = 0; _d < s_d3d.draw_count && _d < MAX_DRAWS; _d++) {
-@@ -5053,6 +5185,8 @@
+@@ -5053,6 +5186,8 @@
      /* Set render target + depth */
      s_d3d.cmd_list->lpVtbl->OMSetRenderTargets(s_d3d.cmd_list, 1, &rtv_handle, FALSE, &dsv_handle);
  
@@ -7101,7 +7123,7 @@
      /* Clear color and depth */
      s_d3d.cmd_list->lpVtbl->ClearRenderTargetView(
          s_d3d.cmd_list, rtv_handle, s_d3d.clear_color, 0, NULL);
-@@ -5060,6 +5194,7 @@
+@@ -5060,6 +5195,7 @@
          s_d3d.cmd_list, dsv_handle,
          D3D12_CLEAR_FLAG_DEPTH | D3D12_CLEAR_FLAG_STENCIL,
          1.0f, 0, 0, NULL);
@@ -7109,7 +7131,7 @@
  
      /* Set viewport and scissor */
      D3D12_VIEWPORT viewport = {0, 0, (float)s_d3d.width, (float)s_d3d.height, 0.0f, 1.0f};
-@@ -5170,14 +5305,18 @@
+@@ -5170,14 +5306,18 @@
                  last_topo = dr->topology;
              }
              u32 start_vert = dr->vb_byte_offset / VERTEX_STRIDE;
@@ -7129,7 +7151,7 @@
          int any = 0;
          for (u32 d = 0; d < s_d3d.draw_count && d < MAX_DRAWS; d++)
              if (s_d3d.draws[d].is_vp) { any = 1; break; }
-@@ -5187,6 +5326,10 @@
+@@ -5187,6 +5327,10 @@
              (s_d3d.tex_ready && s_d3d.pipeline_state_vp) ? s_d3d.pipeline_state_vp
                                                           : s_d3d.pipeline_state_vp_color;
          if (!vpso) vpso = s_d3d.pipeline_state_vp;
@@ -7140,7 +7162,7 @@
          { static int cap = -1, n = 0;
            if (cap < 0) { const char* e = getenv("VP_SUBMIT"); cap = e ? atoi(e) : 0; }
            if (cap && n < cap) { n++;
-@@ -5198,9 +5341,11 @@
+@@ -5198,9 +5342,11 @@
              fprintf(stderr, "[VPPASS] records=%u is_vp=%u clears=%u any=%d vpso=%p rootsig=%p\n",
                      s_d3d.draw_count, nvp, nclr, any,
                      (void*)vpso, (void*)s_d3d.vp_root_sig); } }
@@ -7154,7 +7176,7 @@
              s_d3d.cmd_list->lpVtbl->IASetPrimitiveTopology(s_d3d.cmd_list, D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
              s_d3d.cmd_list->lpVtbl->SetGraphicsRootConstantBufferView(s_d3d.cmd_list, 0,
                  s_d3d.vp_cb->lpVtbl->GetGPUVirtualAddress(s_d3d.vp_cb));
-@@ -5272,7 +5417,7 @@
+@@ -5272,7 +5418,7 @@
                      wantm[_m] = (dr->rt_mrt[_m] && !dr->no_color) ? off_rt_find(dr->rt_mrt[_m]) : -1;
                  /* The draw's own depth surface, or the shared buffer for a pass
                   * without one (and for display targets, as before). */
@@ -7163,7 +7185,7 @@
                                  ? off_ds_find(dr->zeta_off) : -1;
                  if (want != cur_rt || wantm[0] != cur_m[0] ||
                      wantm[1] != cur_m[1] || wantm[2] != cur_m[2] ||
-@@ -5306,6 +5451,7 @@
+@@ -5306,6 +5452,7 @@
                                                                 dr->no_color ? NULL : rh, FALSE, &cur_dsv);
                      s_d3d.cmd_list->lpVtbl->RSSetViewports(s_d3d.cmd_list, 1, &vp);
                      s_d3d.cmd_list->lpVtbl->RSSetScissorRects(s_d3d.cmd_list, 1, &sc);
@@ -7171,7 +7193,7 @@
                      if (wantz >= 0) {
                          /* A depth surface keeps its contents across passes; the
                           * guest clears it when it wants it cleared. */
-@@ -5319,6 +5465,7 @@
+@@ -5319,6 +5466,7 @@
                          s_d3d.cmd_list->lpVtbl->ClearDepthStencilView(s_d3d.cmd_list, dsv_handle,
                              D3D12_CLEAR_FLAG_DEPTH | D3D12_CLEAR_FLAG_STENCIL, 1.0f, 0, 0, NULL);
                      }
@@ -7179,7 +7201,7 @@
                      cur_z = wantz; cur_nc = dr->no_color; force_rebind = 0;
                      /* RT_CLEARDBG=2: magenta-clear the surface the DRAWS bind,
                       * at the moment they bind it. The guest's own clears may go
-@@ -5366,6 +5513,7 @@
+@@ -5366,6 +5514,7 @@
                      for (int _m = 0; _m < 3; _m++) cur_m[_m] = wantm[_m];
                  }
                  if (dr->is_clear) {
@@ -7187,7 +7209,7 @@
                      D3D12_CPU_DESCRIPTOR_HANDLE rh =
                          (cur_rt >= 0) ? off_rt_rtv(cur_rt) : rtv_handle;
                      /* RT_CLEARDBG=1: clear offscreen targets to magenta rather
-@@ -5383,22 +5531,33 @@
+@@ -5383,22 +5532,33 @@
                              (((dr->clear_mask & 0x1u) ? D3D12_CLEAR_FLAG_DEPTH : 0) |
                               ((dr->clear_mask & 0x2u) ? D3D12_CLEAR_FLAG_STENCIL : 0));
                          s_d3d.cmd_list->lpVtbl->ClearDepthStencilView(s_d3d.cmd_list, cur_dsv,
@@ -7225,7 +7247,7 @@
                          }
                      continue;
                  }
-@@ -5414,9 +5573,21 @@
+@@ -5414,9 +5574,21 @@
                                                  dr->fp_ctrl, dr->cmask, dr->cull,
                                                  dr_cube_mask(dr),
                                                  unnorm_mask, unnorm_dim, dr->zs_key) : NULL;
@@ -7247,7 +7269,7 @@
                  if (cur_z >= 0 && (dr->zs_key & (2u | (1u << 5)))) s_d3d.off_ds[cur_z].gen++;
                  /* Per-draw viewport: the guest rect when sane, else the
                   * full target. Scissor tracks the same rect. */
-@@ -5511,6 +5682,8 @@
+@@ -5511,6 +5683,8 @@
                        s_d3d.cmd_list->lpVtbl->OMSetRenderTargets(
                            s_d3d.cmd_list, bn, brh, FALSE, &cur_dsv);
                    } }
@@ -7256,7 +7278,7 @@
                  if (dr->indexed) {
                      if (!ib_bound) {
                          D3D12_INDEX_BUFFER_VIEW ibv;
-@@ -5526,6 +5699,9 @@
+@@ -5526,6 +5700,9 @@
                  } else
                  s_d3d.cmd_list->lpVtbl->DrawInstanced(s_d3d.cmd_list,
                      dr->vertex_count, 1, dr->vb_byte_offset / 256, 0);
@@ -7266,7 +7288,7 @@
                  /* VP_SUBMIT=<N>: prove the VP pass actually reaches the GPU.
                   * "records exist" and "draws were submitted" are different
                   * claims, and every blank-output investigation conflates them. */
-@@ -5733,6 +5909,7 @@
+@@ -5733,6 +5910,7 @@
          }
        } }
  
@@ -7274,7 +7296,7 @@
      /* CELLMARK_DUMP_MINDRAWS=<N>: only consider frames carrying at least N draw
       * records. Most render_frame calls come from the guest flip with a batch the
       * clear boundary already drained, so they present an empty backbuffer -- and
-@@ -5744,13 +5921,29 @@
+@@ -5744,13 +5922,29 @@
        /* draw_count is already reset by here; s_dbg_last_draws holds the
         * count this frame actually rendered. */
        if (mind > 0 && s_dbg_last_draws < (u32)mind) goto skip_dump_consider; }
@@ -7310,7 +7332,7 @@
      { static int mind2 = -1;
        if (mind2 < 0) { const char* e = getenv("CELLMARK_DUMP_MINDRAWS");
                         mind2 = e ? atoi(e) : 0; }
-@@ -5799,9 +5992,40 @@
+@@ -5799,9 +5993,41 @@
      }
  
      /* Close and execute */
@@ -7330,6 +7352,7 @@
      s_d3d.cmd_queue->lpVtbl->ExecuteCommandLists(s_d3d.cmd_queue, 1, cmd_lists);
 +    if (report_count || s_d3d.report_timestamp_requested) {
 +        wait_for_gpu();
++        s_d3d.report_completed_fence = s_d3d.fence_values[s_d3d.frame_index];
 +        void* mapped = NULL;
 +        D3D12_RANGE read = {0, (MAX_DRAWS + 1u) * sizeof(u64)};
 +        if (FAILED(s_d3d.report_readback->lpVtbl->Map(s_d3d.report_readback, 0, &read, &mapped)) || !mapped)
@@ -7352,7 +7375,7 @@
  
      /* D3D12_IQ=1: drain the debug layer's message queue after submitting the
       * frame. The legacy (is_vp=0) DrawInstanced path silently produced ZERO
-@@ -5956,11 +6180,17 @@
+@@ -5956,11 +6182,17 @@
      /* Present, on the vblank unless D3D12_VSYNC=0: that one is for measuring a
       * title past the display's rate. Skipped for an offscreen-only batch. */
      if (s_present_this_frame) {
@@ -7372,7 +7395,7 @@
      }
      rdoc_frame_end();
  
-@@ -5973,7 +6203,7 @@
+@@ -5973,7 +6205,7 @@
      {
          static ULONGLONG s_tt0 = 0;
          static u64 s_tframes = 0;
@@ -7381,7 +7404,7 @@
          ULONGLONG tnow = GetTickCount64();
          if (s_tt0 == 0) s_tt0 = tnow;
          if (tnow - s_tt0 >= 1000 && s_d3d.hwnd) {
-@@ -5983,7 +6213,10 @@
+@@ -5983,7 +6215,10 @@
                       g_rsx_title_base,
                       s_tframes * 1000.0 / (double)(tnow - s_tt0),
                       s_dbg_last_draws, s_d3d.width, s_d3d.height);
@@ -7393,7 +7416,7 @@
              s_tframes = 0;
              s_tt0 = tnow;
          }
-@@ -6049,7 +6282,7 @@
+@@ -6049,7 +6284,7 @@
       * it would strobe the bare backbuffer clear. Keep accumulating -- the
       * composite draw that targets the display presents the whole chain, in
       * order, in one command list. Empty batches still present (boot/idle). */
@@ -7402,7 +7425,7 @@
      for (u32 _i = 0; _i < s_d3d.draw_count && _i < MAX_DRAWS; _i++)
          if (!s_d3d.draws[_i].is_clear && s_d3d.draws[_i].rt_off == 0) {
              flip_has_display = 1;
-@@ -6072,6 +6305,7 @@
+@@ -6072,6 +6307,7 @@
  static void d3d12_clear(void* ud, u32 flags, u32 color, float depth, u8 stencil)
  {
      (void)ud;
@@ -7410,7 +7433,7 @@
  
      /* Convert RSX ARGB u32 to float[4] RGBA */
      float cc[4];
-@@ -6089,6 +6323,28 @@
+@@ -6089,6 +6325,28 @@
  
      u32 rt_w = 0, rt_h = 0, mrt[3] = {0, 0, 0};
      u32 rt = current_rt_off(&rt_w, &rt_h, mrt);
@@ -7439,7 +7462,7 @@
  
      /* An OFFSCREEN clear is just an ordered op in the current frame's pass
       * chain (demosaic clears each effect pass's surface) -- record it, don't
-@@ -7193,6 +7449,9 @@
+@@ -7193,6 +7451,9 @@
  
  static void d3d12_draw_arrays(void* ud, u32 primitive, u32 first, u32 count)
  {
@@ -7449,7 +7472,7 @@
      /* RSX_LIVE_FEED_DBG=1: pair with the [feed] method counts so "the FIFO
       * carries no draw batches" can be checked against "the backend is told
       * to draw" in the same run. */
-@@ -7457,6 +7716,9 @@
+@@ -7457,6 +7718,9 @@
  
  static void d3d12_draw_indexed(void* ud, u32 primitive, u32 first, u32 count)
  {
@@ -7459,7 +7482,7 @@
      /* RSX_LIVE_FEED_DBG=1: pair with the [feed] method counts so "the FIFO
       * carries no draw batches" can be checked against "the backend is told
       * to draw" in the same run. */
-@@ -7850,6 +8112,89 @@
+@@ -7850,6 +8114,87 @@
   * -----------------------------------------------------------------------*/
  
  static rsx_backend s_d3d12_backend = {0};
@@ -7485,13 +7508,11 @@
 +static int d3d12_report(void* user, u32 method, u32 argument, u64* timestamp, u32* value)
 +{
 +    (void)user;
-+    /* NVIDIA US8525842B1, table 2: ZCULL stats count geometry blocks. Only
-+     * an interval without geometry since reset is known without a culling model. */
-+    const u32 type = argument >> 24;
-+    const int empty_zcull = type >= 2 && type <= 5 && !s_d3d.zcull_geometry_seen;
++    /* NV47's four packed statistic payloads are not defined by a host
++     * occlusion query. Even their reset payload needs a hardware reference. */
 +    if (!s_d3d.initialized || (method != 0x17C8 && method != 0x17CC && method != 0x1800) ||
 +        (method == 0x17C8 && (!argument || argument > 3)) || (method == 0x17CC && argument > 1) ||
-+        (method == 0x1800 && (((argument >> 24) != 1 && !empty_zcull) || !timestamp || !value))) return 0;
++        (method == 0x1800 && ((argument >> 24) != 1 || !timestamp || !value))) return 0;
 +    report_resources();
 +    const int saved_present = s_present_this_frame;
 +    s_present_this_frame = 0;
@@ -7506,7 +7527,7 @@
 +    if (method == 0x17CC) s_d3d.report_enabled = argument != 0;
 +    if (method == 0x1800) {
 +        if (!timestamp || !value) return 0;
-+        *timestamp = s_d3d.report_timestamp; *value = empty_zcull ? 0 : s_d3d.report_value;
++        *timestamp = s_d3d.report_timestamp; *value = s_d3d.report_value;
 +    }
 +    return 1;
 +}
@@ -7662,11 +7683,43 @@
      print(f"Wrote {args.out} ({len(elf)} bytes, "
 --- a/libs/video/rsx_commands.c
 +++ b/libs/video/rsx_commands.c
-@@ -27,6 +27,57 @@
+@@ -27,6 +27,89 @@
   * -----------------------------------------------------------------------*/
  
  static rsx_backend* s_backend = NULL;
 +static CellGcmZcullInfo s_zcull_regions[CELL_GCM_MAX_ZCULL_COUNT];
++
++int rsx_set_conditional_render(rsx_state* state, u32 mode, u32 address)
++{
++    if (!state || (mode != 1 && mode != 2)) return 0;
++    if (mode == 2) {
++        extern int ps3_native_guest_range_backed(u32, u32);
++        if (!address || (address & 15) || !ps3_native_guest_range_backed(address, 16)) return 0;
++    }
++    state->conditional_render_enabled = mode == 2;
++    state->conditional_report_address = mode == 2 ? address : 0;
++    state->conditional_result_pending = mode == 2;
++    state->conditional_render_passed = mode == 1;
++    return 1;
++}
++
++static int rsx_conditional_passes(rsx_state* state)
++{
++    if (!state->conditional_render_enabled) return 1;
++    if (!state->conditional_result_pending) return state->conditional_render_passed;
++    extern int ps3_native_guest_range_backed(u32, u32);
++    extern u32 vm_read32(u32);
++    if (!s_backend || !s_backend->submit || !s_backend->submit(s_backend->userdata) ||
++        !ps3_native_guest_range_backed(state->conditional_report_address, 16)) {
++        extern void ps3_native_stop(void);
++        fprintf(stderr, "[native-blocked] conditional render report is unavailable\n");
++        fflush(stderr); ps3_native_stop();
++    }
++    /* Prior GPU report writes are complete before this CPU-side predicate. */
++    state->conditional_render_passed = vm_read32(state->conditional_report_address + 8) != 0;
++    state->conditional_result_pending = 0;
++    return state->conditional_render_passed;
++}
 +
 +CellGcmZcullInfo* rsx_zcull_get(u32 index)
 +{
@@ -7687,7 +7740,7 @@
 +        region->width > 65535 || region->height > 65535 || (region->cullStart & 4095) ||
 +        (u64)region->cullStart + area > 3u * 1024 * 1024 || (region->offset & 4095) ||
 +        (region->zFormat != 1 && region->zFormat != 2) || region->aaFormat > 15 ||
-+        region->zcullDir > 1 || region->zcullFormat > 0x3FF || !region->sFunc || region->sFunc > 8 ||
++        region->zcullDir > 1 || region->zcullFormat > 1 || region->sFunc > 7 ||
 +        region->sRef > 255 || region->sMask > 255 ||
 +        (u64)region->offset + area * (region->zFormat == 1 ? 2 : 4) > local_size)) return -17;
 +    for (u32 i = 0; region->bound && i < CELL_GCM_MAX_ZCULL_COUNT; ++i) {
@@ -7720,7 +7773,7 @@
  
  /* Last NV406E_SET_REFERENCE value seen in the FIFO. The title writes a
   * reference then spins on the GCM control register's `ref` field until the RSX
-@@ -51,6 +102,7 @@
+@@ -51,6 +134,7 @@
  void rsx_state_init(rsx_state* state)
  {
      memset(state, 0, sizeof(rsx_state));
@@ -7728,7 +7781,7 @@
      /* RSX reset value for the constant vertex attributes is (0,0,0,1); a zeroed
       * struct would leave w at 0. */
      for (int _i = 0; _i < RSX_MAX_VERTEX_ATTRIBS; _i++)
-@@ -439,6 +491,10 @@
+@@ -439,6 +523,18 @@
      { static int _rt=-1; if(_rt<0){ const char* e=getenv("RSX_TRACE");
          _rt = e ? (atoi(e) > 1 ? atoi(e) : 250) : 0; }
        if(_rt){ static int _m=0; if(PS3_LOG_FIRST(_m, _rt)) fprintf(stderr,"[rsxm] method=0x%04X data=0x%08X\n", method, data); } }
@@ -7736,10 +7789,18 @@
 +        state->zcull_stats_enable = data;
 +        return 0;
 +    }
++    if (method == NV4097_SET_ZCULL_EN) {
++        state->zcull_enable = data;
++        return 0;
++    }
++    if (method == NV4097_SET_RENDER_ENABLE) {
++        /* Conditional offsets need the active DMA mapping, resolved by GCM. */
++        return (data >> 24) == 1 && rsx_set_conditional_render(state, 1, 0) ? 0 : -1;
++    }
      /* Vertex-program constants and microcode are most of a frame's method
       * stream (God of War HD: about 140k constant vec4s and 70k microcode
       * headers a second), and their handlers sat behind every check below.
-@@ -523,6 +579,15 @@
+@@ -523,6 +619,15 @@
            s_sem_ctx = data;
        }
        if (method == 0x1D6C) { s_sem_off = data; return 0; }
@@ -7755,7 +7816,7 @@
        if ((method == 0x1D70 || method == 0x1D74) && s_sem_ctx == 0xFEED0001u) {
          extern void vm_write32(uint32_t a, uint32_t v);
          extern u32 gcm_io_offset_to_ea(u32 io);
-@@ -542,17 +607,19 @@
+@@ -542,17 +647,19 @@
           * 0x00010000 != 1 and spun forever (gcm/cube sample hang after init).
           * Apply the same swap the hardware does so the pre-swap cancels out. */
          u32 val = (data & 0xff00ff00u) | ((data >> 16) & 0xffu) | ((data & 0xffu) << 16);
@@ -7778,7 +7839,7 @@
          return 0;
        } }
      if ((method >= 0x200 && method <= 0x23C) ||
-@@ -653,7 +720,10 @@
+@@ -653,7 +760,10 @@
                if (!_first) fprintf(stderr, "[RSX] CLEAR_SURFACE new mask=0x%X color=0x%08X\n",
                                     data, state->color_clear_value); } }
          if (s_backend && s_backend->clear) {
@@ -7790,6 +7851,24 @@
              u8 stencil = state->zstencil_clear_value & 0xFF;
              s_backend->clear(s_backend->userdata, data,
                             state->color_clear_value, depth, stencil);
+@@ -913,7 +1023,7 @@
+             }
+         }
+         ps3_ms("rsx:draw_arrays");
+-        if (s_backend && s_backend->draw_arrays)
++        if (s_backend && s_backend->draw_arrays && rsx_conditional_passes(state))
+             s_backend->draw_arrays(s_backend->userdata, state->primitive_type, first, count);
+         return 0;
+     }
+@@ -939,7 +1049,7 @@
+         u32 count = ((data >> 24) & 0xFF) + 1;
+         { static int _d=0; if (PS3_LOG_FIRST(_d, 8)) fprintf(stderr, "[RSX] DRAW_INDEX_ARRAY prim=%u first=%u count=%u idxoff=0x%X dma=0x%X\n", state->primitive_type, first, count, state->index_array_offset, state->index_array_dma); }
+         ps3_ms("rsx:draw_indexed");
+-        if (s_backend && s_backend->draw_indexed)
++        if (s_backend && s_backend->draw_indexed && rsx_conditional_passes(state))
+             s_backend->draw_indexed(s_backend->userdata, state->primitive_type,
+                                     first, count);
+         return 0;
 --- a/tools/spu_lifter.py
 +++ b/tools/spu_lifter.py
 @@ -541,6 +541,15 @@

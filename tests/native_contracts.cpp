@@ -506,6 +506,8 @@ int main(int argc, char** argv) {
             rsx_set_backend(&semaphore_backend);
             if (zcull(0, region_range, 0x20001, region_status) != (u32)-17 ||
                 zcull(0, region_range, 3ull * 1024 * 1024 << 32, region_status) != (u32)-17 ||
+                zcull(0, region_range, 0x20000, (region_status & ~(15ull << 44)) | (8ull << 44)) != (u32)-17 ||
+                zcull(0, region_range, 0x20000, (region_status & ~(0x3FFull << 34)) | (2ull << 34)) != (u32)-17 ||
                 synthetic_zcull_calls || rsx_zcull_get(0)->bound) return 61;
             if (zcull(0, region_range, 0x20000, region_status) || synthetic_zcull_early || synthetic_zcull_calls != 1 ||
                 rsx_zcull_get(0) != cellGcmGetZcullInfo(0) || !rsx_zcull_get(0)->bound ||
@@ -515,6 +517,13 @@ int main(int argc, char** argv) {
             synthetic_zcull_old_bound = 1; synthetic_zcull_old_offset = 0x20000;
             if (zcull(0, region_range, 0x20000, region_status & 0xFFFFFFFF00000000ull) || synthetic_zcull_early ||
                 rsx_zcull_get(0)->bound || synthetic_zcull_calls != 2 || rsx_zcull_get(8)) return 63;
+            synthetic_zcull_old_bound = 0; synthetic_zcull_old_offset = 0;
+            const u64 stencil_never = region_status & ~(15ull << 44);
+            if (zcull(7, region_range, (8192ull << 32) | 0x40000, stencil_never) ||
+                rsx_zcull_get(7)->sFunc || !rsx_zcull_get(7)->bound || synthetic_zcull_calls != 3) return 64;
+            synthetic_zcull_old_bound = 1; synthetic_zcull_old_offset = 0x40000;
+            if (zcull(7, region_range, (8192ull << 32) | 0x40000, stencil_never & 0xFFFFFFFF00000000ull) ||
+                rsx_zcull_get(7)->bound || synthetic_zcull_calls != 4) return 65;
             synthetic_submits = 0; rsx_set_backend(nullptr);
             if (attribute(id, 0x104, 0, (64ull << 32) | 64, 256ull << 32)) return 27;
             auto* display = cellGcmGetDisplayBufferByFlipIndex(0);

@@ -265,11 +265,11 @@ Basic pad packets now deliver measured buttons/sticks and connection errors;
 actuator requests validate the 8-byte ABI and the host result. Extended pressure
 and sensor packets remain blocked. FIFO DMA contexts distinguish device and
 report semaphores; the original initialization now passes its device-ready wait.
-ZCULL statistics can report an empty interval before geometry or after an explicit
-counter reset, with a real GPU timestamp; active-geometry statistics remain blocked.
-The original statistics-enable command is now tracked: disabled collection adds no
-geometry, and disabling it preserves earlier observations until an explicit reset.
-Real GPU regressions check both transitions and retain ZPASS independently.
+ZPASS uses completed D3D12 occlusion queries and actual GPU timestamps in nanoseconds.
+The GPU clock's epoch has not been compared to NV47 hardware. Types 2–5 are always
+unsupported, including reset/disabled/empty intervals: the previous zero shortcut
+was removed because their packed payloads are not verified. Enable/disable and reset
+commands remain ordered and preserve the independent ZPASS accumulator.
 RSX owns the 60000/1001 Hz guest video clock. Original display-queue commands wait
 for GPU completion and the next eligible VBlank; D3D12 presents the selected buffer
 and LV2 delivers the original interrupt events. FIFO references require GPU completion.
@@ -285,12 +285,38 @@ separate depth/stencil surfaces across region changes. Real RTX 4070 regressions
 verify samples, stencil contents, rebindings and rejection of uninitialized or
 incompatible surfaces. Unsupported aliases, formats and counters stop explicitly.
 A two-thread GPU regression reproduces and fixes a FIFO/window-title deadlock:
-only the window owner updates its title. The real boot now reaches additional
-draws and stops at active `ZCULL_STATS` (`0x1800`, argument `0x02000640`), whose
-hardware counter semantics are not yet validated. No new game scanout or menu
-was verified. Pass
+only the window owner updates its title. The earlier active-geometry diagnostic
+reached `ZCULL_STATS` (`0x1800`, argument `0x02000640`). The current real boot stops
+at the first such request, before publishing an unverified reset value. No new
+game scanout or menu was verified. Conditional rendering resolves the report's DMA
+address, waits for preceding GPU work and latches its predicate until the next
+render-enable command; real GPU/FIFO tests check visible/hidden draws, accumulated
+samples, main/local guest reports, endian order, completion fences and bounds.
+Only one active LV2 RSX context is supported; context switching, bound Z16/MSAA,
+region aliases and importing uninitialized depth contents remain explicit gaps.
+Pass
 `run ... --enter-button cross` or `circle` explicitly; no preference is inferred
 from language/region. No interpreter is used.
+The ZCULL reference audit uses [RPCS3 RSXZCULL.cpp at 8d6b42e](https://github.com/RPCS3/rpcs3/blob/8d6b42e78adae5cc4685b45ecf2f370273e91810/rpcs3/Emu/RSX/RSXZCULL.cpp),
+its RSX/LV2/Vulkan callers, [PSL1GHT definitions](https://github.com/ps3dev/PSL1GHT/blob/master/ppu/include/rsx/gcm_sys.h),
+and PRs [10823](https://github.com/RPCS3/rpcs3/pull/10823) and [12645](https://github.com/RPCS3/rpcs3/pull/12645).
+No GPL implementation is incorporated.
+
+| Report | Reference behavior | ps3-native evidence |
+| --- | --- | --- |
+| 1: ZPASS | Precise GPU samples or optional boolean approximation | Real single-sample GPU counts; no boolean substitution |
+| 2/3/4: ZCULL_STATS/1/2 | Explicitly unimplemented; active/inactive sentinel values | Packed NV47 counters unknown; no guest result published |
+| 5: ZCULL_STATS3 | Inverse-visibility approximation | Hardware semantics unknown; no guest result published |
+
+`ps3-native-rsx-reports probe` emits JSONL for the same 64×64 scene used by
+`tests/zcull_ps3_probe.c`, including all eight regions, visibility, reset and surface
+changes. With an existing open PSL1GHT toolchain, `make -f tests/zcull_probe.mk`
+builds the optional PS3 ELF; capture its stdout with an existing homebrew loader.
+No PSL1GHT toolchain or real PS3 was available here, so that ELF is **not built or
+hardware-validated**. `python tests/compare_zcull_probe.py native.log ps3.log`
+compares case values without comparing clock epochs; exit 2 denotes missing hardware
+or counter gaps. Matching this finite probe alone does not certify NV47 fidelity.
+
 No selector transition or gameplay is verified. Original and derived
 proprietary files remain outside Git.
 Kernel mutex creation/destruction, FIFO/guest-priority waiters, timeout cancellation,

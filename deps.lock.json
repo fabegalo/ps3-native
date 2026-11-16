@@ -8,7 +8,7 @@
     "patches": [
       {
         "path": "patches/ps3recomp/0001-strict-aot-execution.patch",
-        "sha256": "52fd307242027b9350231ffbd509f290791002800ff323036cb0e6193d2c339b",
+        "sha256": "4605470d3668e09e2cf16619df66d8143210c9370c94c4dffa43ade5198d49ef",
         "source_hash_normalization": "LF",
         "files": {
           "runtime/ppu/ppu_hle.cpp": {
@@ -73,7 +73,7 @@
           },
           "libs/video/cellGcmSys.c": {
             "before": "35d26e6bcd8e3985887a3b6436406a00d1d69fa30b9b854fb0f0012f692873f8",
-            "after": "02b331b647d07bdbb15eb0445a25ae56082163f2fc571a5447f474f22fc7e0eb"
+            "after": "8056efb8674127ec81934235677328215f897969635d10638c6f27c1d7c141aa"
           },
           "libs/system/sysPrxForUser.c": {
             "before": "efd803007b0d2dadb45882d76cf05ed47c83d3f51642aead66c8e50c7dfe48b5",
@@ -169,11 +169,11 @@
           },
           "libs/video/rsx_commands.h": {
             "before": "49a82d14dec8261c4d0fc7af519760dae319f74c43bca5318cb59c63677ec02f",
-            "after": "000503676d528eb71349ae3aafe03cdf23cf7348269a71fb1297149cec9534ec"
+            "after": "5177b07b1d4884e631a6b5c992cb591f751dd697495fe8b74c5e76aefba8b6ab"
           },
           "libs/video/rsx_d3d12_backend.c": {
             "before": "054ee0aa54818beb31873f7b2e2c3526ba83cfeb3e6a16fb6113ba0ace127748",
-            "after": "380115c0d8ccee98756b1fb68a7bd67118a1db3deb665b7639d684c87a43f77d"
+            "after": "411fdb14d81b190d1caabe6b565631407810fd28468a53c4e9bd5556a4cf51c9"
           },
           "tools/wrap_spu_elf.py": {
             "before": "20c3154cbdd22b9eb61f1454b4ca6f8d4b626bb577bae8dd3a9be2fe40cb3c56",
@@ -181,7 +181,7 @@
           },
           "libs/video/rsx_commands.c": {
             "before": "e32ea4691ef4e43bf5d88eac20cc8402b83be48d13c704cdf0ca94a9f829dfcc",
-            "after": "aa3b4d6e4a157ceee0e3099e1f6d4429d68a7e73c522ed3a1f9e257a1658ff46"
+            "after": "60c9586594566eb3db995ab933b76f04132b53fe5aead775ef265f351ad7163a"
           },
           "tools/spu_lifter.py": {
             "before": "51af02e6c428f5af27d78a6b4f808f8c66c016e49f5f4b298897d2a68345d826",
