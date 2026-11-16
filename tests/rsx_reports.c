@@ -88,8 +88,15 @@ int main(void)
     method(NV4097_SET_COLOR_CLEAR_VALUE, 0xFF000000);
     method(NV4097_SET_ZSTENCIL_CLEAR_VALUE, 0xFFFFFF00);
     method(NV4097_CLEAR_SURFACE, 0xF3);
+    for (u32 type = 2; type <= 5; ++type) {
+        count = 0xCAFEBABE;
+        if (!d3d12_report(NULL, 0x1800, type << 24, &first, &count) || count || first < second ||
+            FAILED(s_d3d.swap_chain->lpVtbl->GetLastPresentCount(s_d3d.swap_chain, &presents_after)) ||
+            presents_after != presents_before) return 18;
+        second = first;
+    }
     draw();
-    if (!report(&first, &count) || count != 4096) { fprintf(stderr, "visible samples=%u\n", count); return 4; }
+    if (!report(&first, &count) || count != 4096 || first < second) { fprintf(stderr, "visible samples=%u\n", count); return 4; }
     if (!d3d12_report(NULL, 0x17C8, 1, NULL, NULL)) return 5;
     draw();
     if (!report(&second, &count) || count || second < first) { fprintf(stderr, "preserved depth samples=%u\n", count); return 6; }
@@ -126,8 +133,10 @@ int main(void)
     if (!s_pending_display_content || s_d3d.draw_count) return 15;
     rsx_d3d12_backend_present();
     if (FAILED(s_d3d.swap_chain->lpVtbl->GetLastPresentCount(s_d3d.swap_chain, &presents_after)) || presents_after != presents_before + 1 || s_pending_display_content) return 16;
-    first = 0xAABBCCDD11223344ull; count = 0xCAFEBABE;
-    if (d3d12_report(NULL, 0x1800, 2u << 24, &first, &count) || first != 0xAABBCCDD11223344ull || count != 0xCAFEBABE) return 10;
+    for (u32 type = 2; type <= 6; ++type) {
+        first = 0xAABBCCDD11223344ull; count = 0xCAFEBABE;
+        if (d3d12_report(NULL, 0x1800, type << 24, &first, &count) || first != 0xAABBCCDD11223344ull || count != 0xCAFEBABE) return 10;
+    }
     rsx_d3d12_backend_shutdown(); vm_shutdown();
     puts("Verified real GPU samples, timestamps, semaphore completion, preserved depth and no implicit present");
     return 0;

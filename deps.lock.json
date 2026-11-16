@@ -8,7 +8,7 @@
     "patches": [
       {
         "path": "patches/ps3recomp/0001-strict-aot-execution.patch",
-        "sha256": "9c804c1d5beaf83b4613a2a3468693a04ea4c9aaee0bbd74d5b750027b44f8ff",
+        "sha256": "1074bace464be9dbaece8b476c9c59e07ce7bf625810067c191b7c9f2e9076e2",
         "source_hash_normalization": "LF",
         "files": {
           "runtime/ppu/ppu_hle.cpp": {
@@ -73,7 +73,7 @@
           },
           "libs/video/cellGcmSys.c": {
             "before": "35d26e6bcd8e3985887a3b6436406a00d1d69fa30b9b854fb0f0012f692873f8",
-            "after": "0f1429dbeca12cb444452de5255113e18c868e75ab7b9b15c69b211b91d11f31"
+            "after": "499cfa4672a9b7ab92b1891d2165df377a479dde8ca5029a081734e1e8e19568"
           },
           "libs/system/sysPrxForUser.c": {
             "before": "efd803007b0d2dadb45882d76cf05ed47c83d3f51642aead66c8e50c7dfe48b5",
@@ -173,7 +173,7 @@
           },
           "libs/video/rsx_d3d12_backend.c": {
             "before": "054ee0aa54818beb31873f7b2e2c3526ba83cfeb3e6a16fb6113ba0ace127748",
-            "after": "29a0cb80cc290f0a090a1b4e797f692c8c36bcb914da811649ac53d3cd63d1a5"
+            "after": "713a3df99b49ca1a726393dd92d408c5ab52411ab480c042d95434fecffe17b6"
           },
           "tools/wrap_spu_elf.py": {
             "before": "20c3154cbdd22b9eb61f1454b4ca6f8d4b626bb577bae8dd3a9be2fe40cb3c56",

@@ -257,9 +257,12 @@ Basic pad packets now deliver measured buttons/sticks and connection errors;
 actuator requests validate the 8-byte ABI and the host result. Extended pressure
 and sensor packets remain blocked. FIFO DMA contexts distinguish device and
 report semaphores; the original initialization now passes its device-ready wait.
-The latest session stops at `ZCULL_STATS` (report type 2, offset `0x640`). This
-counter has no validated implementation in the current backend; measured ZPASS
-support does not cover it. The original flip/interrupt path is not yet verified. Pass
+ZCULL statistics can report an empty channel before any geometry, with a real
+GPU timestamp; statistics after geometry remain blocked. The latest session
+passes those initial reports and stops at the original FIFO display-queue
+command (`0xE944`), which has no HLE preparation record. Its device acknowledgement,
+selected-buffer presentation and interrupt completion still require integration.
+The original flip/interrupt path is not yet verified. Pass
 `run ... --enter-button cross` or `circle` explicitly; no preference is inferred
 from language/region. No interpreter is used.
 No game frame, selector transition or gameplay is verified. Original and derived

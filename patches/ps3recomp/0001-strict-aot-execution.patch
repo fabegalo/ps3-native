@@ -3355,7 +3355,7 @@
 +        const u32 address = m == 0x1800 ? (main ? gcm_io2ea(offset) :
 +            s_kernel_report_base ? s_kernel_report_base + offset : 0) : 0;
 +        const int valid = m != 0x1800 ||
-+            ((v >> 24) == 1 && !(offset & 15) && (main ? address && ps3_native_guest_range_backed(address, 16) :
++            ((v >> 24) >= 1 && (v >> 24) <= 5 && !(offset & 15) && (main ? address && ps3_native_guest_range_backed(address, 16) :
 +                (s_report_dma == 0xFEED0000u || s_report_dma == 0x66626660u) && offset / 16 < 2048));
 +        u64 timestamp = 0; u32 value = 0;
 +        if (!valid || !backend || !backend->report || !backend->report(backend->userdata, m, v, &timestamp, &value)) {
@@ -6257,7 +6257,7 @@
      /* Indexed VP draw (upload_tris_vp_ix): ib_first/index_count are u32
       * indices into vp_ib, relative to the vertex at vb_byte_offset. */
      int   indexed;
-@@ -292,6 +294,14 @@
+@@ -292,6 +294,15 @@
      ID3D12Resource*            render_targets[FRAME_COUNT];
      ID3D12CommandAllocator*    cmd_allocators[FRAME_COUNT];
      ID3D12GraphicsCommandList* cmd_list;
@@ -6269,10 +6269,11 @@
 +    u32 report_value;
 +    int report_enabled;
 +    int report_timestamp_requested;
++    int zcull_geometry_seen;
  
      /* Synchronization */
      ID3D12Fence* fence;
-@@ -418,6 +428,40 @@
+@@ -418,6 +429,40 @@
  } D3D12State;
  
  static D3D12State s_d3d;
@@ -6313,7 +6314,7 @@
  char g_rsx_title_base[128] = "ps3recomp";
  static u32 s_dbg_last_draws = 0;
  static u64 s_req_verts = 0, s_req_draws = 0, s_drop_draws = 0;
-@@ -1409,11 +1453,18 @@
+@@ -1409,11 +1454,18 @@
  {
      u32 fi = s_d3d.frame_index;
      s_d3d.fence_values[fi]++;
@@ -6334,7 +6335,7 @@
          /* NEVER wait unbounded here: this runs on the vblank ticker, which also
           * drives the guest's vblank handlers, the FIFO drain, and the fence
           * publication. A device removal (TDR) leaves the D3D12 fence unsignaled
-@@ -1424,8 +1475,15 @@
+@@ -1424,8 +1476,15 @@
           * carry on (subsequent D3D calls fail visibly but the game keeps
           * running headless). */
          for (int tries = 0; tries < 3; tries++) {
@@ -6351,7 +6352,7 @@
              HRESULT rr = s_d3d.device->lpVtbl->GetDeviceRemovedReason(s_d3d.device);
              printf("[D3D12] wait_for_gpu STUCK %ds: want %llu got %llu removed=0x%08lX\n",
                     2 * (tries + 1),
-@@ -1436,6 +1494,9 @@
+@@ -1436,6 +1495,9 @@
              if (rr != 0 /* S_OK: device still alive, keep waiting a bit */)
                  break;
          }
@@ -6361,7 +6362,7 @@
      }
  }
  
-@@ -4167,6 +4228,7 @@
+@@ -4167,6 +4229,7 @@
   * render-to-texture pass) must still run -- it is what fills the texture a
   * later batch samples -- but presenting it would show a half-built frame. */
  static int s_present_this_frame = 1;
@@ -6369,7 +6370,7 @@
  
  /* Resolve a DRAW_*_TEX value: a hex raw offset, or the literal "duck" for the
   * content-identified duck texture. */
-@@ -4530,6 +4592,12 @@
+@@ -4530,6 +4593,12 @@
  {
      double _rf0 = perf_on() ? perf_now() : 0.0;
      u32 fi = s_d3d.frame_index;
@@ -6382,7 +6383,7 @@
  
      /* Drain the GPU before touching shared upload resources (vp_vb vertices,
       * vp_cb constants, per-frame texture staging): the previous frame's draws
-@@ -5053,6 +5121,8 @@
+@@ -5053,6 +5122,8 @@
      /* Set render target + depth */
      s_d3d.cmd_list->lpVtbl->OMSetRenderTargets(s_d3d.cmd_list, 1, &rtv_handle, FALSE, &dsv_handle);
  
@@ -6391,7 +6392,7 @@
      /* Clear color and depth */
      s_d3d.cmd_list->lpVtbl->ClearRenderTargetView(
          s_d3d.cmd_list, rtv_handle, s_d3d.clear_color, 0, NULL);
-@@ -5060,6 +5130,7 @@
+@@ -5060,6 +5131,7 @@
          s_d3d.cmd_list, dsv_handle,
          D3D12_CLEAR_FLAG_DEPTH | D3D12_CLEAR_FLAG_STENCIL,
          1.0f, 0, 0, NULL);
@@ -6399,7 +6400,7 @@
  
      /* Set viewport and scissor */
      D3D12_VIEWPORT viewport = {0, 0, (float)s_d3d.width, (float)s_d3d.height, 0.0f, 1.0f};
-@@ -5170,14 +5241,18 @@
+@@ -5170,14 +5242,18 @@
                  last_topo = dr->topology;
              }
              u32 start_vert = dr->vb_byte_offset / VERTEX_STRIDE;
@@ -6419,7 +6420,7 @@
          int any = 0;
          for (u32 d = 0; d < s_d3d.draw_count && d < MAX_DRAWS; d++)
              if (s_d3d.draws[d].is_vp) { any = 1; break; }
-@@ -5187,6 +5262,10 @@
+@@ -5187,6 +5263,10 @@
              (s_d3d.tex_ready && s_d3d.pipeline_state_vp) ? s_d3d.pipeline_state_vp
                                                           : s_d3d.pipeline_state_vp_color;
          if (!vpso) vpso = s_d3d.pipeline_state_vp;
@@ -6430,7 +6431,7 @@
          { static int cap = -1, n = 0;
            if (cap < 0) { const char* e = getenv("VP_SUBMIT"); cap = e ? atoi(e) : 0; }
            if (cap && n < cap) { n++;
-@@ -5198,9 +5277,11 @@
+@@ -5198,9 +5278,11 @@
              fprintf(stderr, "[VPPASS] records=%u is_vp=%u clears=%u any=%d vpso=%p rootsig=%p\n",
                      s_d3d.draw_count, nvp, nclr, any,
                      (void*)vpso, (void*)s_d3d.vp_root_sig); } }
@@ -6444,7 +6445,7 @@
              s_d3d.cmd_list->lpVtbl->IASetPrimitiveTopology(s_d3d.cmd_list, D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
              s_d3d.cmd_list->lpVtbl->SetGraphicsRootConstantBufferView(s_d3d.cmd_list, 0,
                  s_d3d.vp_cb->lpVtbl->GetGPUVirtualAddress(s_d3d.vp_cb));
-@@ -5306,6 +5387,7 @@
+@@ -5306,6 +5388,7 @@
                                                                 dr->no_color ? NULL : rh, FALSE, &cur_dsv);
                      s_d3d.cmd_list->lpVtbl->RSSetViewports(s_d3d.cmd_list, 1, &vp);
                      s_d3d.cmd_list->lpVtbl->RSSetScissorRects(s_d3d.cmd_list, 1, &sc);
@@ -6452,7 +6453,7 @@
                      if (wantz >= 0) {
                          /* A depth surface keeps its contents across passes; the
                           * guest clears it when it wants it cleared. */
-@@ -5319,6 +5401,7 @@
+@@ -5319,6 +5402,7 @@
                          s_d3d.cmd_list->lpVtbl->ClearDepthStencilView(s_d3d.cmd_list, dsv_handle,
                              D3D12_CLEAR_FLAG_DEPTH | D3D12_CLEAR_FLAG_STENCIL, 1.0f, 0, 0, NULL);
                      }
@@ -6460,7 +6461,7 @@
                      cur_z = wantz; cur_nc = dr->no_color; force_rebind = 0;
                      /* RT_CLEARDBG=2: magenta-clear the surface the DRAWS bind,
                       * at the moment they bind it. The guest's own clears may go
-@@ -5366,6 +5449,7 @@
+@@ -5366,6 +5450,7 @@
                      for (int _m = 0; _m < 3; _m++) cur_m[_m] = wantm[_m];
                  }
                  if (dr->is_clear) {
@@ -6468,7 +6469,7 @@
                      D3D12_CPU_DESCRIPTOR_HANDLE rh =
                          (cur_rt >= 0) ? off_rt_rtv(cur_rt) : rtv_handle;
                      /* RT_CLEARDBG=1: clear offscreen targets to magenta rather
-@@ -5383,22 +5467,25 @@
+@@ -5383,22 +5468,25 @@
                              (((dr->clear_mask & 0x1u) ? D3D12_CLEAR_FLAG_DEPTH : 0) |
                               ((dr->clear_mask & 0x2u) ? D3D12_CLEAR_FLAG_STENCIL : 0));
                          s_d3d.cmd_list->lpVtbl->ClearDepthStencilView(s_d3d.cmd_list, cur_dsv,
@@ -6497,7 +6498,7 @@
                          }
                      continue;
                  }
-@@ -5414,6 +5501,9 @@
+@@ -5414,6 +5502,9 @@
                                                  dr->fp_ctrl, dr->cmask, dr->cull,
                                                  dr_cube_mask(dr),
                                                  unnorm_mask, unnorm_dim, dr->zs_key) : NULL;
@@ -6507,7 +6508,7 @@
                  s_d3d.cmd_list->lpVtbl->SetPipelineState(s_d3d.cmd_list,
                                                           dpso ? dpso : vpso);
                  s_d3d.cmd_list->lpVtbl->OMSetStencilRef(s_d3d.cmd_list, dr->stencil_ref & 0xFFu);
-@@ -5511,6 +5601,8 @@
+@@ -5511,6 +5602,8 @@
                        s_d3d.cmd_list->lpVtbl->OMSetRenderTargets(
                            s_d3d.cmd_list, bn, brh, FALSE, &cur_dsv);
                    } }
@@ -6516,7 +6517,7 @@
                  if (dr->indexed) {
                      if (!ib_bound) {
                          D3D12_INDEX_BUFFER_VIEW ibv;
-@@ -5526,6 +5618,9 @@
+@@ -5526,6 +5619,9 @@
                  } else
                  s_d3d.cmd_list->lpVtbl->DrawInstanced(s_d3d.cmd_list,
                      dr->vertex_count, 1, dr->vb_byte_offset / 256, 0);
@@ -6526,7 +6527,7 @@
                  /* VP_SUBMIT=<N>: prove the VP pass actually reaches the GPU.
                   * "records exist" and "draws were submitted" are different
                   * claims, and every blank-output investigation conflates them. */
-@@ -5746,9 +5841,11 @@
+@@ -5746,9 +5842,11 @@
        if (mind > 0 && s_dbg_last_draws < (u32)mind) goto skip_dump_consider; }
      if (s_d3d.dump_skip_left > 0 && s_d3d.dump_frames_left > 0) s_d3d.dump_skip_left--;
  skip_dump_consider: ;
@@ -6541,7 +6542,7 @@
      int dumping = (s_d3d.dump_frames_left > 0 && s_d3d.readback_buf
                     && s_d3d.dump_skip_left == 0);
      { static int mind2 = -1;
-@@ -5799,9 +5896,40 @@
+@@ -5799,9 +5897,40 @@
      }
  
      /* Close and execute */
@@ -6583,7 +6584,7 @@
  
      /* D3D12_IQ=1: drain the debug layer's message queue after submitting the
       * frame. The legacy (is_vp=0) DrawInstanced path silently produced ZERO
-@@ -5956,11 +6084,16 @@
+@@ -5956,11 +6085,16 @@
      /* Present, on the vblank unless D3D12_VSYNC=0: that one is for measuring a
       * title past the display's rate. Skipped for an offscreen-only batch. */
      if (s_present_this_frame) {
@@ -6602,7 +6603,7 @@
      }
      rdoc_frame_end();
  
-@@ -5973,7 +6106,7 @@
+@@ -5973,7 +6107,7 @@
      {
          static ULONGLONG s_tt0 = 0;
          static u64 s_tframes = 0;
@@ -6611,7 +6612,7 @@
          ULONGLONG tnow = GetTickCount64();
          if (s_tt0 == 0) s_tt0 = tnow;
          if (tnow - s_tt0 >= 1000 && s_d3d.hwnd) {
-@@ -6049,7 +6182,7 @@
+@@ -6049,7 +6183,7 @@
       * it would strobe the bare backbuffer clear. Keep accumulating -- the
       * composite draw that targets the display presents the whole chain, in
       * order, in one command list. Empty batches still present (boot/idle). */
@@ -6620,7 +6621,7 @@
      for (u32 _i = 0; _i < s_d3d.draw_count && _i < MAX_DRAWS; _i++)
          if (!s_d3d.draws[_i].is_clear && s_d3d.draws[_i].rt_off == 0) {
              flip_has_display = 1;
-@@ -6089,6 +6222,28 @@
+@@ -6089,6 +6223,28 @@
  
      u32 rt_w = 0, rt_h = 0, mrt[3] = {0, 0, 0};
      u32 rt = current_rt_off(&rt_w, &rt_h, mrt);
@@ -6649,7 +6650,23 @@
  
      /* An OFFSCREEN clear is just an ordered op in the current frame's pass
       * chain (demosaic clears each effect pass's surface) -- record it, don't
-@@ -7850,6 +8005,38 @@
+@@ -7193,6 +7349,7 @@
+ 
+ static void d3d12_draw_arrays(void* ud, u32 primitive, u32 first, u32 count)
+ {
++    if (count) s_d3d.zcull_geometry_seen = 1;
+     /* RSX_LIVE_FEED_DBG=1: pair with the [feed] method counts so "the FIFO
+      * carries no draw batches" can be checked against "the backend is told
+      * to draw" in the same run. */
+@@ -7457,6 +7614,7 @@
+ 
+ static void d3d12_draw_indexed(void* ud, u32 primitive, u32 first, u32 count)
+ {
++    if (count) s_d3d.zcull_geometry_seen = 1;
+     /* RSX_LIVE_FEED_DBG=1: pair with the [feed] method counts so "the FIFO
+      * carries no draw batches" can be checked against "the backend is told
+      * to draw" in the same run. */
+@@ -7850,6 +8008,42 @@
   * -----------------------------------------------------------------------*/
  
  static rsx_backend s_d3d12_backend = {0};
@@ -6667,9 +6684,13 @@
 +static int d3d12_report(void* user, u32 method, u32 argument, u64* timestamp, u32* value)
 +{
 +    (void)user;
++    /* NVIDIA US8525842B1, table 2: ZCULL stats count geometry blocks. Only
++     * the empty channel is known exactly without a block-culling model. */
++    const u32 type = argument >> 24;
++    const int empty_zcull = type >= 2 && type <= 5 && !s_d3d.zcull_geometry_seen;
 +    if (!s_d3d.initialized || (method != 0x17C8 && method != 0x17CC && method != 0x1800) ||
 +        (method == 0x17C8 && argument != 1) || (method == 0x17CC && argument > 1) ||
-+        (method == 0x1800 && ((argument >> 24) != 1 || !timestamp || !value))) return 0;
++        (method == 0x1800 && (((argument >> 24) != 1 && !empty_zcull) || !timestamp || !value))) return 0;
 +    report_resources();
 +    const int saved_present = s_present_this_frame;
 +    s_present_this_frame = 0;
@@ -6681,14 +6702,14 @@
 +    if (method == 0x17CC) s_d3d.report_enabled = argument != 0;
 +    if (method == 0x1800) {
 +        if (!timestamp || !value) return 0;
-+        *timestamp = s_d3d.report_timestamp; *value = s_d3d.report_value;
++        *timestamp = s_d3d.report_timestamp; *value = empty_zcull ? 0 : s_d3d.report_value;
 +    }
 +    return 1;
 +}
  
  /* ---------------------------------------------------------------------------
   * Public API
-@@ -7858,6 +8045,7 @@
+@@ -7858,6 +8052,7 @@
  int rsx_d3d12_backend_init(u32 width, u32 height, const char* title)
  {
      memset(&s_d3d, 0, sizeof(s_d3d));
@@ -6696,7 +6717,7 @@
      s_d3d.width = width;
      s_d3d.height = height;
      s_d3d.clear_color[0] = 0.0f;
-@@ -7903,6 +8091,7 @@
+@@ -7903,6 +8098,7 @@
      s_d3d12_backend.begin_frame       = d3d12_begin_frame;
      s_d3d12_backend.end_frame         = d3d12_end_frame;
      s_d3d12_backend.present           = d3d12_present;
@@ -6704,7 +6725,7 @@
      s_d3d12_backend.clear             = d3d12_clear;
      s_d3d12_backend.set_render_target = d3d12_set_render_target;
      s_d3d12_backend.set_viewport      = d3d12_set_viewport;
-@@ -7913,6 +8102,7 @@
+@@ -7913,6 +8109,7 @@
      s_d3d12_backend.draw_arrays       = d3d12_draw_arrays;
      s_d3d12_backend.draw_indexed      = d3d12_draw_indexed;
      s_d3d12_backend.bind_texture      = d3d12_bind_texture;
@@ -6712,7 +6733,7 @@
  
      rsx_set_backend(&s_d3d12_backend);
  
-@@ -7930,6 +8120,9 @@
+@@ -7930,6 +8127,9 @@
      wait_for_gpu();
  
      /* Release D3D12 resources */
@@ -6722,7 +6743,7 @@
      if (s_d3d.vertex_buffer) {
          s_d3d.vertex_buffer->lpVtbl->Unmap(s_d3d.vertex_buffer, 0, NULL);
          s_d3d.vertex_buffer->lpVtbl->Release(s_d3d.vertex_buffer);
-@@ -7997,7 +8190,7 @@
+@@ -7997,7 +8197,7 @@
       * empty present is a flip/drain race and wipes the screen for a frame
       * (wave: black flashes and layout flicker between frames). */
      static int s_seen_content = 0;

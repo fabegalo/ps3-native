@@ -262,9 +262,12 @@ Pacotes básicos de controle agora entregam botões/sticks medidos e erros de co
 a vibração valida a ABI de 8 bytes e o resultado do host. Pacotes estendidos de
 pressão e sensores continuam bloqueados. Contextos DMA da FIFO distinguem semáforos
 do dispositivo e dos relatórios; a inicialização original passa pela espera de prontidão.
-A sessão mais recente para em `ZCULL_STATS` (relatório tipo 2, offset `0x640`). Esse
-contador ainda não tem implementação validada no backend atual; o suporte a ZPASS
-medido não o cobre. O caminho original de flip/interrupções ainda não foi verificado.
+Estatísticas ZCULL podem informar um canal vazio antes de qualquer geometria, com
+timestamp real da GPU; estatísticas após geometria continuam bloqueadas. A sessão
+mais recente passa pelos relatórios iniciais e para no comando original de fila
+de imagem da FIFO (`0xE944`), que não tem registro de preparação HLE. Sua confirmação
+no dispositivo, apresentação do buffer escolhido e conclusão por interrupção ainda
+precisam de integração. O caminho original de flip/interrupções não foi verificado.
 Use `run ... --enter-button cross`
 ou `circle` explicitamente; idioma/região não inferem a preferência. Não há interpretação.
 Nenhum frame, transição para o seletor ou gameplay foi verificado.
