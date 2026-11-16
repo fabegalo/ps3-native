@@ -268,8 +268,16 @@ now remains entirely AOT: offline return points bind to live frames, guest stack
 threads and contexts; nonlocal returns unwind abandoned host calls and retain the
 restored guest state. Foreign, stale and unprepared targets stop. The real boot
 passes JPEG error recovery and relative filesystem probes (ENOENT, without host
-path resolution), then stops at RSX context packet `0x301`: active ZCULL region
-binding still requires implementation. This is not menu or gameplay evidence. Pass
+path resolution) and RSX context packet `0x301`. ZCULL regions now use one RSX
+table; D3D12 completes preceding work before publishing a binding and retains
+separate depth/stencil surfaces across region changes. Real RTX 4070 regressions
+verify samples, stencil contents, rebindings and rejection of uninitialized or
+incompatible surfaces. Unsupported aliases, formats and counters stop explicitly.
+A two-thread GPU regression reproduces and fixes a FIFO/window-title deadlock:
+only the window owner updates its title. The real boot now reaches additional
+draws and stops at active `ZCULL_STATS` (`0x1800`, argument `0x02000640`), whose
+hardware counter semantics are not yet validated. No new game scanout or menu
+was verified. Pass
 `run ... --enter-button cross` or `circle` explicitly; no preference is inferred
 from language/region. No interpreter is used.
 No selector transition or gameplay is verified. Original and derived

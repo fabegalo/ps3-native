@@ -116,6 +116,17 @@ static bool synthetic_scanout_early;
 static bool synthetic_queue_delay;
 static u64 synthetic_queue_completed;
 static u32 synthetic_reference_control;
+static unsigned synthetic_zcull_calls;
+static bool synthetic_zcull_early;
+static u32 synthetic_zcull_old_offset;
+static u8 synthetic_zcull_old_bound;
+static int synthetic_zcull(void*, u32 index, const CellGcmZcullInfo*) {
+    ++synthetic_zcull_calls;
+    const auto* old = rsx_zcull_get(index);
+    if (!synthetic_submits || !old || old->bound != synthetic_zcull_old_bound || old->offset != synthetic_zcull_old_offset)
+        synthetic_zcull_early = true;
+    return 1;
+}
 static unsigned synthetic_reference_checks;
 static bool synthetic_reference_early;
 static int synthetic_scanout(void*, u32 offset, u32 pitch, u32 width, u32 height) {
@@ -448,6 +459,29 @@ int main(int argc, char** argv) {
             if (attribute(id, 0x300, 0, main_tile_range, tile_format) ||
                 !rsx_tiling_find(1, 0x40, 16, &main_tile) || main_tile.size != 0x100000 || main_tile.pitch != 0x200 ||
                 attribute(id, 0x300, 0, 0, 0) || rsx_tiling_find(1, 0x40, 16, &main_tile)) return 26;
+            auto zcull = [&](u64 slot, u64 range, u64 offset, u64 status) {
+                memory.gpr[11] = 674; memory.gpr[3] = id; memory.gpr[4] = 0x301;
+                memory.gpr[5] = slot; memory.gpr[6] = range; memory.gpr[7] = offset; memory.gpr[8] = status;
+                lv2_syscall(&memory); return (u32)memory.gpr[3];
+            };
+            const u64 region_range = 0x2100400040ull, region_status = 0xFF80500400202000ull;
+            if (zcull(8, region_range, 0x20000, region_status) != (u32)-17 ||
+                zcull(0, region_range | 1, 0x20000, region_status) != (u32)-17 ||
+                zcull(0, region_range, 0x20000, region_status | 1) != (u32)-17) return 60;
+            semaphore_backend.set_zcull = !strcmp(argv[1], "rsx_context_zcull_backend") ? nullptr : synthetic_zcull;
+            rsx_set_backend(&semaphore_backend);
+            if (zcull(0, region_range, 0x20001, region_status) != (u32)-17 ||
+                zcull(0, region_range, 3ull * 1024 * 1024 << 32, region_status) != (u32)-17 ||
+                synthetic_zcull_calls || rsx_zcull_get(0)->bound) return 61;
+            if (zcull(0, region_range, 0x20000, region_status) || synthetic_zcull_early || synthetic_zcull_calls != 1 ||
+                rsx_zcull_get(0) != cellGcmGetZcullInfo(0) || !rsx_zcull_get(0)->bound ||
+                rsx_zcull_get(0)->offset != 0x20000 || rsx_zcull_get(0)->width != 64 ||
+                rsx_zcull_get(0)->height != 64 || rsx_zcull_get(0)->sRef != 128 || rsx_zcull_get(0)->sMask != 255) return 62;
+            if (!strcmp(argv[1], "rsx_context_zcull_overlap")) { zcull(1, region_range, 0x30000, region_status); return 2; }
+            synthetic_zcull_old_bound = 1; synthetic_zcull_old_offset = 0x20000;
+            if (zcull(0, region_range, 0x20000, region_status & 0xFFFFFFFF00000000ull) || synthetic_zcull_early ||
+                rsx_zcull_get(0)->bound || synthetic_zcull_calls != 2 || rsx_zcull_get(8)) return 63;
+            synthetic_submits = 0; rsx_set_backend(nullptr);
             if (attribute(id, 0x104, 0, (64ull << 32) | 64, 256ull << 32)) return 27;
             auto* display = cellGcmGetDisplayBufferByFlipIndex(0);
             if (!display || display->width != 64 || display->height != 64 || display->pitch != 256 || display->offset ||

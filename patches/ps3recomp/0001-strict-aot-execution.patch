@@ -3268,7 +3268,11 @@
      static int v = -1;
      if (v < 0) v = getenv("GCM_FLIPCB_ONTICK") ? 1 : 0;
      return v;
-@@ -372,6 +398,7 @@
+@@ -368,10 +394,10 @@
+ }
+ 
+ /* Zcull configuration (8 zcull regions) */
+-static CellGcmZcullInfo s_zcull[CELL_GCM_MAX_ZCULL_COUNT];
  
  /* Report data area (256 slots, each 16 bytes) */
  static CellGcmReportData s_report_data[CELL_GCM_MAX_REPORT_COUNT];
@@ -3276,7 +3280,7 @@
  
  /* NV4097_SET_CONTEXT_DMA_REPORT (0x1A8): where NV4097_GET_REPORT writes.
   * Local (0xFEED0000, the default): the s_report_data slots above, read back
-@@ -397,7 +424,10 @@
+@@ -397,7 +423,10 @@
   * recompiled game can poll them via vm_read32; cellGcmGetLabelAddress returns a
   * guest address into this window (16-byte spaced as on hardware). A host array
   * pointer would be read as a guest offset and land out of bounds. */
@@ -3288,7 +3292,7 @@
  #define GCM_LABEL_STRIDE      0x10u
  static u32 s_labels[CELL_GCM_MAX_LABEL_COUNT];
  
-@@ -407,7 +437,7 @@
+@@ -407,7 +436,7 @@
   * pointer would be read through vm_base as a guest address and never update, so
   * every FIFO-space / cellGcmFinish wait would hang. Placed just past the 256
   * label slots (0x03000000..0x03001000). Fields are big-endian (vm_write32). */
@@ -3297,7 +3301,7 @@
  
  /* Synthetic guest code EA for the FIFO command-buffer-full callback. The title's
   * inline gcmReserve calls context->callback(context, count) when `current` nears
-@@ -552,6 +582,8 @@
+@@ -552,6 +581,8 @@
          printf("[cellGcmSys] WARNING: already initialized\n");
          return CELL_GCM_ERROR_FAILURE;
      }
@@ -3306,7 +3310,16 @@
  
      memset(s_display_buffers, 0, sizeof(s_display_buffers));
      memset(s_display_buffer_set, 0, sizeof(s_display_buffer_set));
-@@ -593,7 +625,7 @@
+@@ -561,7 +592,7 @@
+     __atomic_store_n(&s_io_mapping_hw, 0, __ATOMIC_RELAXED);
+     memset(s_tiles, 0, sizeof(s_tiles));
+     gcm_tiles_publish();
+-    memset(s_zcull, 0, sizeof(s_zcull));
++    rsx_zcull_reset();
+     memset(s_report_data, 0, sizeof(s_report_data));
+     s_report_dma = 0xFEED0000u;
+     memset(s_labels, 0, sizeof(s_labels));
+@@ -593,7 +624,7 @@
      s_second_v_handler = NULL;
      s_last_flip_time = get_timestamp_ns();
      s_flip_status = CELL_GCM_FLIP_STATUS_DONE;
@@ -3315,7 +3328,7 @@
      s_debug_level = CELL_GCM_DEBUG_LEVEL0;
      s_vblank_count = 0;
      s_io_map_reserved = 0;
-@@ -656,8 +688,9 @@
+@@ -656,8 +687,9 @@
  u32 cellGcmSetupContext(u32 ctx_out_addr, u32 cmdSize, u32 ioSize, u32 ioAddress,
                          CellGcmGuestAlloc galloc, CellGcmGuestWrite32 gwrite32)
  {
@@ -3327,7 +3340,7 @@
  
      /* PSL1GHT's gcmInitBody passes ioAddress = 0, expecting gcm to allocate the
       * IO region itself (the official SDK has the app allocate and pass it).
-@@ -667,7 +700,7 @@
+@@ -667,7 +699,7 @@
      if (ioAddress == 0 && galloc)
          ioAddress = galloc(ioSize ? ioSize : 0x100000, 0x100000);
  
@@ -3336,7 +3349,7 @@
  
      u32 cmdbuf = ioAddress;                 /* FIFO lives at the IO region start */
      {
-@@ -681,7 +714,7 @@
+@@ -681,7 +713,7 @@
                     s_ring_begin, s_ring_end, seg / 1024, 10);
          }
      }
@@ -3345,7 +3358,7 @@
      if (cdata && gwrite32) {
          gwrite32(cdata + 0x0, cmdbuf);              /* begin   */
          /* end: the wrap JUMP's slot, as in the SDK (#648); with GCM_FIFO_SEGMENT
-@@ -691,7 +724,7 @@
+@@ -691,7 +723,7 @@
          /* Command-buffer-full callback: a guest OPD {func, toc} routed to
           * hle_gcm_callback -> cellGcm_fifo_recycle. Without a real callback the
           * ring never recycles and the FIFO wedges once `current` reaches `end`. */
@@ -3354,7 +3367,7 @@
          if (opd) {
              gwrite32(opd + 0x0, GCM_FIFO_CALLBACK_SENTINEL_EA);  /* func EA */
              gwrite32(opd + 0x4, 0);                              /* toc (unused) */
-@@ -753,7 +786,7 @@
+@@ -753,7 +785,7 @@
  void cellGcmSetFlipMode(u32 mode)
  {
      printf("[cellGcmSys] SetFlipMode(mode=%u)\n", mode);
@@ -3363,7 +3376,7 @@
  }
  
  /* NID: 0xC44D8F34 */
-@@ -766,7 +799,7 @@
+@@ -766,7 +798,7 @@
  #ifdef _WIN32
      __declspec(dllimport) void __stdcall Sleep(unsigned long);
  #endif  /* elsewhere: runtime/platform/win32_compat.h */
@@ -3372,7 +3385,7 @@
          Sleep(1);
      /* A flip still WAITING after the bound is left to the tick. Forcing DONE
       * here skipped its completion: the tick only completes WAITING flips, so
-@@ -796,6 +829,9 @@
+@@ -796,6 +828,9 @@
  /* NID: 0xE315A0B2 */
  u32 cellGcmGetFlipStatus(void)
  {
@@ -3382,7 +3395,7 @@
      /* Avoid host-calling the guest OPDs directly (they're not valid host
       * function pointers). Use cellGcmTickVBlank() / TickFlip() instead,
       * which dispatch via g_ps3_guest_caller — see below. */
-@@ -807,8 +843,8 @@
+@@ -807,8 +842,8 @@
        static int fd = -1; if (fd < 0) fd = getenv("FLIP_DBG") ? 1 : 0;
        if (fd && PS3_LOG_FIRST(n, 24))
            fprintf(stderr, "[FLIP] GetFlipStatus -> %u (0=DONE 1=WAITING)%c",
@@ -3393,7 +3406,7 @@
  }
  
  /* Host-side ticks. The game's host driver (e.g. flow main.cpp) calls
-@@ -949,6 +985,9 @@
+@@ -949,6 +984,9 @@
  
  void ppu_gcm_pump(void)
  {
@@ -3403,7 +3416,7 @@
      /* Every HLE call and timer sleep pumps, tens of thousands of times a
       * second, and almost always nothing is pending. Look before taking the
       * pump and swapping the pending words out: three atomic operations on
-@@ -990,8 +1029,12 @@
+@@ -990,8 +1028,12 @@
           * the flip handler, and hung with get == put on exactly that. Leave
           * the newer flip WAITING for the next tick. */
          FLIP_LOCK();
@@ -3417,7 +3430,7 @@
          FLIP_UNLOCK();
          if (s_flip_handler_opd && g_ps3_guest_caller) {
              ydkj_restore_handler_opd(s_flip_handler_opd, s_flip_handler_code);
-@@ -1008,7 +1051,68 @@
+@@ -1008,7 +1050,68 @@
  
  /* Back-compat: the old direct entry points now just mark a tick pending (so any
   * caller other than the ticker still works) -- delivery stays on the main thread. */
@@ -3487,7 +3500,7 @@
  /* Only deliver a flip completion when a flip is actually outstanding.
   *
   * Ticking unconditionally at 60 Hz fires the guest's flip handler even when
-@@ -1023,6 +1127,9 @@
+@@ -1023,6 +1126,9 @@
   * the callback IS the flip interrupt -- no flip, no callback. */
  void cellGcmTickFlip(void)
  {
@@ -3497,7 +3510,7 @@
      /* Same rule as cellGcm_request_tick: a flip still ahead of the drain has
       * not happened yet. */
      FLIP_LOCK();
-@@ -1070,6 +1177,24 @@
+@@ -1070,6 +1176,24 @@
  }
  
  static u32 s_sema_offset = 0;   /* NV406E semaphore offset (label window) */
@@ -3522,7 +3535,7 @@
  static int s_sema_blocked_pass = 0;   /* this drain stopped on a semaphore acquire */
  static int s_park_pass = 0;           /* this drain stopped on a self-JUMP park */
  static int s_report_hold_pass = 0;    /* this drain stopped on a held GET_REPORT */
-@@ -1669,6 +1794,14 @@
+@@ -1669,6 +1793,14 @@
   * and halved the frame rate). Call AFTER draining. */
  int cellGcm_take_flip_pending_synced(void)
  {
@@ -3537,7 +3550,7 @@
      if (!s_flip_pending) return 0;
      u32 put = vm_read32(GCM_CONTROL_GUEST_ADDR + 0);
      u32 get = vm_read32(GCM_CONTROL_GUEST_ADDR + 4);
-@@ -1887,7 +2020,7 @@
+@@ -1887,7 +2019,7 @@
                  if (m == 0x64u) s_sema_offset = v;
                  else if (m == 0x6Cu) {
                      atomic_thread_fence(memory_order_release);
@@ -3546,7 +3559,7 @@
                      labels++;
                  } else if (m == 0x01A4u || m == 0x1D6Cu || m == 0x1D70u || m == 0x1D74u) {
                      rsx_process_method(&s_resync_state, m, v);
-@@ -1930,6 +2063,17 @@
+@@ -1930,6 +2062,17 @@
  
  static void gcm_ref_push_at(u32 v, u32 getoff)
  {
@@ -3564,7 +3577,7 @@
      { static int _d = -1; if (_d < 0) _d = getenv("GCM_REFLOG") ? 1 : 0;
        if (_d) fprintf(stderr, "[refq] drained fence 0x%X at getoff=%08X\n", v, getoff); }
      u32 t = s_ref_qtail;
-@@ -2027,6 +2171,10 @@
+@@ -2027,6 +2170,10 @@
  
  void cellGcm_ref_on_poll(void)
  {
@@ -3575,7 +3588,7 @@
      /* Pace: leave each published value observable for >= ~200us of spins
       * (equality-waiters at any poll rate see every value; still ~5000/s so
       * loading's fence storms clear in seconds, not minutes). */
-@@ -2230,6 +2378,48 @@
+@@ -2230,6 +2377,48 @@
  static void gcm_3d_method(rsx_state* st, u32 m, u32 v, int legacy_state_live)
  {
      extern u32 g_rsx_last_reference;
@@ -3624,7 +3637,7 @@
      /* #466: rsx_state feeds only the legacy vtable backend. With the draw
       * engine up and no vtable registered, the state it builds is never read,
       * so only the methods with effects outside it are worth handing over.
-@@ -2248,6 +2438,7 @@
+@@ -2248,6 +2437,7 @@
       * tells the title every queried object is occluded. */
      if (m == 0x1A8) s_report_dma = v;
      if (m == 0x1800) {
@@ -3632,7 +3645,7 @@
          const u32 off = v & 0xFFFFFFu, idx = off / 16u;
          const u32 val = (v >> 24) == 1u ? 0xFFFFu : 0u;
          const u64 ts = gcm_report_timestamp();
-@@ -2266,6 +2457,7 @@
+@@ -2266,6 +2456,7 @@
              s_report_data[idx].timestamp = ts;
              s_report_data[idx].value = val;
          }
@@ -3640,7 +3653,7 @@
      }
  }
  
-@@ -2315,6 +2507,10 @@
+@@ -2315,6 +2506,10 @@
   * RSX-thread profiles, so each is read once and cached, like the other knobs. */
  static void gcm_rsx_process_fifo_unlocked(void)
  {
@@ -3651,7 +3664,7 @@
      { static unsigned _n = 0; static unsigned long long _t0 = 0;
        extern unsigned long long ps3_ms_now(void);
        _n++;
-@@ -2547,7 +2743,90 @@
+@@ -2547,7 +2742,90 @@
          if (park_off && (s_fifo_getoff != park_off || !is_jump || jump_tgt != park_off))
              park_off = 0;
  
@@ -3742,7 +3755,7 @@
              /* lv1 driver flip: statically-linked libgcm cellGcmSetFlip writes
               * this word into the FIFO instead of calling any import. Fire the
               * flip (status/count/handler) and STOP this drain so the ticker's
-@@ -2596,6 +2875,9 @@
+@@ -2596,6 +2874,9 @@
               * 3 MB ring at boot, wraps, and a walker stopping at every flip
               * then crawled ~1 KB a tick while the title wrote over the
               * commands ahead of it. */
@@ -3752,7 +3765,7 @@
              if (gcm_fifo_backlog(put, s_fifo_getoff) < GCM_FIFO_CATCHUP_BYTES)
                  { why = "flip"; break; }
              continue;
-@@ -2715,14 +2997,16 @@
+@@ -2715,14 +2996,16 @@
                  s_report_hold_pass = 1;
                  break;
              }
@@ -3771,7 +3784,7 @@
                      { static int sn = 0, recdbg = -1; if (recdbg < 0) recdbg = getenv("GCM_RECDBG") ? 1 : 0;
                        if (recdbg && PS3_LOG_FIRST(sn, 12))
                          fprintf(stderr, "[SEMA] m=0x%02X v=0x%08X off=0x%X\n", m, v, s_sema_offset); }
-@@ -2731,8 +3015,28 @@
+@@ -2731,8 +3014,28 @@
                          ps3_ft_span(PS3_FT_SEMA, 0, s_sema_offset, v, s_ft_sema_t0, ps3_ft_now());
                          s_ft_sema_t0 = 0;
                      }
@@ -3802,7 +3815,7 @@
                          /* The RSX has fetched past a RELEASE before its
                           * semaphore write lands, so a guest that sees the
                           * label must also see `get` past the command. `get`
-@@ -2755,8 +3059,12 @@
+@@ -2755,8 +3058,12 @@
               * ever writes would wedge the drain permanently, and RELEASE on
               * its own is the half that unblocks a waiting guest. */
              static int blk = -1; static unsigned blk_ms;
@@ -3815,7 +3828,7 @@
              if (blk) {
                  /* GCM_SEMA_ACQUIRE_MS=<ms>: a bounded wait. The hardware waits
                   * for ever; an emulated producer that never comes (a boot-time
-@@ -3330,11 +3638,24 @@
+@@ -3330,11 +3637,24 @@
      if (bufferId >= CELL_GCM_MAX_DISPLAY_BUFFER_NUM)
          return CELL_GCM_ERROR_INVALID_VALUE;
  
@@ -3840,7 +3853,7 @@
  
      /* Tell the live engine too, or it has no registered scanout to present and
       * falls back to whatever surface happens to be current. Display buffers are
-@@ -3550,29 +3871,53 @@
+@@ -3550,29 +3870,53 @@
  /* NID: 0xA2478CA3 */
  s32 cellGcmSetPrepareFlip(void* ctx, u32 bufferId)
  {
@@ -3917,7 +3930,7 @@
  }
  
  /* NID: 0x1BFAB6EE */
-@@ -3717,6 +4062,9 @@
+@@ -3717,6 +4061,9 @@
          return CELL_OK;
      }
  
@@ -3927,7 +3940,7 @@
      /* Auto-map unmapped main memory. On real hardware PSL1GHT pre-maps its
       * whole RSX heap in gcmInitBody, so its libraries never call MapMainMemory
       * before handing an EA to the RSX (Tiny3D's command ring lives in an
-@@ -4114,12 +4462,16 @@
+@@ -4114,12 +4461,16 @@
      if (index >= CELL_GCM_MAX_REPORT_COUNT)
          return 0;
  
@@ -3944,7 +3957,7 @@
  }
  
  /* ---------------------------------------------------------------------------
-@@ -4127,11 +4479,13 @@
+@@ -4127,11 +4478,13 @@
   * -----------------------------------------------------------------------*/
  
  /* NID: 0x0B4B62D5 */
@@ -3962,7 +3975,7 @@
  
      if (ps3_log_verbose())
          printf("[cellGcmSys] SetTile(index=%u, loc=%u, offset=0x%X, size=0x%X, pitch=%u)\n",
-@@ -4145,7 +4499,7 @@
+@@ -4145,7 +4498,7 @@
      s_tiles[index].bank   = bank;
      /* SetTile binds too (as it does on RPCS3), so a
       * title that never calls BindTile still has its tiles in force. */
@@ -3971,7 +3984,7 @@
  
      /* Build tile register value (simplified) */
      s_tiles[index].tile  = (location << 0) | (pitch << 8);
-@@ -4153,6 +4507,10 @@
+@@ -4153,6 +4506,10 @@
      gcm_tile_publish(index);
  
      return CELL_OK;
@@ -3982,7 +3995,53 @@
  }
  
  /* NID: 0x06EDEA25 */
-@@ -4311,7 +4669,7 @@
+@@ -4168,20 +4525,9 @@
+         printf("[cellGcmSys] SetZcull(index=%u, offset=0x%X, %ux%u)\n",
+                index, offset, width, height);
+ 
+-    s_zcull[index].offset      = offset;
+-    s_zcull[index].width       = width;
+-    s_zcull[index].height      = height;
+-    s_zcull[index].cullStart   = cullStart;
+-    s_zcull[index].zFormat     = zFormat;
+-    s_zcull[index].aaFormat    = aaFormat;
+-    s_zcull[index].zcullDir    = zcullDir;
+-    s_zcull[index].zcullFormat = zcullFormat;
+-    s_zcull[index].sFunc       = sFunc;
+-    s_zcull[index].sRef        = sRef;
+-    s_zcull[index].sMask       = sMask;
+-    s_zcull[index].bound       = 0;
+-
+-    return CELL_OK;
++    const CellGcmZcullInfo region = {offset, width, height, cullStart, zFormat,
++        aaFormat, zcullDir, zcullFormat, sFunc, sRef, sMask, 0};
++    return rsx_zcull_set(index, &region, s_config.localSize);
+ }
+ 
+ /* NID: 0x2BB1F1E5 */
+@@ -4203,8 +4549,8 @@
+         return CELL_GCM_ERROR_INVALID_VALUE;
+ 
+     if (ps3_log_verbose()) printf("[cellGcmSys] BindZcull(index=%u)\n", index);
+-    s_zcull[index].bound = 1;
+-    return CELL_OK;
++    CellGcmZcullInfo region = *rsx_zcull_get(index); region.bound = 1;
++    return rsx_zcull_set(index, &region, s_config.localSize);
+ }
+ 
+ /* NID: 0x75843042 */
+@@ -4226,8 +4572,8 @@
+         return CELL_GCM_ERROR_INVALID_VALUE;
+ 
+     if (ps3_log_verbose()) printf("[cellGcmSys] UnbindZcull(index=%u)\n", index);
+-    s_zcull[index].bound = 0;
+-    return CELL_OK;
++    CellGcmZcullInfo region = *rsx_zcull_get(index); region.bound = 0;
++    return rsx_zcull_set(index, &region, s_config.localSize);
+ }
+ 
+ /* ---------------------------------------------------------------------------
+@@ -4311,7 +4657,7 @@
                         u32 pitch, u8 comp, u16 base, u8 bank)
  {
      /* Delegates to existing SetTile */
@@ -3991,7 +4050,7 @@
  }
  
  /* Default FIFO size — configures command buffer size before init */
-@@ -4407,7 +4765,7 @@
+@@ -4407,7 +4753,7 @@
      printf("[cellGcmSys] Terminate\n");
  
      s_gcm_initialized = 0;
@@ -4000,7 +4059,25 @@
      s_flip_status = CELL_GCM_FLIP_STATUS_DONE;
      s_debug_level = CELL_GCM_DEBUG_LEVEL0;
      s_vblank_count = 0;
-@@ -4591,7 +4949,20 @@
+@@ -4424,7 +4770,7 @@
+     __atomic_store_n(&s_io_mapping_hw, 0, __ATOMIC_RELAXED);
+     memset(s_tiles, 0, sizeof(s_tiles));
+     gcm_tiles_publish();
+-    memset(s_zcull, 0, sizeof(s_zcull));
++    rsx_zcull_reset();
+     memset(s_report_data, 0, sizeof(s_report_data));
+     s_report_dma = 0xFEED0000u;
+     memset(s_labels, 0, sizeof(s_labels));
+@@ -4508,7 +4854,7 @@
+         printf("[cellGcmSys] WARNING: GetZcullInfo index %u out of range\n", index);
+         return NULL;
+     }
+-    return &s_zcull[index];
++    return rsx_zcull_get(index);
+ }
+ 
+ /* Return display buffer info by index */
+@@ -4591,7 +4937,20 @@
  s32 cellGcmSetFlipImmediate(u32 bufferId)
  {
      printf("[cellGcmSys] SetFlipImmediate(bufferId=%u)\n", bufferId);
@@ -4021,7 +4098,7 @@
  }
  
  /* Set flip status directly */
-@@ -4750,7 +5121,7 @@
+@@ -4750,7 +5109,7 @@
  u32 cellGcm_syscall_bringup(u32 local_size)
  {
      if (!s_gcm_initialized)
@@ -4030,7 +4107,7 @@
      if (local_size)
          s_config.localSize = local_size;
      s_gcm_syscall_mode = 1;
-@@ -4762,12 +5133,50 @@
+@@ -4762,12 +5121,50 @@
   * `lwz r3,0x18(r9)` / `addi r3,r3,64`), so the syscall returns this minus 0x40
   * and the driver's own flushes land exactly where the walker reads. */
  u32 cellGcm_control_guest_addr(void) { return GCM_CONTROL_GUEST_ADDR; }
@@ -4081,7 +4158,7 @@
      populate_offset_table(ea, io, size);
      /* A free slot, not s_io_mappings[count]: an unmap leaves a hole, and the
       * count then indexes a live slot. */
-@@ -4777,6 +5186,9 @@
+@@ -4777,6 +5174,9 @@
          s_io_mapping_count++;
      }
      if (!s_config.ioSize) { s_config.ioAddress = ea; s_config.ioSize = size; }
@@ -4091,7 +4168,7 @@
  }
  
  void cellGcm_syscall_iounmap(u32 io, u32 size)
-@@ -4790,10 +5202,46 @@
+@@ -4790,10 +5190,69 @@
  /* sys_rsx_context_attribute(0x001): the driver's explicit FIFO reset. Move the
   * walker with it -- leaving s_fifo_getoff where it was makes the next drain walk
   * from a stale offset through whatever the driver has since overwritten. */
@@ -4120,6 +4197,29 @@
 +    gcm_syscall_require_idle();
 +    s32 result = bound ? gcm_set_tile((u8)index, (u8)location, offset, size, pitch, 0, (u16)base, (u8)bank, 1)
 +                       : cellGcmUnbindTile((u8)index);
++    ReleaseSRWLockExclusive(&s_gcm_fifo_lock);
++    return result;
++}
++int cellGcm_syscall_zcull(u32 index, u64 packed_region, u64 packed_offset, u64 packed_status)
++{
++    const u32 region = (u32)(packed_region >> 32), size = (u32)packed_region;
++    const u32 status = (u32)(packed_status >> 32), enable = (u32)packed_status;
++    CellGcmZcullInfo candidate = {0};
++    candidate.width = (size >> 22) << 6; candidate.height = ((size >> 6) & 0x3FF) << 6;
++    candidate.offset = (u32)packed_offset; candidate.cullStart = (u32)(packed_offset >> 32);
++    candidate.zFormat = (region >> 4) & 15; candidate.aaFormat = (region >> 8) & 15;
++    candidate.zcullDir = (status >> 1) & 1; candidate.zcullFormat = (status >> 2) & 0x3FF;
++    candidate.sFunc = (status >> 12) & 15; candidate.sRef = (status >> 16) & 255; candidate.sMask = status >> 24;
++    candidate.bound = enable != 0;
++    if (index >= CELL_GCM_MAX_ZCULL_COUNT || (enable && enable != 0x00202000u) ||
++        (candidate.bound && !(region & 1)) ||
++        region != ((region & 1) | (candidate.zFormat << 4) | (candidate.aaFormat << 8)) ||
++        size != ((candidate.width >> 6) << 22 | (candidate.height >> 6) << 6) ||
++        status != ((candidate.zcullDir << 1) | (candidate.zcullFormat << 2) | (candidate.sFunc << 12) |
++            (candidate.sRef << 16) | (candidate.sMask << 24))) return -17;
++    AcquireSRWLockExclusive(&s_gcm_fifo_lock);
++    gcm_syscall_require_idle();
++    const int result = rsx_zcull_set(index, &candidate, s_config.localSize);
 +    ReleaseSRWLockExclusive(&s_gcm_fifo_lock);
 +    return result;
 +}
@@ -6629,7 +6729,15 @@
  /* Called from spu_indirect_branch on every dispatch. Restores + clears when
 --- a/libs/video/rsx_commands.h
 +++ b/libs/video/rsx_commands.h
-@@ -457,6 +457,15 @@
+@@ -23,6 +23,7 @@
+ 
+ #include "ps3emu/ps3types.h"
+ #include "ps3emu/error_codes.h"
++#include "cellGcmSys.h"
+ 
+ #ifdef __cplusplus
+ extern "C" {
+@@ -457,7 +458,25 @@
  
      /* Texture */
      void (*bind_texture)(void* userdata, u32 unit, const rsx_texture_state* tex);
@@ -6642,12 +6750,30 @@
 +    /* Present this retained local RGB surface after completing GPU work.
 +     * 1 = accepted and GPU complete, 0 = temporarily unavailable, -1 = unsupported. */
 +    int (*scanout)(void* userdata, u32 offset, u32 pitch, u32 width, u32 height);
++    /* Apply a ZCULL region after completing prior GPU work. No implicit clear
++     * or presentation. Zero means unsupported; the RSX must not publish it. */
++    int (*set_zcull)(void* userdata, u32 index, const CellGcmZcullInfo* region);
  } rsx_backend;
++
++/* One RSX region table, shared by original kernel packets and GCM HLE. */
++CellGcmZcullInfo* rsx_zcull_get(u32 index);
++void rsx_zcull_reset(void);
++int rsx_zcull_set(u32 index, const CellGcmZcullInfo* region, u32 local_size);
++int rsx_zcull_find(u32 offset);
  
  /* Register a backend. Call before any RSX processing. */
+ void rsx_set_backend(rsx_backend* backend);
 --- a/libs/video/rsx_d3d12_backend.c
 +++ b/libs/video/rsx_d3d12_backend.c
-@@ -150,6 +150,8 @@
+@@ -137,6 +137,7 @@
+     u32 rt_w, rt_h;     /* surface clip dims at record time (offscreen RT size) */
+     u32 rt_fmt;         /* RSX surface colour format (SET_SURFACE_FORMAT [4:0]) */
+     u32 zeta_off;       /* depth surface (SET_SURFACE_ZETA_OFFSET) when the surface has one */
++    int zcull_region;   /* canonical RSX region associated with this depth surface */
+     int no_color;       /* colour target NONE with a depth surface: a depth-only pass */
+     /* Guest viewport rect at draw time (target pixels). Sub-viewport layouts
+      * (wave's debug tiles) position quads with this, not with constants --
+@@ -150,6 +151,8 @@
      u32   clear_mask;   /* CLEAR_SURFACE bits: 0x01 depth, 0x02 stencil, 0xF0 colour */
      float clear_z;
      u8    clear_s;
@@ -6656,7 +6782,21 @@
      /* Indexed VP draw (upload_tris_vp_ix): ib_first/index_count are u32
       * indices into vp_ib, relative to the vertex at vb_byte_offset. */
      int   indexed;
-@@ -292,6 +294,16 @@
+@@ -182,10 +185,11 @@
+     u32                   gen;         /* bumped by every draw or clear that writes it */
+     u32                   conv_gen;    /* gen its colour copy was made from */
+     u64                   last_frame;  /* frame_count of the last pass that bound it */
++    u32                   valid_w[2], valid_h[2]; /* guest-cleared depth/stencil rectangles at (0,0) */
+ } OffDS;
+-#define MAX_OFF_DS   6
++#define MAX_OFF_DS   8
+ #define RT_SRV_BASE  5   /* SRV heap slots 5..68 hold offscreen-RT SRVs */
+-#define DS_SRV_BASE  70  /* SRV heap slots 70..81 hold depth + stencil SRVs (2 per OffDS) */
++#define DS_SRV_BASE  70  /* SRV heap slots 70..85 hold depth + stencil SRVs (2 per OffDS) */
+ /* Per-draw SRV windows: each VP draw gets 16 consecutive descriptors (t0-t15)
+  * so multi-unit fragment programs see all their textures. */
+ #define DRAW_SRV_BASE 256
+@@ -292,6 +296,16 @@
      ID3D12Resource*            render_targets[FRAME_COUNT];
      ID3D12CommandAllocator*    cmd_allocators[FRAME_COUNT];
      ID3D12GraphicsCommandList* cmd_list;
@@ -6673,7 +6813,7 @@
  
      /* Synchronization */
      ID3D12Fence* fence;
-@@ -418,6 +430,40 @@
+@@ -418,6 +432,40 @@
  } D3D12State;
  
  static D3D12State s_d3d;
@@ -6714,7 +6854,20 @@
  char g_rsx_title_base[128] = "ps3recomp";
  static u32 s_dbg_last_draws = 0;
  static u64 s_req_verts = 0, s_req_draws = 0, s_drop_draws = 0;
-@@ -1409,11 +1455,18 @@
+@@ -655,6 +703,12 @@
+ /* ---------------------------------------------------------------------------
+  * Win32 window
+  * -----------------------------------------------------------------------*/
++
++/* Submissions can run on a guest thread while the window owner waits for the
++ * FIFO. Publish text here; only the window message pump may send WM_SETTEXT. */
++static SRWLOCK s_window_title_lock = SRWLOCK_INIT;
++static char s_window_title[256];
++static int s_window_title_pending;
+ 
+ static LRESULT CALLBACK d3d12_wndproc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
+ {
+@@ -1409,11 +1463,18 @@
  {
      u32 fi = s_d3d.frame_index;
      s_d3d.fence_values[fi]++;
@@ -6735,7 +6888,7 @@
          /* NEVER wait unbounded here: this runs on the vblank ticker, which also
           * drives the guest's vblank handlers, the FIFO drain, and the fence
           * publication. A device removal (TDR) leaves the D3D12 fence unsignaled
-@@ -1424,8 +1477,15 @@
+@@ -1424,8 +1485,15 @@
           * carry on (subsequent D3D calls fail visibly but the game keeps
           * running headless). */
          for (int tries = 0; tries < 3; tries++) {
@@ -6752,7 +6905,7 @@
              HRESULT rr = s_d3d.device->lpVtbl->GetDeviceRemovedReason(s_d3d.device);
              printf("[D3D12] wait_for_gpu STUCK %ds: want %llu got %llu removed=0x%08lX\n",
                     2 * (tries + 1),
-@@ -1436,6 +1496,9 @@
+@@ -1436,6 +1504,9 @@
              if (rr != 0 /* S_OK: device still alive, keep waiting a bit */)
                  break;
          }
@@ -6762,7 +6915,27 @@
      }
  }
  
-@@ -3700,6 +3763,19 @@
+@@ -3656,9 +3727,19 @@
+ {
+     const rsx_state* st = s_d3d.current_rsx_state;
+     dr->zeta_off = 0;
++    dr->zcull_region = -1;
+     dr->no_color = 0;
+     if (!st || !((st->surface_format >> 5) & 7u)) return;
+     dr->zeta_off = st->surface_zeta_offset;
++    dr->zcull_region = rsx_zcull_find(dr->zeta_off);
++    if (dr->zcull_region >= 0) {
++        const CellGcmZcullInfo* region = rsx_zcull_get((u32)dr->zcull_region);
++        if (((st->surface_format >> 5) & 7u) != region->zFormat ||
++            ((st->surface_format >> 12) & 15u) != region->aaFormat ||
++            (u64)st->surface_clip_x + st->surface_clip_w > region->width ||
++            (u64)st->surface_clip_y + st->surface_clip_h > region->height)
++            report_failure("ZCULL binding does not cover the depth surface format or extent");
++    }
+     dr->no_color = st->color_target == 0 && dr->zeta_off != 0;
+ }
+ 
+@@ -3700,6 +3781,19 @@
                  st->surface_format, st->color_target, st->surface_color_offset[0], st->surface_color_offset[1],
                  st->surface_zeta_offset, st->surface_clip_w, st->surface_clip_h,
                  cellGcmOffsetIsDisplay(raw), cellGcmOffsetIsDisplay(raw) ? 0 : raw); } } }
@@ -6782,7 +6955,7 @@
      if (cellGcmOffsetIsDisplay(raw)) return 0;
      /* RT_DISPLAY_BY_SIZE=1: also treat a single-target surface whose clip
       * exactly matches the display resolution as the backbuffer.
-@@ -3738,6 +3814,10 @@
+@@ -3738,6 +3832,10 @@
  
  static int off_rt_find(u32 off)
  {
@@ -6793,7 +6966,7 @@
      if (!off) return -1;
      for (int i = 0; i < MAX_OFF_RTS; i++)
          if (s_d3d.off_rt[i].res && s_d3d.off_rt[i].off == off) return i;
-@@ -3776,6 +3856,10 @@
+@@ -3776,6 +3874,10 @@
          for (int i = 0; i < MAX_OFF_RTS; i++)
              if (!s_d3d.off_rt[i].res) { slot = i; break; }
          if (slot < 0) {   /* evict an entry not used this frame */
@@ -6804,7 +6977,7 @@
              for (int i = 0; i < MAX_OFF_RTS; i++)
                  if (!s_d3d.off_rt[i].used) { slot = i; break; }
              if (slot < 0) return -1;
-@@ -3820,7 +3904,18 @@
+@@ -3820,7 +3922,18 @@
                    (want_fmt == DXGI_FORMAT_R32G32B32A32_FLOAT) ? 16u :
                    (want_fmt == DXGI_FORMAT_R32_FLOAT) ? 4u : 4u;
          u32 pitch = (w * bpp + 255) & ~255u;
@@ -6824,7 +6997,36 @@
          if (vm_base && src != 0xFFFFFFFFu) {
              D3D12_HEAP_PROPERTIES hu = {0}; hu.Type = D3D12_HEAP_TYPE_UPLOAD;
              D3D12_RESOURCE_DESC bd = {0};
-@@ -4167,6 +4262,7 @@
+@@ -4005,13 +4118,20 @@
+         OffDS* z = &s_d3d.off_ds[i];
+         z->last_frame = s_d3d.frame_count;
+         if (w <= z->w && h <= z->h) return i;
++#ifdef PS3_NATIVE_STRICT
++        if (z->gen) return -1; /* Resizing must not discard guest depth/stencil contents. */
++#endif
+         if (z->w > w) w = z->w;
+         if (z->h > h) h = z->h;
+     } else {
+         for (i = 0; i < MAX_OFF_DS && s_d3d.off_ds[i].res; i++) {}
+         if (i >= MAX_OFF_DS) {
++#ifdef PS3_NATIVE_STRICT
++            return -1; /* Unbound surfaces still own guest-visible depth/stencil data. */
++#else
+             for (i = 0; i < MAX_OFF_DS && s_d3d.off_ds[i].last_frame == s_d3d.frame_count; i++) {}
+             if (i >= MAX_OFF_DS) return -1;
++#endif
+         }
+     }
+     if (s_d3d.off_ds[i].res) {
+@@ -4045,6 +4165,7 @@
+     z->off = off; z->w = w; z->h = h;
+     z->st = D3D12_RESOURCE_STATE_DEPTH_WRITE;
+     z->cleared = 0; z->gen = 0; z->conv_gen = 0xFFFFFFFFu;
++    memset(z->valid_w, 0, sizeof z->valid_w); memset(z->valid_h, 0, sizeof z->valid_h);
+     z->last_frame = s_d3d.frame_count;
+     D3D12_DEPTH_STENCIL_VIEW_DESC dv = {0};
+     dv.Format = DXGI_FORMAT_D24_UNORM_S8_UINT;
+@@ -4167,6 +4288,7 @@
   * render-to-texture pass) must still run -- it is what fills the texture a
   * later batch samples -- but presenting it would show a half-built frame. */
  static int s_present_this_frame = 1;
@@ -6832,7 +7034,7 @@
  
  /* Resolve a DRAW_*_TEX value: a hex raw offset, or the literal "duck" for the
   * content-identified duck texture. */
-@@ -4530,6 +4626,12 @@
+@@ -4530,6 +4652,12 @@
  {
      double _rf0 = perf_on() ? perf_now() : 0.0;
      u32 fi = s_d3d.frame_index;
@@ -6845,7 +7047,22 @@
  
      /* Drain the GPU before touching shared upload resources (vp_vb vertices,
       * vp_cb constants, per-frame texture staging): the previous frame's draws
-@@ -5053,6 +5155,8 @@
+@@ -4810,8 +4938,12 @@
+         for (int _m = 0; _m < 3; _m++)
+             if (dr->is_vp && dr->rt_mrt[_m])
+                 off_rt_get(dr->rt_mrt[_m], dr->rt_w, dr->rt_h, dr->rt_fmt);
+-        if (dr->is_vp && dr->zeta_off && (dr->rt_off || dr->no_color))
+-            off_ds_get(dr->zeta_off, dr->rt_w, dr->rt_h);
++        if (dr->is_vp && dr->zeta_off && (dr->rt_off || dr->no_color || dr->zcull_region >= 0)) {
++            const int depth = off_ds_get(dr->zeta_off, dr->rt_w, dr->rt_h);
++#ifdef PS3_NATIVE_STRICT
++            if (depth < 0) report_failure("depth surface capacity or preserving resize is unsupported");
++#endif
++        }
+         for (int _u = 0; _u < 16; _u++) dr->tex_ds[_u] = -1;   /* set below for draws */
+     }
+     for (u32 _d = 0; _d < s_d3d.draw_count && _d < MAX_DRAWS; _d++) {
+@@ -5053,6 +5185,8 @@
      /* Set render target + depth */
      s_d3d.cmd_list->lpVtbl->OMSetRenderTargets(s_d3d.cmd_list, 1, &rtv_handle, FALSE, &dsv_handle);
  
@@ -6854,7 +7071,7 @@
      /* Clear color and depth */
      s_d3d.cmd_list->lpVtbl->ClearRenderTargetView(
          s_d3d.cmd_list, rtv_handle, s_d3d.clear_color, 0, NULL);
-@@ -5060,6 +5164,7 @@
+@@ -5060,6 +5194,7 @@
          s_d3d.cmd_list, dsv_handle,
          D3D12_CLEAR_FLAG_DEPTH | D3D12_CLEAR_FLAG_STENCIL,
          1.0f, 0, 0, NULL);
@@ -6862,7 +7079,7 @@
  
      /* Set viewport and scissor */
      D3D12_VIEWPORT viewport = {0, 0, (float)s_d3d.width, (float)s_d3d.height, 0.0f, 1.0f};
-@@ -5170,14 +5275,18 @@
+@@ -5170,14 +5305,18 @@
                  last_topo = dr->topology;
              }
              u32 start_vert = dr->vb_byte_offset / VERTEX_STRIDE;
@@ -6882,7 +7099,7 @@
          int any = 0;
          for (u32 d = 0; d < s_d3d.draw_count && d < MAX_DRAWS; d++)
              if (s_d3d.draws[d].is_vp) { any = 1; break; }
-@@ -5187,6 +5296,10 @@
+@@ -5187,6 +5326,10 @@
              (s_d3d.tex_ready && s_d3d.pipeline_state_vp) ? s_d3d.pipeline_state_vp
                                                           : s_d3d.pipeline_state_vp_color;
          if (!vpso) vpso = s_d3d.pipeline_state_vp;
@@ -6893,7 +7110,7 @@
          { static int cap = -1, n = 0;
            if (cap < 0) { const char* e = getenv("VP_SUBMIT"); cap = e ? atoi(e) : 0; }
            if (cap && n < cap) { n++;
-@@ -5198,9 +5311,11 @@
+@@ -5198,9 +5341,11 @@
              fprintf(stderr, "[VPPASS] records=%u is_vp=%u clears=%u any=%d vpso=%p rootsig=%p\n",
                      s_d3d.draw_count, nvp, nclr, any,
                      (void*)vpso, (void*)s_d3d.vp_root_sig); } }
@@ -6907,7 +7124,16 @@
              s_d3d.cmd_list->lpVtbl->IASetPrimitiveTopology(s_d3d.cmd_list, D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
              s_d3d.cmd_list->lpVtbl->SetGraphicsRootConstantBufferView(s_d3d.cmd_list, 0,
                  s_d3d.vp_cb->lpVtbl->GetGPUVirtualAddress(s_d3d.vp_cb));
-@@ -5306,6 +5421,7 @@
+@@ -5272,7 +5417,7 @@
+                     wantm[_m] = (dr->rt_mrt[_m] && !dr->no_color) ? off_rt_find(dr->rt_mrt[_m]) : -1;
+                 /* The draw's own depth surface, or the shared buffer for a pass
+                  * without one (and for display targets, as before). */
+-                const int wantz = (dr->zeta_off && (want >= 0 || dr->no_color))
++                const int wantz = (dr->zeta_off && (want >= 0 || dr->no_color || dr->zcull_region >= 0))
+                                 ? off_ds_find(dr->zeta_off) : -1;
+                 if (want != cur_rt || wantm[0] != cur_m[0] ||
+                     wantm[1] != cur_m[1] || wantm[2] != cur_m[2] ||
+@@ -5306,6 +5451,7 @@
                                                                 dr->no_color ? NULL : rh, FALSE, &cur_dsv);
                      s_d3d.cmd_list->lpVtbl->RSSetViewports(s_d3d.cmd_list, 1, &vp);
                      s_d3d.cmd_list->lpVtbl->RSSetScissorRects(s_d3d.cmd_list, 1, &sc);
@@ -6915,7 +7141,7 @@
                      if (wantz >= 0) {
                          /* A depth surface keeps its contents across passes; the
                           * guest clears it when it wants it cleared. */
-@@ -5319,6 +5435,7 @@
+@@ -5319,6 +5465,7 @@
                          s_d3d.cmd_list->lpVtbl->ClearDepthStencilView(s_d3d.cmd_list, dsv_handle,
                              D3D12_CLEAR_FLAG_DEPTH | D3D12_CLEAR_FLAG_STENCIL, 1.0f, 0, 0, NULL);
                      }
@@ -6923,7 +7149,7 @@
                      cur_z = wantz; cur_nc = dr->no_color; force_rebind = 0;
                      /* RT_CLEARDBG=2: magenta-clear the surface the DRAWS bind,
                       * at the moment they bind it. The guest's own clears may go
-@@ -5366,6 +5483,7 @@
+@@ -5366,6 +5513,7 @@
                      for (int _m = 0; _m < 3; _m++) cur_m[_m] = wantm[_m];
                  }
                  if (dr->is_clear) {
@@ -6931,13 +7157,22 @@
                      D3D12_CPU_DESCRIPTOR_HANDLE rh =
                          (cur_rt >= 0) ? off_rt_rtv(cur_rt) : rtv_handle;
                      /* RT_CLEARDBG=1: clear offscreen targets to magenta rather
-@@ -5383,22 +5501,25 @@
+@@ -5383,22 +5531,33 @@
                              (((dr->clear_mask & 0x1u) ? D3D12_CLEAR_FLAG_DEPTH : 0) |
                               ((dr->clear_mask & 0x2u) ? D3D12_CLEAR_FLAG_STENCIL : 0));
                          s_d3d.cmd_list->lpVtbl->ClearDepthStencilView(s_d3d.cmd_list, cur_dsv,
 -                            zf, dr->clear_z, dr->clear_s, 0, NULL);
+-                        if (cur_z >= 0) { s_d3d.off_ds[cur_z].cleared = 1; s_d3d.off_ds[cur_z].gen++; }
 +                            zf, dr->clear_z, dr->clear_s, dr->clear_has_rect ? 1 : 0, dr->clear_has_rect ? &dr->clear_rect : NULL);
-                         if (cur_z >= 0) { s_d3d.off_ds[cur_z].cleared = 1; s_d3d.off_ds[cur_z].gen++; }
++                        if (cur_z >= 0) {
++                            OffDS* z = &s_d3d.off_ds[cur_z]; z->cleared = 1; z->gen++;
++                            const D3D12_RECT rect = dr->clear_has_rect ? dr->clear_rect : (D3D12_RECT){0,0,(LONG)z->w,(LONG)z->h};
++                            for (u32 plane = 0; plane < 2; ++plane)
++                                if ((dr->clear_mask & (1u << plane)) && !rect.left && !rect.top &&
++                                    rect.right >= (LONG)z->valid_w[plane] && rect.bottom >= (LONG)z->valid_h[plane]) {
++                                    z->valid_w[plane] = (u32)rect.right; z->valid_h[plane] = (u32)rect.bottom;
++                                }
++                        }
                      }
                      if (!(dr->clear_mask & 0xF0u) || dr->no_color)
                          continue;
@@ -6960,7 +7195,7 @@
                          }
                      continue;
                  }
-@@ -5414,6 +5535,9 @@
+@@ -5414,9 +5573,21 @@
                                                  dr->fp_ctrl, dr->cmask, dr->cull,
                                                  dr_cube_mask(dr),
                                                  unnorm_mask, unnorm_dim, dr->zs_key) : NULL;
@@ -6970,7 +7205,19 @@
                  s_d3d.cmd_list->lpVtbl->SetPipelineState(s_d3d.cmd_list,
                                                           dpso ? dpso : vpso);
                  s_d3d.cmd_list->lpVtbl->OMSetStencilRef(s_d3d.cmd_list, dr->stencil_ref & 0xFFu);
-@@ -5511,6 +5635,8 @@
++#ifdef PS3_NATIVE_STRICT
++                if (dr->zcull_region >= 0 && cur_z >= 0) {
++                    const OffDS* z = &s_d3d.off_ds[cur_z];
++                    for (u32 plane = 0; plane < 2; ++plane)
++                        if ((dr->zs_key & (plane ? 1u << 5 : 1u)) &&
++                            (dr->rt_w > z->valid_w[plane] || dr->rt_h > z->valid_h[plane]))
++                            report_failure("bound ZCULL surface needs guest depth/stencil initialization");
++                }
++#endif
+                 if (cur_z >= 0 && (dr->zs_key & (2u | (1u << 5)))) s_d3d.off_ds[cur_z].gen++;
+                 /* Per-draw viewport: the guest rect when sane, else the
+                  * full target. Scissor tracks the same rect. */
+@@ -5511,6 +5682,8 @@
                        s_d3d.cmd_list->lpVtbl->OMSetRenderTargets(
                            s_d3d.cmd_list, bn, brh, FALSE, &cur_dsv);
                    } }
@@ -6979,7 +7226,7 @@
                  if (dr->indexed) {
                      if (!ib_bound) {
                          D3D12_INDEX_BUFFER_VIEW ibv;
-@@ -5526,6 +5652,9 @@
+@@ -5526,6 +5699,9 @@
                  } else
                  s_d3d.cmd_list->lpVtbl->DrawInstanced(s_d3d.cmd_list,
                      dr->vertex_count, 1, dr->vb_byte_offset / 256, 0);
@@ -6989,14 +7236,26 @@
                  /* VP_SUBMIT=<N>: prove the VP pass actually reaches the GPU.
                   * "records exist" and "draws were submitted" are different
                   * claims, and every blank-output investigation conflates them. */
-@@ -5746,10 +5875,26 @@
+@@ -5733,6 +5909,7 @@
+         }
+       } }
+ 
++    const int dump_skip_this_present = s_present_this_frame && s_d3d.dump_skip_left > 0;
+     /* CELLMARK_DUMP_MINDRAWS=<N>: only consider frames carrying at least N draw
+      * records. Most render_frame calls come from the guest flip with a batch the
+      * clear boundary already drained, so they present an empty backbuffer -- and
+@@ -5744,13 +5921,29 @@
+       /* draw_count is already reset by here; s_dbg_last_draws holds the
+        * count this frame actually rendered. */
        if (mind > 0 && s_dbg_last_draws < (u32)mind) goto skip_dump_consider; }
-     if (s_d3d.dump_skip_left > 0 && s_d3d.dump_frames_left > 0) s_d3d.dump_skip_left--;
+-    if (s_d3d.dump_skip_left > 0 && s_d3d.dump_frames_left > 0) s_d3d.dump_skip_left--;
++    if (dump_skip_this_present && s_d3d.dump_frames_left > 0) s_d3d.dump_skip_left--;
  skip_dump_consider: ;
 -    guest_fb_present(fi);
 -    scanout_auto_present(fi);
 -    composite_present(fi);
 -    int dumping = (s_d3d.dump_frames_left > 0 && s_d3d.readback_buf
+-                   && s_d3d.dump_skip_left == 0);
 +    if (s_present_this_frame && s_d3d.explicit_scanout) {
 +        const int slot = s_d3d.scanout_slot;
 +        off_rt_transition(slot, D3D12_RESOURCE_STATE_COPY_SOURCE);
@@ -7017,10 +7276,11 @@
 +        composite_present(fi);
 +    }
 +    int dumping = (s_present_this_frame && s_d3d.dump_frames_left > 0 && s_d3d.readback_buf
-                    && s_d3d.dump_skip_left == 0);
++                   && s_d3d.dump_skip_left == 0 && !dump_skip_this_present);
      { static int mind2 = -1;
        if (mind2 < 0) { const char* e = getenv("CELLMARK_DUMP_MINDRAWS");
-@@ -5799,9 +5944,40 @@
+                        mind2 = e ? atoi(e) : 0; }
+@@ -5799,9 +5992,40 @@
      }
  
      /* Close and execute */
@@ -7062,7 +7322,7 @@
  
      /* D3D12_IQ=1: drain the debug layer's message queue after submitting the
       * frame. The legacy (is_vp=0) DrawInstanced path silently produced ZERO
-@@ -5956,11 +6132,17 @@
+@@ -5956,11 +6180,17 @@
      /* Present, on the vblank unless D3D12_VSYNC=0: that one is for measuring a
       * title past the display's rate. Skipped for an offscreen-only batch. */
      if (s_present_this_frame) {
@@ -7082,7 +7342,7 @@
      }
      rdoc_frame_end();
  
-@@ -5973,7 +6155,7 @@
+@@ -5973,7 +6203,7 @@
      {
          static ULONGLONG s_tt0 = 0;
          static u64 s_tframes = 0;
@@ -7091,7 +7351,19 @@
          ULONGLONG tnow = GetTickCount64();
          if (s_tt0 == 0) s_tt0 = tnow;
          if (tnow - s_tt0 >= 1000 && s_d3d.hwnd) {
-@@ -6049,7 +6231,7 @@
+@@ -5983,7 +6213,10 @@
+                      g_rsx_title_base,
+                      s_tframes * 1000.0 / (double)(tnow - s_tt0),
+                      s_dbg_last_draws, s_d3d.width, s_d3d.height);
+-            SetWindowTextA(s_d3d.hwnd, tb);
++            AcquireSRWLockExclusive(&s_window_title_lock);
++            memcpy(s_window_title, tb, sizeof tb);
++            s_window_title_pending = 1;
++            ReleaseSRWLockExclusive(&s_window_title_lock);
+             s_tframes = 0;
+             s_tt0 = tnow;
+         }
+@@ -6049,7 +6282,7 @@
       * it would strobe the bare backbuffer clear. Keep accumulating -- the
       * composite draw that targets the display presents the whole chain, in
       * order, in one command list. Empty batches still present (boot/idle). */
@@ -7100,7 +7372,7 @@
      for (u32 _i = 0; _i < s_d3d.draw_count && _i < MAX_DRAWS; _i++)
          if (!s_d3d.draws[_i].is_clear && s_d3d.draws[_i].rt_off == 0) {
              flip_has_display = 1;
-@@ -6072,6 +6254,7 @@
+@@ -6072,6 +6305,7 @@
  static void d3d12_clear(void* ud, u32 flags, u32 color, float depth, u8 stencil)
  {
      (void)ud;
@@ -7108,7 +7380,7 @@
  
      /* Convert RSX ARGB u32 to float[4] RGBA */
      float cc[4];
-@@ -6089,6 +6272,28 @@
+@@ -6089,6 +6323,28 @@
  
      u32 rt_w = 0, rt_h = 0, mrt[3] = {0, 0, 0};
      u32 rt = current_rt_off(&rt_w, &rt_h, mrt);
@@ -7137,7 +7409,7 @@
  
      /* An OFFSCREEN clear is just an ordered op in the current frame's pass
       * chain (demosaic clears each effect pass's surface) -- record it, don't
-@@ -7193,6 +7398,7 @@
+@@ -7193,6 +7449,7 @@
  
  static void d3d12_draw_arrays(void* ud, u32 primitive, u32 first, u32 count)
  {
@@ -7145,7 +7417,7 @@
      /* RSX_LIVE_FEED_DBG=1: pair with the [feed] method counts so "the FIFO
       * carries no draw batches" can be checked against "the backend is told
       * to draw" in the same run. */
-@@ -7457,6 +7663,7 @@
+@@ -7457,6 +7714,7 @@
  
  static void d3d12_draw_indexed(void* ud, u32 primitive, u32 first, u32 count)
  {
@@ -7153,7 +7425,7 @@
      /* RSX_LIVE_FEED_DBG=1: pair with the [feed] method counts so "the FIFO
       * carries no draw batches" can be checked against "the backend is told
       * to draw" in the same run. */
-@@ -7850,6 +8057,81 @@
+@@ -7850,6 +8108,89 @@
   * -----------------------------------------------------------------------*/
  
  static rsx_backend s_d3d12_backend = {0};
@@ -7166,6 +7438,14 @@
 +    if (s_d3d.draw_count) render_frame();
 +    wait_for_gpu();
 +    s_present_this_frame = saved_present;
++    return 1;
++}
++static int d3d12_set_zcull(void* user, u32 index, const CellGcmZcullInfo* region)
++{
++    if (!s_d3d.initialized || index >= CELL_GCM_MAX_ZCULL_COUNT || !region ||
++        (region->bound && (!region->offset || region->zFormat != 2 || region->aaFormat || region->zcullFormat != 1))) return 0;
++    if (!d3d12_submit(user)) return 0;
++    if (region->bound && off_ds_get(region->offset, region->width, region->height) < 0) return 0;
 +    return 1;
 +}
 +static int d3d12_report(void* user, u32 method, u32 argument, u64* timestamp, u32* value)
@@ -7235,7 +7515,7 @@
  
  /* ---------------------------------------------------------------------------
   * Public API
-@@ -7858,6 +8140,7 @@
+@@ -7858,6 +8199,7 @@
  int rsx_d3d12_backend_init(u32 width, u32 height, const char* title)
  {
      memset(&s_d3d, 0, sizeof(s_d3d));
@@ -7243,16 +7523,17 @@
      s_d3d.width = width;
      s_d3d.height = height;
      s_d3d.clear_color[0] = 0.0f;
-@@ -7903,6 +8186,8 @@
+@@ -7903,6 +8245,9 @@
      s_d3d12_backend.begin_frame       = d3d12_begin_frame;
      s_d3d12_backend.end_frame         = d3d12_end_frame;
      s_d3d12_backend.present           = d3d12_present;
 +    s_d3d12_backend.submit            = d3d12_submit;
 +    s_d3d12_backend.scanout           = d3d12_scanout;
++    s_d3d12_backend.set_zcull         = d3d12_set_zcull;
      s_d3d12_backend.clear             = d3d12_clear;
      s_d3d12_backend.set_render_target = d3d12_set_render_target;
      s_d3d12_backend.set_viewport      = d3d12_set_viewport;
-@@ -7913,6 +8198,7 @@
+@@ -7913,6 +8258,7 @@
      s_d3d12_backend.draw_arrays       = d3d12_draw_arrays;
      s_d3d12_backend.draw_indexed      = d3d12_draw_indexed;
      s_d3d12_backend.bind_texture      = d3d12_bind_texture;
@@ -7260,7 +7541,7 @@
  
      rsx_set_backend(&s_d3d12_backend);
  
-@@ -7930,6 +8216,9 @@
+@@ -7930,6 +8276,9 @@
      wait_for_gpu();
  
      /* Release D3D12 resources */
@@ -7270,7 +7551,22 @@
      if (s_d3d.vertex_buffer) {
          s_d3d.vertex_buffer->lpVtbl->Unmap(s_d3d.vertex_buffer, 0, NULL);
          s_d3d.vertex_buffer->lpVtbl->Release(s_d3d.vertex_buffer);
-@@ -7997,7 +8286,7 @@
+@@ -7963,6 +8312,14 @@
+ 
+ int rsx_d3d12_backend_pump_messages(void)
+ {
++    if (s_d3d.hwnd && GetWindowThreadProcessId(s_d3d.hwnd, NULL) == GetCurrentThreadId()) {
++        char title[sizeof s_window_title]; int pending;
++        AcquireSRWLockExclusive(&s_window_title_lock);
++        pending = s_window_title_pending;
++        if (pending) { memcpy(title, s_window_title, sizeof title); s_window_title_pending = 0; }
++        ReleaseSRWLockExclusive(&s_window_title_lock);
++        if (pending) SetWindowTextA(s_d3d.hwnd, title);
++    }
+     MSG msg;
+     while (PeekMessageA(&msg, NULL, 0, 0, PM_REMOVE)) {
+         if (msg.message == WM_QUIT) return -1;
+@@ -7997,7 +8354,7 @@
       * empty present is a flip/drain race and wipes the screen for a frame
       * (wave: black flashes and layout flicker between frames). */
      static int s_seen_content = 0;
@@ -7332,7 +7628,65 @@
      print(f"Wrote {args.out} ({len(elf)} bytes, "
 --- a/libs/video/rsx_commands.c
 +++ b/libs/video/rsx_commands.c
-@@ -523,6 +523,15 @@
+@@ -27,6 +27,57 @@
+  * -----------------------------------------------------------------------*/
+ 
+ static rsx_backend* s_backend = NULL;
++static CellGcmZcullInfo s_zcull_regions[CELL_GCM_MAX_ZCULL_COUNT];
++
++CellGcmZcullInfo* rsx_zcull_get(u32 index)
++{
++    return index < CELL_GCM_MAX_ZCULL_COUNT ? &s_zcull_regions[index] : NULL;
++}
++void rsx_zcull_reset(void) { memset(s_zcull_regions, 0, sizeof s_zcull_regions); }
++int rsx_zcull_find(u32 offset)
++{
++    for (u32 i = 0; i < CELL_GCM_MAX_ZCULL_COUNT; ++i)
++        if (s_zcull_regions[i].bound && s_zcull_regions[i].offset == offset) return (int)i;
++    return -1;
++}
++int rsx_zcull_set(u32 index, const CellGcmZcullInfo* region, u32 local_size)
++{
++    if (index >= CELL_GCM_MAX_ZCULL_COUNT || !region || region->bound > 1) return -17;
++    const u64 area = (u64)region->width * region->height;
++    if (region->bound && (!area || ((region->width | region->height) & 63) ||
++        region->width > 65535 || region->height > 65535 || (region->cullStart & 4095) ||
++        (u64)region->cullStart + area > 3u * 1024 * 1024 || (region->offset & 4095) ||
++        (region->zFormat != 1 && region->zFormat != 2) || region->aaFormat > 15 ||
++        region->zcullDir > 1 || region->zcullFormat > 0x3FF || !region->sFunc || region->sFunc > 8 ||
++        region->sRef > 255 || region->sMask > 255 ||
++        (u64)region->offset + area * (region->zFormat == 1 ? 2 : 4) > local_size)) return -17;
++    for (u32 i = 0; region->bound && i < CELL_GCM_MAX_ZCULL_COUNT; ++i) {
++        const CellGcmZcullInfo* old = &s_zcull_regions[i];
++        if (i == index || !old->bound) continue;
++        if (old->offset == region->offset ||
++            ((u64)region->cullStart < (u64)old->cullStart + (u64)old->width * old->height &&
++             (u64)old->cullStart < (u64)region->cullStart + area)) {
++#ifdef PS3_NATIVE_STRICT
++            extern void ps3_native_stop(void);
++            fprintf(stderr, "[native-blocked] overlapping ZCULL regions require validated alias invalidation\n");
++            fflush(stderr); ps3_native_stop();
++#else
++            return -17;
++#endif
++        }
++    }
++    if (!s_backend || !s_backend->set_zcull || !s_backend->set_zcull(s_backend->userdata, index, region)) {
++#ifdef PS3_NATIVE_STRICT
++        extern void ps3_native_stop(void);
++        fprintf(stderr, "[native-blocked] backend cannot apply ZCULL region %u\n", index);
++        fflush(stderr); ps3_native_stop();
++#else
++        if (s_backend) return -17;
++#endif
++    }
++    s_zcull_regions[index] = *region;
++    return 0;
++}
+ 
+ /* Last NV406E_SET_REFERENCE value seen in the FIFO. The title writes a
+  * reference then spins on the GCM control register's `ref` field until the RSX
+@@ -523,6 +574,15 @@
            s_sem_ctx = data;
        }
        if (method == 0x1D6C) { s_sem_off = data; return 0; }
@@ -7348,7 +7702,7 @@
        if ((method == 0x1D70 || method == 0x1D74) && s_sem_ctx == 0xFEED0001u) {
          extern void vm_write32(uint32_t a, uint32_t v);
          extern u32 gcm_io_offset_to_ea(u32 io);
-@@ -542,17 +551,19 @@
+@@ -542,17 +602,19 @@
           * 0x00010000 != 1 and spun forever (gcm/cube sample hang after init).
           * Apply the same swap the hardware does so the pre-swap cancels out. */
          u32 val = (data & 0xff00ff00u) | ((data >> 16) & 0xffu) | ((data & 0xffu) << 16);
@@ -7371,7 +7725,7 @@
          return 0;
        } }
      if ((method >= 0x200 && method <= 0x23C) ||
-@@ -653,7 +664,10 @@
+@@ -653,7 +715,10 @@
                if (!_first) fprintf(stderr, "[RSX] CLEAR_SURFACE new mask=0x%X color=0x%08X\n",
                                     data, state->color_clear_value); } }
          if (s_backend && s_backend->clear) {
@@ -9590,7 +9944,7 @@
      if (rsx_dbg())
          fprintf(stderr, "[sys_rsx] iomap io=0x%08X <- ea=0x%08X size=0x%X\n",
                  io, ea, size);
-@@ -336,15 +526,70 @@
+@@ -336,15 +526,75 @@
  /* 674: sys_rsx_context_attribute(u32 ctx, u32 packet_id, u64 a3..a6) */
  static int64_t sc_rsx_context_attribute(ppu_context* ctx)
  {
@@ -9601,6 +9955,11 @@
 +        if (ctx->gpr[5] > 7 || ctx->gpr[8]) return -17;
 +        return cellGcmSetDisplayBuffer((u32)ctx->gpr[5], (u32)ctx->gpr[7], (u32)(ctx->gpr[7] >> 32),
 +            (u32)(ctx->gpr[6] >> 32), (u32)ctx->gpr[6]);
++    }
++    if (ctx->gpr[4] == 0x301) {
++        extern int cellGcm_syscall_zcull(u32, u64, u64, u64);
++        if (ctx->gpr[5] > UINT32_MAX) return -17;
++        return cellGcm_syscall_zcull((u32)ctx->gpr[5], ctx->gpr[6], ctx->gpr[7], ctx->gpr[8]);
 +    }
 +    if (ctx->gpr[4] == 0x300) {
 +        extern int cellGcm_syscall_tile(u32, u32, u32, u32, u32, u32, u32, int);
@@ -9664,7 +10023,7 @@
          return CELL_OK;
  
      case 0x104: {                     /* display buffer set */
-@@ -382,6 +627,24 @@
+@@ -382,6 +632,24 @@
   * unmap) and copes with a failure, so report only the device we have. */
  static int64_t sc_rsx_device_map(ppu_context* ctx)
  {
@@ -9689,7 +10048,7 @@
      u32 a_ea = (u32)ctx->gpr[3], b_ea = (u32)ctx->gpr[4];
      uint64_t dev = ctx->gpr[5];
  
-@@ -396,10 +659,32 @@
+@@ -396,10 +664,32 @@
      if (rsx_dbg())
          fprintf(stderr, "[sys_rsx] device_map(dev=8) -> 0x%08X\n", RSX_DEVICE_EA);
      return CELL_OK;

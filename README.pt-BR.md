@@ -274,8 +274,17 @@ original continua inteiramente AOT: pontos de retorno preparados ficam vinculado
 frames ativos, pilhas, threads e contextos guest; o salto abandona as chamadas host
 intermediárias e preserva o estado restaurado. Destinos de outro contexto, expirados
 ou sem preparação param. O boot real passa pela recuperação JPEG e pelas sondagens de
-caminhos relativos (ENOENT, sem resolução no host), depois para no pacote RSX `0x301`:
-o vínculo de região ZCULL ativa ainda exige implementação. Isso não comprova menu nem gameplay.
+caminhos relativos (ENOENT, sem resolução no host) e pelo pacote RSX `0x301`.
+As regiões ZCULL usam uma única tabela no RSX; o D3D12 conclui o trabalho anterior
+antes de publicar o vínculo e preserva superfícies separadas de profundidade/stencil
+entre trocas de região. Regressões reais na RTX 4070 verificam amostras, stencil,
+religação e rejeição de superfícies sem inicialização ou incompatíveis. Aliases,
+formatos e contadores sem suporte param explicitamente. Uma regressão com duas
+threads reproduz e corrige o deadlock entre FIFO e título da janela: somente a
+thread da janela atualiza seu título. O boot real agora alcança novos desenhos e
+para no `ZCULL_STATS` ativo (`0x1800`, argumento `0x02000640`), cuja semântica do
+contador de hardware ainda não foi validada. Nenhuma nova apresentação do jogo
+ou menu foi verificado.
 Use `run ... --enter-button cross`
 ou `circle` explicitamente; idioma/região não inferem a preferência. Não há interpretação.
 Nenhuma transição para o seletor ou gameplay foi verificado.

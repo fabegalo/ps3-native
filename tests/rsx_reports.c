@@ -51,7 +51,12 @@ static int report(u64* timestamp, u32* value)
 {
     return s_d3d12_backend.report(s_d3d12_backend.userdata, 0x1800, 1u << 24, timestamp, value);
 }
-int main(void)
+static DWORD WINAPI submit_from_worker(void* unused)
+{
+    (void)unused;
+    return d3d12_submit(NULL) ? 0 : 1;
+}
+int main(int argc, char** argv)
 {
     setvbuf(stdout, NULL, _IONBF, 0);
     if (vm_init() || vm_commit(0xC0000000, 0x200000) || vm_commit(0x10000000, 0x100000) ||
@@ -106,6 +111,13 @@ int main(void)
     if (!d3d12_report(NULL, 0x17C8, 1, NULL, NULL) || !d3d12_report(NULL, 0x17CC, 1, NULL, NULL)) return 3;
     method(NV4097_SET_COLOR_CLEAR_VALUE, 0xFF000000);
     method(NV4097_SET_ZSTENCIL_CLEAR_VALUE, 0xFFFFFF00);
+    if (argc == 2) {
+        CellGcmZcullInfo uninitialized = {0x100000,64,64,0,2,0,0,1,5,128,255,1};
+        if (rsx_zcull_set(0, &uninitialized, 0x200000)) return 60;
+        if (!strcmp(argv[1], "zcull_format")) method(NV4097_SET_SURFACE_FORMAT, 0x128);
+        draw(); u64 stamp; u32 samples;
+        report(&stamp, &samples); return 61;
+    }
     method(NV4097_CLEAR_SURFACE, 0xF3);
     for (u32 type = 2; type <= 5; ++type) {
         count = 0xCAFEBABE;
@@ -165,6 +177,48 @@ int main(void)
     if (d3d12_report(NULL, 0x1800, 2u << 24, &first, &count) || first != 0xAABBCCDD11223344ull || count != 0xCAFEBABE ||
         !d3d12_report(NULL, 0x17C8, 3, NULL, NULL) || !report(&first, &count) || count ||
         !d3d12_report(NULL, 0x1800, 2u << 24, &second, &count) || count || second < first) return 29;
+    CellGcmZcullInfo region = {0x100000,64,64,0,2,0,0,1,5,128,255,1};
+    method(NV4097_SET_SURFACE_FORMAT, 0x148);
+    method(NV4097_SET_ZSTENCIL_CLEAR_VALUE, 0xFFFFFF07);
+    method(NV4097_CLEAR_SURFACE, 3);
+    const u64 region_fence = s_d3d.fence_values[s_d3d.frame_index];
+    if (rsx_zcull_set(0, &region, 0x200000) || !rsx_zcull_get(0)->bound ||
+        s_d3d.fence_values[s_d3d.frame_index] <= region_fence ||
+        s_d3d.fence->lpVtbl->GetCompletedValue(s_d3d.fence) < s_d3d.fence_values[s_d3d.frame_index]) return 40;
+    method(NV4097_CLEAR_SURFACE, 3);
+    if (!d3d12_report(NULL, 0x17C8, 1, NULL, NULL)) return 41;
+    draw(); if (!report(&first, &count) || count != 4096) return 42;
+    CellGcmZcullInfo unsupported_region = region; unsupported_region.aaFormat = 3;
+    if (d3d12_set_zcull(NULL, 0, &unsupported_region) || rsx_zcull_get(0)->aaFormat) return 55;
+    region.offset = 0x110000; region.cullStart = 4096;
+    if (rsx_zcull_set(1, &region, 0x200000)) return 43;
+    if (!report(&first, &count) || count != 4096) return 56;
+    first = 0xAABBCCDD11223344ull; count = 0xCAFEBABE;
+    if (d3d12_report(NULL, 0x1800, 2u << 24, &first, &count) || first != 0xAABBCCDD11223344ull || count != 0xCAFEBABE) return 57;
+    method(NV4097_SET_SURFACE_ZETA_OFFSET, region.offset);
+    method(NV4097_SET_ZSTENCIL_CLEAR_VALUE, 0xFFFFFF09); method(NV4097_CLEAR_SURFACE, 3);
+    if (!d3d12_report(NULL, 0x17C8, 1, NULL, NULL)) return 44;
+    draw(); if (!report(&first, &count) || count != 4096) return 45;
+    region = *rsx_zcull_get(0); region.bound = 0;
+    if (rsx_zcull_set(0, &region, 0x200000)) return 46;
+    region.bound = 1;
+    if (rsx_zcull_set(0, &region, 0x200000)) return 47;
+    method(NV4097_SET_SURFACE_ZETA_OFFSET, region.offset);
+    if (!d3d12_report(NULL, 0x17C8, 1, NULL, NULL)) return 48;
+    draw(); if (!report(&first, &count) || count) return 49;
+    method(NV4097_SET_DEPTH_TEST_ENABLE, 0); method(NV4097_SET_STENCIL_TEST_ENABLE, 1);
+    method(NV4097_SET_STENCIL_FUNC, 0x202); method(NV4097_SET_STENCIL_FUNC_REF, 7);
+    method(NV4097_SET_STENCIL_FUNC_MASK, 255); method(NV4097_SET_STENCIL_MASK, 0);
+    draw(); if (!report(&first, &count) || count != 4096) return 50;
+    method(NV4097_SET_SURFACE_ZETA_OFFSET, 0x110000);
+    if (!d3d12_report(NULL, 0x17C8, 1, NULL, NULL)) return 51;
+    draw(); if (!report(&first, &count) || count) return 52;
+    for (u32 i = 0; i < 2; ++i) {
+        region = *rsx_zcull_get(i); region.bound = 0;
+        if (rsx_zcull_set(i, &region, 0x200000)) return 53;
+    }
+    method(NV4097_SET_STENCIL_TEST_ENABLE, 0);
+    if (FAILED(s_d3d.swap_chain->lpVtbl->GetLastPresentCount(s_d3d.swap_chain, &presents_after)) || presents_after != presents_before + 1) return 54;
     if (cellGcm_syscall_bringup(0x200000) != 0xC0000000u || vm_commit(VM_RSX_CONTEXT_BASE, VM_RSX_CONTEXT_SIZE) ||
         !cellGcm_syscall_bind_context(VM_RSX_CONTEXT_BASE + 0x40, VM_RSX_CONTEXT_BASE + 0x200000)) return 19;
     if (cellGcmSetDisplayBuffer(0, 0, 256, 64, 64) || cellGcmSetDisplayBuffer(1, 0x10000, 256, 64, 64) ||
@@ -207,6 +261,19 @@ int main(void)
         s_d3d.fence_values[s_d3d.frame_index] <= reference_fence ||
         s_d3d.fence->lpVtbl->GetCompletedValue(s_d3d.fence) < s_d3d.fence_values[s_d3d.frame_index] ||
         FAILED(s_d3d.swap_chain->lpVtbl->GetLastPresentCount(s_d3d.swap_chain, &presents_after)) || presents_after != presents_before) return 30;
+    /* The window owner waits without pumping while a guest worker submits.
+     * A synchronous window-title update here deadlocks against the FIFO owner. */
+    method(NV4097_CLEAR_SURFACE, 0xF0);
+    Sleep(1100);
+    HANDLE worker = CreateThread(NULL, 0, submit_from_worker, NULL, 0, NULL);
+    if (!worker || WaitForSingleObject(worker, 3000) != WAIT_OBJECT_0) return 55;
+    DWORD worker_result = 1;
+    if (!GetExitCodeThread(worker, &worker_result) || worker_result) return 56;
+    CloseHandle(worker);
+    if (rsx_d3d12_backend_pump_messages()) return 57;
+    char title[256];
+    GetWindowTextA(s_d3d.hwnd, title, sizeof title);
+    if (!strstr(title, "draws:")) return 58;
     rsx_d3d12_backend_shutdown(); vm_shutdown();
     puts("Verified real GPU samples, timestamps, semaphore completion, preserved depth and no implicit present");
     return 0;
