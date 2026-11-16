@@ -253,8 +253,13 @@ The original `libgcm_sys` is now compiled, bound and started through AOT
 an actual interrupt queue, IO mappings, shared labels/reports, FIFO control,
 uncompressed tiles and display buffers. The VSYNC startup opens the D3D12 window.
 Frontend semaphore acquires wait; backend releases require real GPU completion.
-The latest session stops at `cellPadGetData`, whose packet delivery remains
-gated pending audit. The original flip/interrupt path is not yet verified. Pass
+Basic pad packets now deliver measured buttons/sticks and connection errors;
+actuator requests validate the 8-byte ABI and the host result. Extended pressure
+and sensor packets remain blocked. FIFO DMA contexts distinguish device and
+report semaphores; the original initialization now passes its device-ready wait.
+The latest session stops at `ZCULL_STATS` (report type 2, offset `0x640`). This
+counter has no validated implementation in the current backend; measured ZPASS
+support does not cover it. The original flip/interrupt path is not yet verified. Pass
 `run ... --enter-button cross` or `circle` explicitly; no preference is inferred
 from language/region. No interpreter is used.
 No game frame, selector transition or gameplay is verified. Original and derived

@@ -258,9 +258,14 @@ A `libgcm_sys` original agora é compilada, vinculada e iniciada por AOT
 fila real de interrupções, mapeamentos IO, labels/relatórios compartilhados,
 controle FIFO, tiles sem compressão e buffers de imagem. O boot em VSYNC abre a janela D3D12.
 Aquisições de semáforo aguardam; liberações de backend exigem conclusão real da GPU.
-A sessão mais recente para em `cellPadGetData`; a entrega de pacotes continua
-bloqueada até sua auditoria. O caminho original de flip/interrupções ainda não
-foi verificado. Use `run ... --enter-button cross`
+Pacotes básicos de controle agora entregam botões/sticks medidos e erros de conexão;
+a vibração valida a ABI de 8 bytes e o resultado do host. Pacotes estendidos de
+pressão e sensores continuam bloqueados. Contextos DMA da FIFO distinguem semáforos
+do dispositivo e dos relatórios; a inicialização original passa pela espera de prontidão.
+A sessão mais recente para em `ZCULL_STATS` (relatório tipo 2, offset `0x640`). Esse
+contador ainda não tem implementação validada no backend atual; o suporte a ZPASS
+medido não o cobre. O caminho original de flip/interrupções ainda não foi verificado.
+Use `run ... --enter-button cross`
 ou `circle` explicitamente; idioma/região não inferem a preferência. Não há interpretação.
 Nenhum frame, transição para o seletor ou gameplay foi verificado.
 Originais e derivados proprietários permanecem fora do Git.

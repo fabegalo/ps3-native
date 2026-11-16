@@ -88,6 +88,8 @@ void pad_info2(ppu_context* ctx) {
     ctx->gpr[3] = (u64)(s64)cellPadGetInfo2((CellPadInfo2*)(uintptr_t)(u32)ctx->gpr[3]);
 }
 void pad_setting(ppu_context* ctx) { ctx->gpr[3] = (u64)(s64)cellPadSetPortSetting((u32)ctx->gpr[3], (u32)ctx->gpr[4]); }
+void pad_data(ppu_context* ctx) { ctx->gpr[3] = (u64)(s64)cellPadGetData((u32)ctx->gpr[3], (CellPadData*)(uintptr_t)ctx->gpr[4]); }
+void pad_actuator(ppu_context* ctx) { ctx->gpr[3] = (u64)(s64)cellPadSetActDirect((u32)ctx->gpr[3], (CellPadActParam*)(uintptr_t)ctx->gpr[4]); }
 void audio_port_start(ppu_context* ctx) { ctx->gpr[3] = (u64)(s64)cellAudioPortStart((u32)ctx->gpr[3]); }
 void audio_port_stop(ppu_context* ctx) { ctx->gpr[3] = (u64)(s64)cellAudioPortStop((u32)ctx->gpr[3]); }
 void audio_port_close(ppu_context* ctx) { ctx->gpr[3] = (u64)(s64)cellAudioPortClose((u32)ctx->gpr[3]); }
@@ -419,6 +421,8 @@ struct RegisterAdapters {
         ps3_hle_register_ctx(ps3_compute_nid("cellAudioPortOpen"), "cellAudioPortOpen", audio_port_open);
         ps3_hle_register_ctx(ps3_compute_nid("cellPadGetInfo2"), "cellPadGetInfo2", pad_info2);
         ps3_hle_register_ctx(ps3_compute_nid("cellPadSetPortSetting"), "cellPadSetPortSetting", pad_setting);
+        ps3_hle_register_ctx(ps3_compute_nid("cellPadGetData"), "cellPadGetData", pad_data);
+        ps3_hle_register_ctx(ps3_compute_nid("cellPadSetActDirect"), "cellPadSetActDirect", pad_actuator);
         ps3_hle_register_ctx(ps3_compute_nid("cellAudioGetPortConfig"), "cellAudioGetPortConfig", audio_port_config);
         ps3_hle_register_ctx(ps3_compute_nid("cellAudioPortStart"), "cellAudioPortStart", audio_port_start);
         ps3_hle_register_ctx(ps3_compute_nid("cellAudioPortStop"), "cellAudioPortStop", audio_port_stop);

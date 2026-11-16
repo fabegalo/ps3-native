@@ -3291,7 +3291,32 @@
          FLIP_UNLOCK();
          if (s_flip_handler_opd && g_ps3_guest_caller) {
              ydkj_restore_handler_opd(s_flip_handler_opd, s_flip_handler_code);
-@@ -1669,6 +1700,14 @@
+@@ -1070,6 +1101,24 @@
+ }
+ 
+ static u32 s_sema_offset = 0;   /* NV406E semaphore offset (label window) */
++static u32 s_sema_context = 0x66616661u;
++static u32 gcm_fifo_semaphore_address(u32 offset)
++{
++#ifdef PS3_NATIVE_STRICT
++    extern int ps3_native_guest_range_backed(u32, u32);
++    extern void ps3_native_stop(void);
++    if (s_sema_context == 0x56616660u || s_sema_context == 0x56616661u) {
++        if (!(offset & 3) && offset <= VM_RSX_DEVICE_SIZE - 4 &&
++            ps3_native_guest_range_backed(VM_RSX_DEVICE_BASE + offset, 4))
++            return VM_RSX_DEVICE_BASE + offset;
++    } else if (s_sema_context == 0x66606660u || s_sema_context == 0x66616661u) {
++        return cellGcm_semaphore_address(offset);
++    }
++    fprintf(stderr, "[native-blocked] NV406E semaphore DMA requires audit context=0x%08X offset=0x%X\n", s_sema_context, offset);
++    fflush(stderr); ps3_native_stop();
++#endif
++    return cellGcm_semaphore_address(offset);
++}
+ static int s_sema_blocked_pass = 0;   /* this drain stopped on a semaphore acquire */
+ static int s_park_pass = 0;           /* this drain stopped on a self-JUMP park */
+ static int s_report_hold_pass = 0;    /* this drain stopped on a held GET_REPORT */
+@@ -1669,6 +1718,14 @@
   * and halved the frame rate). Call AFTER draining. */
  int cellGcm_take_flip_pending_synced(void)
  {
@@ -3306,7 +3331,7 @@
      if (!s_flip_pending) return 0;
      u32 put = vm_read32(GCM_CONTROL_GUEST_ADDR + 0);
      u32 get = vm_read32(GCM_CONTROL_GUEST_ADDR + 4);
-@@ -1887,7 +1926,7 @@
+@@ -1887,7 +1944,7 @@
                  if (m == 0x64u) s_sema_offset = v;
                  else if (m == 0x6Cu) {
                      atomic_thread_fence(memory_order_release);
@@ -3315,7 +3340,7 @@
                      labels++;
                  } else if (m == 0x01A4u || m == 0x1D6Cu || m == 0x1D70u || m == 0x1D74u) {
                      rsx_process_method(&s_resync_state, m, v);
-@@ -2230,6 +2269,41 @@
+@@ -2230,6 +2287,41 @@
  static void gcm_3d_method(rsx_state* st, u32 m, u32 v, int legacy_state_live)
  {
      extern u32 g_rsx_last_reference;
@@ -3357,7 +3382,7 @@
      /* #466: rsx_state feeds only the legacy vtable backend. With the draw
       * engine up and no vtable registered, the state it builds is never read,
       * so only the methods with effects outside it are worth handing over.
-@@ -2248,6 +2322,7 @@
+@@ -2248,6 +2340,7 @@
       * tells the title every queried object is occluded. */
      if (m == 0x1A8) s_report_dma = v;
      if (m == 0x1800) {
@@ -3365,7 +3390,7 @@
          const u32 off = v & 0xFFFFFFu, idx = off / 16u;
          const u32 val = (v >> 24) == 1u ? 0xFFFFu : 0u;
          const u64 ts = gcm_report_timestamp();
-@@ -2266,6 +2341,7 @@
+@@ -2266,6 +2359,7 @@
              s_report_data[idx].timestamp = ts;
              s_report_data[idx].value = val;
          }
@@ -3373,7 +3398,7 @@
      }
  }
  
-@@ -2315,6 +2391,10 @@
+@@ -2315,6 +2409,10 @@
   * RSX-thread profiles, so each is read once and cached, like the other knobs. */
  static void gcm_rsx_process_fifo_unlocked(void)
  {
@@ -3384,7 +3409,7 @@
      { static unsigned _n = 0; static unsigned long long _t0 = 0;
        extern unsigned long long ps3_ms_now(void);
        _n++;
-@@ -2547,7 +2627,32 @@
+@@ -2547,7 +2645,32 @@
          if (park_off && (s_fifo_getoff != park_off || !is_jump || jump_tgt != park_off))
              park_off = 0;
  
@@ -3417,7 +3442,7 @@
              /* lv1 driver flip: statically-linked libgcm cellGcmSetFlip writes
               * this word into the FIFO instead of calling any import. Fire the
               * flip (status/count/handler) and STOP this drain so the ticker's
-@@ -2596,6 +2701,9 @@
+@@ -2596,6 +2719,9 @@
               * 3 MB ring at boot, wraps, and a walker stopping at every flip
               * then crawled ~1 KB a tick while the title wrote over the
               * commands ahead of it. */
@@ -3427,16 +3452,36 @@
              if (gcm_fifo_backlog(put, s_fifo_getoff) < GCM_FIFO_CATCHUP_BYTES)
                  { why = "flip"; break; }
              continue;
-@@ -2722,7 +2830,7 @@
+@@ -2715,14 +2841,16 @@
+                 s_report_hold_pass = 1;
+                 break;
+             }
+-            if (subch == 0 && (method == 0x64u || method == 0x68u || method == 0x6Cu)) {
++            if (subch == 0 && (method == 0x60u || method == 0x64u || method == 0x68u || method == 0x6Cu)) {
+                 int sem_blocked = 0;
+                 for (u32 i = 0; i < count; i++) {
+                     u32 dea = gcm_io2ea(s_fifo_getoff + 4 + i * 4);
                      if (!dea) break;
                      u32 m = (type == 0) ? method + i * 4 : method;
                      u32 v = vm_read32(dea);
 -                    u32 la = GCM_LABEL_GUEST_BASE + (s_sema_offset & 0xFFFFu);
-+                    u32 la = cellGcm_semaphore_address(s_sema_offset);
++                    if (m == 0x60u) { s_sema_context = v; continue; }
++                    if (m == 0x64u) { s_sema_offset = v; continue; }
++                    u32 la = gcm_fifo_semaphore_address(s_sema_offset);
                      { static int sn = 0, recdbg = -1; if (recdbg < 0) recdbg = getenv("GCM_RECDBG") ? 1 : 0;
                        if (recdbg && PS3_LOG_FIRST(sn, 12))
                          fprintf(stderr, "[SEMA] m=0x%02X v=0x%08X off=0x%X\n", m, v, s_sema_offset); }
-@@ -2755,8 +2863,12 @@
+@@ -2731,8 +2859,7 @@
+                         ps3_ft_span(PS3_FT_SEMA, 0, s_sema_offset, v, s_ft_sema_t0, ps3_ft_now());
+                         s_ft_sema_t0 = 0;
+                     }
+-                    if (m == 0x64u)      s_sema_offset = v;
+-                    else if (m == 0x6Cu) {
++                    if (m == 0x6Cu) {
+                         /* The RSX has fetched past a RELEASE before its
+                          * semaphore write lands, so a guest that sees the
+                          * label must also see `get` past the command. `get`
+@@ -2755,8 +2882,12 @@
               * ever writes would wedge the drain permanently, and RELEASE on
               * its own is the half that unblocks a waiting guest. */
              static int blk = -1; static unsigned blk_ms;
@@ -3449,7 +3494,7 @@
              if (blk) {
                  /* GCM_SEMA_ACQUIRE_MS=<ms>: a bounded wait. The hardware waits
                   * for ever; an emulated producer that never comes (a boot-time
-@@ -3330,6 +3442,11 @@
+@@ -3330,6 +3461,11 @@
      if (bufferId >= CELL_GCM_MAX_DISPLAY_BUFFER_NUM)
          return CELL_GCM_ERROR_INVALID_VALUE;
  
@@ -3461,7 +3506,7 @@
      s_display_buffers[bufferId].offset = offset;
      s_display_buffers[bufferId].pitch  = pitch;
      s_display_buffers[bufferId].width  = width;
-@@ -3550,29 +3667,53 @@
+@@ -3550,29 +3686,53 @@
  /* NID: 0xA2478CA3 */
  s32 cellGcmSetPrepareFlip(void* ctx, u32 bufferId)
  {
@@ -3538,7 +3583,7 @@
  }
  
  /* NID: 0x1BFAB6EE */
-@@ -3717,6 +3858,9 @@
+@@ -3717,6 +3877,9 @@
          return CELL_OK;
      }
  
@@ -3548,7 +3593,7 @@
      /* Auto-map unmapped main memory. On real hardware PSL1GHT pre-maps its
       * whole RSX heap in gcmInitBody, so its libraries never call MapMainMemory
       * before handing an EA to the RSX (Tiny3D's command ring lives in an
-@@ -4114,12 +4258,16 @@
+@@ -4114,12 +4277,16 @@
      if (index >= CELL_GCM_MAX_REPORT_COUNT)
          return 0;
  
@@ -3565,7 +3610,7 @@
  }
  
  /* ---------------------------------------------------------------------------
-@@ -4127,11 +4275,13 @@
+@@ -4127,11 +4294,13 @@
   * -----------------------------------------------------------------------*/
  
  /* NID: 0x0B4B62D5 */
@@ -3583,7 +3628,7 @@
  
      if (ps3_log_verbose())
          printf("[cellGcmSys] SetTile(index=%u, loc=%u, offset=0x%X, size=0x%X, pitch=%u)\n",
-@@ -4145,7 +4295,7 @@
+@@ -4145,7 +4314,7 @@
      s_tiles[index].bank   = bank;
      /* SetTile binds too (as it does on RPCS3), so a
       * title that never calls BindTile still has its tiles in force. */
@@ -3592,7 +3637,7 @@
  
      /* Build tile register value (simplified) */
      s_tiles[index].tile  = (location << 0) | (pitch << 8);
-@@ -4153,6 +4303,10 @@
+@@ -4153,6 +4322,10 @@
      gcm_tile_publish(index);
  
      return CELL_OK;
@@ -3603,7 +3648,7 @@
  }
  
  /* NID: 0x06EDEA25 */
-@@ -4311,7 +4465,7 @@
+@@ -4311,7 +4484,7 @@
                         u32 pitch, u8 comp, u16 base, u8 bank)
  {
      /* Delegates to existing SetTile */
@@ -3612,7 +3657,7 @@
  }
  
  /* Default FIFO size — configures command buffer size before init */
-@@ -4407,7 +4561,7 @@
+@@ -4407,7 +4580,7 @@
      printf("[cellGcmSys] Terminate\n");
  
      s_gcm_initialized = 0;
@@ -3621,7 +3666,7 @@
      s_flip_status = CELL_GCM_FLIP_STATUS_DONE;
      s_debug_level = CELL_GCM_DEBUG_LEVEL0;
      s_vblank_count = 0;
-@@ -4591,7 +4745,20 @@
+@@ -4591,7 +4764,20 @@
  s32 cellGcmSetFlipImmediate(u32 bufferId)
  {
      printf("[cellGcmSys] SetFlipImmediate(bufferId=%u)\n", bufferId);
@@ -3642,7 +3687,7 @@
  }
  
  /* Set flip status directly */
-@@ -4750,7 +4917,7 @@
+@@ -4750,7 +4936,7 @@
  u32 cellGcm_syscall_bringup(u32 local_size)
  {
      if (!s_gcm_initialized)
@@ -3651,7 +3696,7 @@
      if (local_size)
          s_config.localSize = local_size;
      s_gcm_syscall_mode = 1;
-@@ -4762,12 +4929,49 @@
+@@ -4762,12 +4948,49 @@
   * `lwz r3,0x18(r9)` / `addi r3,r3,64`), so the syscall returns this minus 0x40
   * and the driver's own flushes land exactly where the walker reads. */
  u32 cellGcm_control_guest_addr(void) { return GCM_CONTROL_GUEST_ADDR; }
@@ -3701,7 +3746,7 @@
      populate_offset_table(ea, io, size);
      /* A free slot, not s_io_mappings[count]: an unmap leaves a hole, and the
       * count then indexes a live slot. */
-@@ -4777,6 +4981,9 @@
+@@ -4777,6 +5000,9 @@
          s_io_mapping_count++;
      }
      if (!s_config.ioSize) { s_config.ioAddress = ea; s_config.ioSize = size; }
@@ -3711,7 +3756,7 @@
  }
  
  void cellGcm_syscall_iounmap(u32 io, u32 size)
-@@ -4790,10 +4997,46 @@
+@@ -4790,10 +5016,46 @@
  /* sys_rsx_context_attribute(0x001): the driver's explicit FIFO reset. Move the
   * walker with it -- leaving s_fifo_getoff where it was makes the next drain walk
   * from a stale offset through whatever the driver has since overwritten. */
@@ -6877,7 +6922,7 @@
  static int s_xi_tried;
  
  static int pad_xinput_load(void)
-@@ -375,18 +385,28 @@
+@@ -375,36 +385,39 @@
      if (s_xi_tried) return p_xi_get_state != NULL;
      s_xi_tried = 1;
      for (size_t k = 0; k < sizeof(names) / sizeof(names[0]); k++) {
@@ -6907,7 +6952,30 @@
      printf("[cellPad] no XInput DLL (XInput1_4, XInput1_3, XInput9_1_0): no XInput pads\n");
      return 0;
  }
-@@ -437,6 +457,25 @@
+ 
+-static u8 pad_xinput_stick_to_u8(short raw, short deadzone)
+-{
+-    float normalized;
++static u8 pad_xinput_stick_to_u8(short raw, short deadzone, int invert)
++{
++    int val = 128;
+     if (raw > deadzone)
+-        normalized = (float)(raw - deadzone) / (float)(32767 - deadzone);
++        val += ((int)raw - deadzone) * (invert ? -128 : 127) / (32767 - deadzone);
+     else if (raw < -deadzone)
+-        normalized = (float)(raw + deadzone) / (float)(32767 - deadzone);
+-    else
+-        normalized = 0.0f;
+-
+-    /* Map -1.0..1.0 to 0..255 with center at 128 */
+-    int val = (int)(normalized * 127.0f) + 128;
+-    if (val < 0) val = 0;
+-    if (val > 255) val = 255;
++        val += (-(int)raw - deadzone) * (invert ? 127 : -128) / (32768 - deadzone);
+     return (u8)val;
+ }
+ 
+@@ -437,6 +450,25 @@
              continue;
          }
          s_pad_empty_until[i] = 0;
@@ -6933,7 +7001,39 @@
  
          s_host_state[i].connected = 1;
          XINPUT_GAMEPAD* gp = &state.Gamepad;
-@@ -659,6 +698,20 @@
+@@ -460,16 +492,18 @@
+         if (gp->wButtons & XINPUT_GAMEPAD_A)              btns |= CELL_PAD_CTRL_CROSS;
+         if (gp->wButtons & XINPUT_GAMEPAD_X)              btns |= CELL_PAD_CTRL_SQUARE;
+ 
++        if (gp->bLeftTrigger > XINPUT_GAMEPAD_TRIGGER_THRESHOLD) btns |= CELL_PAD_CTRL_L2;
++        if (gp->bRightTrigger > XINPUT_GAMEPAD_TRIGGER_THRESHOLD) btns |= CELL_PAD_CTRL_R2;
+         s_host_state[i].buttons = btns;
+ 
+         /* Analog sticks. PS3 Y axis is inverted vs XInput (up = 0). Reflect about
+          * 128 (256 - x), NOT 255 - x: the latter turns a centered stick into 127,
+          * whose bits (0x7F) alias SELECT+START and can make the guest self-exit.
+          * (via sagemono, PR #42) */
+-        s_host_state[i].analog_lx = pad_xinput_stick_to_u8(gp->sThumbLX, PAD_STICK_DEADZONE);
+-        s_host_state[i].analog_ly = (u8)(256 - pad_xinput_stick_to_u8(gp->sThumbLY, PAD_STICK_DEADZONE));
+-        s_host_state[i].analog_rx = pad_xinput_stick_to_u8(gp->sThumbRX, PAD_STICK_DEADZONE);
+-        s_host_state[i].analog_ry = (u8)(256 - pad_xinput_stick_to_u8(gp->sThumbRY, PAD_STICK_DEADZONE));
++        s_host_state[i].analog_lx = pad_xinput_stick_to_u8(gp->sThumbLX, PAD_STICK_DEADZONE, 0);
++        s_host_state[i].analog_ly = pad_xinput_stick_to_u8(gp->sThumbLY, PAD_STICK_DEADZONE, 1);
++        s_host_state[i].analog_rx = pad_xinput_stick_to_u8(gp->sThumbRX, PAD_STICK_DEADZONE, 0);
++        s_host_state[i].analog_ry = pad_xinput_stick_to_u8(gp->sThumbRY, PAD_STICK_DEADZONE, 1);
+ 
+         /* Triggers */
+         s_host_state[i].trigger_l2 = gp->bLeftTrigger;
+@@ -511,7 +545,7 @@
+ static u8 pad_sdl_axis_to_u8(int raw)
+ {
+     /* SDL axis: -32768..32767 -> 0..255 with center at 128 */
+-    int val = ((raw + 32768) * 255) / 65535;
++    int val = ((raw + 32768) * 255 + 32767) / 65535;
+     if (val < 0) val = 0;
+     if (val > 255) val = 255;
+     return (u8)val;
+@@ -659,6 +693,20 @@
          s_host_state[i].connected = 1;
  
          /* Keep a rumble the title set going (see PAD_RUMBLE_HOLD_MS). */
@@ -6954,7 +7054,7 @@
          if (s_rumble[i].sent_ms && pad_now_ms() - s_rumble[i].sent_ms >= PAD_RUMBLE_RENEW_MS)
              pad_sdl_rumble_send(i);
  
-@@ -726,7 +779,15 @@
+@@ -726,7 +774,15 @@
               * cared. SDL_JOYSTICK_ALLOW_BACKGROUND_EVENTS=0 in the
               * environment still wins over this. */
              SDL_SetHint(SDL_HINT_JOYSTICK_ALLOW_BACKGROUND_EVENTS, "1");
@@ -6971,7 +7071,25 @@
          }
          s_sdl_inited = 1;
      }
-@@ -793,7 +854,9 @@
+@@ -780,21 +836,31 @@
+ {
+     static unsigned long long s_last_ms = 0;
+     unsigned long long now = pad_now_ms();
+-    if (s_last_ms && now - s_last_ms < PAD_POLL_INTERVAL_MS) return;
+     if (!pad_lock_try()) return;   /* another thread is polling: its result serves this read */
++    if (s_last_ms && now - s_last_ms < PAD_POLL_INTERVAL_MS) { pad_unlock(); return; }
+     s_last_ms = now;
+     /* A real pad streams reports at roughly this rate whether or not anything
+      * changed, and libpad buffers them; a fresh sweep is a fresh report for
+      * every port. cellPadGetData hands each one out exactly once. */
++#ifdef PS3_NATIVE_STRICT
++    PadHostState before[PAD_MAX_HOST_PORTS]; memcpy(before, s_host_state, sizeof before);
++#else
+     for (int _i = 0; _i < PAD_MAX_HOST_PORTS; _i++) s_data_fresh[_i] = 1;
++#endif
+ 
+ #if PAD_BACKEND_XINPUT
+     pad_poll_xinput();
  #elif PAD_BACKEND_SDL2
      pad_poll_sdl2();
  #endif
@@ -6979,9 +7097,14 @@
      if (!s_host_state[0].connected) pad_poll_keyboard();
 +#endif
      pad_track_assign();
++#ifdef PS3_NATIVE_STRICT
++    for (unsigned i = 0; i < PAD_MAX_HOST_PORTS; ++i)
++        if (memcmp(&before[i], &s_host_state[i], sizeof before[i])) s_data_fresh[i] = 1;
++#endif
      pad_unlock();
  }
-@@ -831,7 +894,11 @@
+ 
+@@ -831,7 +897,11 @@
      /* What is there at start is the baseline; only later changes are
       * flagged CELL_PAD_STATUS_ASSIGN_CHANGES. */
      for (int i = 0; i < PAD_MAX_HOST_PORTS; i++) {
@@ -6994,7 +7117,51 @@
          s_port_changed[i] = 0;
      }
  
-@@ -1268,6 +1335,7 @@
+@@ -869,6 +939,35 @@
+ 
+ s32 cellPadGetData(u32 port_no, CellPadData* data_guest)
+ {
++#ifdef PS3_NATIVE_STRICT
++    extern int ps3_native_guest_range_backed(u32, u32);
++    pad_poll_backend();
++    pad_lock();
++    if (!s_pad_initialized) { pad_unlock(); return CELL_PAD_ERROR_NOT_OPENED; }
++    const uintptr_t address = (uintptr_t)data_guest;
++    if (port_no >= CELL_PAD_MAX_PORT_NUM || address > UINT32_MAX ||
++        !ps3_native_guest_range_backed((u32)address, sizeof(CellPadData))) {
++        pad_unlock(); return CELL_PAD_ERROR_INVALID_PARAMETER;
++    }
++    if (port_no >= s_max_connect || port_no >= PAD_MAX_HOST_PORTS || !s_host_state[port_no].connected) {
++        pad_unlock(); return CELL_PAD_ERROR_NO_DEVICE;
++    }
++    if (s_port_setting[port_no]) {
++        fprintf(stderr, "[native-blocked] controller data mode is not backed by measured host fields\n");
++        fflush(stderr); ps3_native_stop();
++    }
++    const int fresh = s_data_fresh[port_no];
++    const PadHostState* host = &s_host_state[port_no];
++    const u16 buttons[8] = {0, 0x74, host->buttons & 255, host->buttons >> 8,
++        host->analog_rx, host->analog_ry, host->analog_lx, host->analog_ly};
++    vm_write32(address, fresh ? CELL_PAD_LEN_CHANGE_DEFAULT : CELL_PAD_LEN_NO_CHANGE);
++    if (fresh) {
++        for (unsigned i = 0; i < 8; ++i) vm_write16(address + 4 + i * 2, buttons[i]);
++        for (unsigned i = 8; i < 20; ++i) vm_write16(address + 4 + i * 2, 0);
++        s_data_fresh[port_no] = 0;
++    }
++    pad_unlock(); return CELL_OK;
++#else
+     { static int _once = 0;
+       if (!_once++) printf("[cellPad] GetData polling begins (port %u)\n", port_no); }
+     if (!s_pad_initialized)
+@@ -1208,6 +1307,7 @@
+             vm_write16((unsigned long long)ea + 4 + (unsigned int)_i * 2, data->button[_i]);
+     }
+     return CELL_OK;
++#endif
+ }
+ 
+ /* cellPadGetInfo (v1 API, NID 0x3AAAD464) — used by PSL1GHT's ioPadGetInfo.
+@@ -1268,6 +1368,7 @@
  
      /* Poll to get latest connection state */
      pad_poll_backend();
@@ -7002,7 +7169,7 @@
  
      /* Build in a local host struct, then copy to guest memory big-endian. */
      CellPadInfo2 _in; CellPadInfo2* info = &_in;
-@@ -1275,18 +1343,24 @@
+@@ -1275,18 +1376,24 @@
      info->max_connect = s_max_connect;
  
      u32 connected = 0;
@@ -7033,7 +7200,7 @@
              info->device_type[i]       = CELL_PAD_DEV_TYPE_STANDARD;
              connected++;
          } else {
-@@ -1294,6 +1368,7 @@
+@@ -1294,6 +1401,7 @@
          }
      }
      info->now_connect = connected;
@@ -7041,7 +7208,7 @@
  
      /* copy to guest big-endian (CellPadInfo2 is all u32 fields) */
      {
-@@ -1368,13 +1443,17 @@
+@@ -1368,13 +1476,17 @@
      printf("[cellPad] SetPortSetting(port=%u, setting=0x%X)\n",
             port_no, port_setting);
  
@@ -7066,6 +7233,66 @@
      return CELL_OK;
  }
  
+@@ -1468,6 +1580,51 @@
+ 
+ s32 cellPadSetActDirect(u32 port_no, CellPadActParam* param)
+ {
++#ifdef PS3_NATIVE_STRICT
++    extern int ps3_native_guest_range_backed(u32, u32);
++    extern u32 g_ps3_sdk_version;
++    extern void ps3_native_stop(void);
++    pad_poll_backend();
++    pad_lock();
++    if (!s_pad_initialized) { pad_unlock(); return CELL_PAD_ERROR_NOT_OPENED; }
++    const uintptr_t address = (uintptr_t)param;
++    if (port_no >= CELL_PAD_MAX_PORT_NUM || address > UINT32_MAX ||
++        !ps3_native_guest_range_backed((u32)address, sizeof *param)) {
++        pad_unlock(); return CELL_PAD_ERROR_INVALID_PARAMETER;
++    }
++    param = (CellPadActParam*)(vm_base + address);
++    if ((s32)g_ps3_sdk_version > 0x1FFFFF) {
++        for (unsigned i = 0; i < sizeof param->reserved; ++i)
++            if (param->reserved[i]) { pad_unlock(); return CELL_PAD_ERROR_INVALID_PARAMETER; }
++    }
++    if (port_no >= s_max_connect || port_no >= PAD_MAX_HOST_PORTS || !s_host_state[port_no].connected) {
++        pad_unlock(); return CELL_PAD_ERROR_NO_DEVICE;
++    }
++    if (!(s_host_state[port_no].capabilities & CELL_PAD_CAPABILITY_ACTUATOR)) {
++        pad_unlock(); return CELL_PAD_ERROR_UNSUPPORTED_GAMEPAD;
++    }
++    u16 lo, hi;
++    pad_rumble_levels(param->motor[0], param->motor[1], &lo, &hi);
++#if PAD_BACKEND_XINPUT
++    if (p_xi_set_state) {
++        XINPUT_VIBRATION vib = {lo, hi};
++        const DWORD result = p_xi_set_state(port_no, &vib);
++        if (result == ERROR_DEVICE_NOT_CONNECTED) { pad_unlock(); return CELL_PAD_ERROR_NO_DEVICE; }
++        if (result == ERROR_SUCCESS) {
++            s_rumble[port_no].lo = lo; s_rumble[port_no].hi = hi;
++            pad_unlock(); return CELL_OK;
++        }
++    }
++#elif PAD_BACKEND_SDL2
++    if (s_sdl_controllers[port_no] && SDL_GameControllerRumble(s_sdl_controllers[port_no], lo, hi, (lo || hi) ? PAD_RUMBLE_HOLD_MS : 0) == 0) {
++        s_rumble[port_no].lo = lo; s_rumble[port_no].hi = hi;
++        s_rumble[port_no].sent_ms = (lo || hi) ? pad_now_ms() : 0;
++        pad_unlock(); return CELL_OK;
++    }
++#endif
++    fprintf(stderr, "[native-blocked] controller actuator request did not reach the host device\n");
++    fflush(stderr); ps3_native_stop();
++#else
+     if (!s_pad_initialized)
+         return CELL_PAD_ERROR_NOT_OPENED;
+ 
+@@ -1502,6 +1659,7 @@
+ #endif
+ 
+     return CELL_OK;
++#endif
+ }
+ 
+ s32 cellPadClearBuf(u32 port_no)
 --- a/runtime/spu/spu_dispatch_mt.c
 +++ b/runtime/spu/spu_dispatch_mt.c
 @@ -23,6 +23,9 @@
@@ -8538,7 +8765,7 @@
  }
  
  static int64_t sc_rsx_memory_free(ppu_context* ctx) { (void)ctx; return CELL_OK; }
-@@ -276,6 +348,65 @@
+@@ -276,6 +348,68 @@
   *                               u64 mem_handle, u64 system_mode) */
  static int64_t sc_rsx_context_allocate(ppu_context* ctx)
  {
@@ -8593,6 +8820,9 @@
 +    }
 +    s_context_id = s_local_handle + 1;
 +    s_isr_port = port; s_isr_qid = queue;
++    /* The first context starts the device with an empty display queue. */
++    if (__atomic_load_n(&s_device_mapped, __ATOMIC_ACQUIRE))
++        vm_write32(VM_RSX_DEVICE_BASE + 0x30, 1);
 +    __atomic_store_n(&s_context_ready, 1, __ATOMIC_RELEASE);
 +    vm_write32((u32)ctx->gpr[3], s_context_id);
 +    vm_write64((u32)ctx->gpr[4], VM_RSX_CONTEXT_BASE);
@@ -8604,7 +8834,7 @@
      u32 id_ea  = (u32)ctx->gpr[3];
      u32 dma_ea = (u32)ctx->gpr[4];
      u32 di_ea  = (u32)ctx->gpr[5];
-@@ -306,6 +437,7 @@
+@@ -306,6 +440,7 @@
              RSX_DRIVER_INFO_EA, RSX_REPORTS_EA,
              (unsigned long long)ctx->gpr[8]);
      return CELL_OK;
@@ -8612,7 +8842,7 @@
  }
  
  static int64_t sc_rsx_context_free(ppu_context* ctx) { (void)ctx; return CELL_OK; }
-@@ -315,11 +447,26 @@
+@@ -315,11 +450,26 @@
   * r30=r28=ea, r29=io, r31=size and passes r4=r29(io), r5=r28(ea), r6=r31. */
  static int64_t sc_rsx_context_iomap(ppu_context* ctx)
  {
@@ -8639,7 +8869,7 @@
      if (rsx_dbg())
          fprintf(stderr, "[sys_rsx] iomap io=0x%08X <- ea=0x%08X size=0x%X\n",
                  io, ea, size);
-@@ -336,15 +483,70 @@
+@@ -336,15 +486,70 @@
  /* 674: sys_rsx_context_attribute(u32 ctx, u32 packet_id, u64 a3..a6) */
  static int64_t sc_rsx_context_attribute(ppu_context* ctx)
  {
@@ -8713,7 +8943,7 @@
          return CELL_OK;
  
      case 0x104: {                     /* display buffer set */
-@@ -382,6 +584,24 @@
+@@ -382,6 +587,24 @@
   * unmap) and copes with a failure, so report only the device we have. */
  static int64_t sc_rsx_device_map(ppu_context* ctx)
  {
@@ -8738,7 +8968,7 @@
      u32 a_ea = (u32)ctx->gpr[3], b_ea = (u32)ctx->gpr[4];
      uint64_t dev = ctx->gpr[5];
  
-@@ -396,10 +616,32 @@
+@@ -396,10 +619,32 @@
      if (rsx_dbg())
          fprintf(stderr, "[sys_rsx] device_map(dev=8) -> 0x%08X\n", RSX_DEVICE_EA);
      return CELL_OK;
@@ -8782,3 +9012,25 @@
  
  /* Mark a queue as having no producer left and release anyone blocked on it.
   * Used by cellSpursFinalize: after it, no job completion can ever arrive, and
+--- a/include/ps3emu/error_codes.h
++++ b/include/ps3emu/error_codes.h
+@@ -143,7 +143,8 @@
+ #define CELL_PAD_ERROR_INVALID_PARAMETER    (CELL_ERROR_BASE_PAD | 0x02)
+ #define CELL_PAD_ERROR_ALREADY_OPENED       (CELL_ERROR_BASE_PAD | 0x03)
+ #define CELL_PAD_ERROR_NOT_OPENED           (CELL_ERROR_BASE_PAD | 0x04)
+-#define CELL_PAD_ERROR_NO_DEVICE            (CELL_ERROR_BASE_PAD | 0x05)
++#define CELL_PAD_ERROR_NO_DEVICE            (CELL_ERROR_BASE_PAD | 0x07)
++#define CELL_PAD_ERROR_UNSUPPORTED_GAMEPAD  (CELL_ERROR_BASE_PAD | 0x08)
+ 
+ /* audio errors */
+ #define CELL_AUDIO_ERROR_ALREADY_INIT       (CELL_ERROR_BASE_AUDIO | 0x01)
+--- a/libs/input/cellPad.h
++++ b/libs/input/cellPad.h
+@@ -164,6 +164,7 @@
+ /* Actuator (vibration) parameter */
+ typedef struct CellPadActParam {
+     u8 motor[CELL_PAD_ACTUATOR_MAX];
++    u8 reserved[6];
+ } CellPadActParam;
+ 
+ /* ---------------------------------------------------------------------------

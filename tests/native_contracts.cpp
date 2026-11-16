@@ -222,6 +222,9 @@ int main(int argc, char** argv) {
         vm_write32((u32)local + 0x1FFFFC, 0xCAFEBABE);
         if (!strncmp(argv[1], "rsx_context", 11)) {
             const u32 handle = vm_read32(0x31000);
+            memory.gpr[11] = 675; memory.gpr[3] = 0x31140; memory.gpr[4] = 0; memory.gpr[5] = 8;
+            lv2_syscall(&memory);
+            if (memory.gpr[3] || vm_read64(0x31140) != VM_RSX_DEVICE_BASE || vm_read32(VM_RSX_DEVICE_BASE + 0x30)) return 32;
             auto context = [&](u64 output, u64 object, u64 flags) {
                 memory.gpr[11] = 670; memory.gpr[3] = output;
                 memory.gpr[4] = 0x31110; memory.gpr[5] = 0x31120; memory.gpr[6] = 0x31130;
@@ -236,6 +239,7 @@ int main(int argc, char** argv) {
                 vm_read32(0x31100) != 0xA5A5A5A5) return 9;
             if (!strcmp(argv[1], "rsx_context_flags")) { context(0x31100, handle, 0x10); return 2; }
             if (context(0x31100, handle, 0x20) || !vm_read32(0x31100)) return 10;
+            if (vm_read32(VM_RSX_DEVICE_BASE + 0x30) != 1) return 33;
             if (!strcmp(argv[1], "rsx_context_multiple")) { context(0x31100, handle, 0); return 2; }
             const u32 driver = VM_RSX_CONTEXT_BASE + 0x100000, reports = driver + 0x100000;
             const u32 queue = vm_read32(driver + 0x12D0);
@@ -341,6 +345,17 @@ int main(int argc, char** argv) {
             vm_write32(reports + 0x30, 1); cellGcm_rsx_process_fifo();
             if (vm_read32(VM_RSX_CONTEXT_BASE + 0x44) != 0x1020 || vm_read32(reports + 0x40) != 2 ||
                 attribute(id, 1, 0, 0)) return 31;
+            const u32 dma_commands[] = {0x40060, 0x56616661, 0x40064, 0x30, 0x40068, 1,
+                0x40060, 0x66616661, 0x40064, 0x30, 0x40068, 2, 0x40064, 0x40, 0x4006C, 3};
+            for (u32 i = 0; i < 16; ++i) vm_write32(mapped + 0x1000 + i * 4, dma_commands[i]);
+            if (!strcmp(argv[1], "rsx_context_semaphore_dma")) vm_write32(mapped + 0x1004, 0xDEADBEEF);
+            if (attribute(id, 1, 0x1000, 0x1040)) return 34;
+            cellGcm_rsx_process_fifo();
+            if (vm_read32(VM_RSX_CONTEXT_BASE + 0x44) != 0x1028 || vm_read32(reports + 0x40) != 2 ||
+                vm_read32(VM_RSX_DEVICE_BASE + 0x30) != 1) return 35;
+            vm_write32(reports + 0x30, 2); cellGcm_rsx_process_fifo();
+            if (vm_read32(VM_RSX_CONTEXT_BASE + 0x44) != 0x1040 || vm_read32(reports + 0x40) != 3 ||
+                vm_read32(VM_RSX_DEVICE_BASE + 0x40) || attribute(id, 1, 0, 0)) return 36;
             rsx_set_backend(nullptr); synthetic_submits = 0;
             const u32 flip_status = driver + 0x10C0;
             if (attribute(id, 0x10A, 0, 0, 0x80000000) || vm_read32(flip_status) != 0x80000000 ||

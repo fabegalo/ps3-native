@@ -1,8 +1,9 @@
 import subprocess
 import sys
 import os
+from pathlib import Path
 
-for mode in ('hle', 'ppu', 'indirect', 'indirect_null', 'ppu_null_read', 'storage_budget', 'syscall', 'unaudited_syscall', 'rsx_memory_query', 'rsx_memory_attributes', 'rsx_context_flags', 'rsx_context_multiple', 'rsx_context_iomap_flags', 'rsx_context_iomap_overlap', 'rsx_context_attribute', 'rsx_context_fifo_pending', 'rsx_context_device_attribute', 'rsx_context_alternate_timing', 'rsx_context_sync_mode', 'rsx_context_tile_compressed', 'rsx_context_semaphore_backend', 'strncmp_invalid', 'audio_probe', 'audio_option', 'mutex_shared', 'mutex_adaptive', 'mutex_contended', 'rw_contended', 'tty_channel', 'language_other', 'spu', 'fs_not_ready',
+for mode in ('hle', 'ppu', 'indirect', 'indirect_null', 'ppu_null_read', 'storage_budget', 'syscall', 'unaudited_syscall', 'rsx_memory_query', 'rsx_memory_attributes', 'rsx_context_flags', 'rsx_context_multiple', 'rsx_context_iomap_flags', 'rsx_context_iomap_overlap', 'rsx_context_attribute', 'rsx_context_fifo_pending', 'rsx_context_device_attribute', 'rsx_context_alternate_timing', 'rsx_context_sync_mode', 'rsx_context_tile_compressed', 'rsx_context_semaphore_backend', 'rsx_context_semaphore_dma', 'strncmp_invalid', 'audio_probe', 'audio_option', 'mutex_shared', 'mutex_adaptive', 'mutex_contended', 'rw_contended', 'tty_channel', 'language_other', 'spu', 'fs_not_ready',
              'spu_indirect', 'spu_missing', 'spu_missing_async', 'spu_missing_job', 'sysutil_no_dispatcher',
              'provider_not_registered', 'gcm_unaudited', 'gcm_debug_level', 'tile_compressed', 'io_unbacked',
              'callback_missing', 'callback_ct_missing', 'thread_flags', 'thread_exit_unowned', 'raw_spu_unreviewed',
@@ -80,3 +81,9 @@ for mode in ('gcm_missing_export', 'gcm_missing_private'):
     result = subprocess.run([sys.argv[3], sys.argv[4], mode], capture_output=True, timeout=15)
     if result.returncode != 86 or b'original GCM owner has no prepared export' not in result.stderr:
         raise AssertionError((mode, result.returncode, result.stderr[-2000:]))
+if sys.platform == 'win32':
+    for mode in ('pressure', 'sensors', 'actuator'):
+        result = subprocess.run([str(Path(sys.argv[1]).with_name('ps3-native-pad.exe')), mode], capture_output=True, timeout=15)
+        expected = b'actuator request did not reach the host device' if mode == 'actuator' else b'controller data mode is not backed by measured host fields'
+        if result.returncode != 86 or expected not in result.stderr:
+            raise AssertionError((mode, result.returncode, result.stderr[-2000:]))

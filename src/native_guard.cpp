@@ -171,6 +171,8 @@ extern "C" void ps3_native_hle_gate(uint32_t nid, ppu_context* ctx) {
                                     "cellPadInit", "cellPadEnd",
                                     "cellPadGetInfo2",
                                     "cellPadSetPortSetting",
+                                    "cellPadGetData",
+                                    "cellPadSetActDirect",
                                     "sceNpInit", "sceNpTerm", "sceNpManagerGetStatus",
                                     "sceNpTrophyInit", "sceNpTrophyTerm",
                                     "cellAudioPortOpen", "cellAudioGetPortConfig",
