@@ -6,6 +6,25 @@
 #include "vm.h"
 
 uint8_t* vm_base;
+/* This fixture owns real VM commits; inspect their host backing instead of
+ * the standalone host adapter's deliberately empty guest-allocation table. */
+int ps3_native_guest_range_backed(u32 address, u32 size)
+{
+    if (!vm_base || !size || (u64)address + size > 0x100000000ull) return 0;
+    uintptr_t at = (uintptr_t)vm_base + address, end = at + size;
+    while (at < end) {
+        MEMORY_BASIC_INFORMATION info;
+        if (!VirtualQuery((const void*)at, &info, sizeof info) || info.State != MEM_COMMIT ||
+            (info.Protect & (PAGE_NOACCESS | PAGE_GUARD))) return 0;
+        const uintptr_t next = (uintptr_t)info.BaseAddress + info.RegionSize;
+        if (next <= at) return 0;
+        at = next;
+    }
+    return 1;
+}
+extern int cellGcm_syscall_bind_context(u32, u32);
+extern u32 cellGcm_syscall_bringup(u32);
+extern void cellGcm_rsx_process_fifo(void);
 static rsx_state state;
 static void method(u32 address, u32 value)
 {
@@ -137,6 +156,57 @@ int main(void)
         first = 0xAABBCCDD11223344ull; count = 0xCAFEBABE;
         if (d3d12_report(NULL, 0x1800, type << 24, &first, &count) || first != 0xAABBCCDD11223344ull || count != 0xCAFEBABE) return 10;
     }
+    u32 preserved = 0;
+    if (!report(&first, &preserved) || !d3d12_report(NULL, 0x17C8, 2, NULL, NULL) ||
+        !report(&second, &count) || count != preserved || second < first) return 27;
+    for (u32 type = 2; type <= 5; ++type)
+        if (!d3d12_report(NULL, 0x1800, type << 24, &first, &count) || count || first < second) return 28;
+    draw(); first = 0xAABBCCDD11223344ull; count = 0xCAFEBABE;
+    if (d3d12_report(NULL, 0x1800, 2u << 24, &first, &count) || first != 0xAABBCCDD11223344ull || count != 0xCAFEBABE ||
+        !d3d12_report(NULL, 0x17C8, 3, NULL, NULL) || !report(&first, &count) || count ||
+        !d3d12_report(NULL, 0x1800, 2u << 24, &second, &count) || count || second < first) return 29;
+    if (cellGcm_syscall_bringup(0x200000) != 0xC0000000u || vm_commit(VM_RSX_CONTEXT_BASE, VM_RSX_CONTEXT_SIZE) ||
+        !cellGcm_syscall_bind_context(VM_RSX_CONTEXT_BASE + 0x40, VM_RSX_CONTEXT_BASE + 0x200000)) return 19;
+    if (cellGcmSetDisplayBuffer(0, 0, 256, 64, 64) || cellGcmSetDisplayBuffer(1, 0x10000, 256, 64, 64) ||
+        cellGcmSetDisplayBuffer(2, 0x40000, 256, 64, 64)) return 26;
+    for (u32 i = 0; i < 64 * 64; ++i) word(0xC0040000u + i * 4, 0xFF00FF00);
+    method(NV4097_CLEAR_SURFACE, 0);
+    if (s_d3d.draw_count || off_rt_find(0) >= 0) return 31;
+    method(NV4097_SET_SURFACE_FORMAT, 0x148);
+    method(NV4097_SET_SURFACE_COLOR_AOFFSET, 0);
+    method(NV4097_SET_COLOR_CLEAR_VALUE, 0xFFFF0000);
+    method(NV4097_CLEAR_SURFACE, 0xF0);
+    if (!d3d12_submit(NULL)) return 20;
+    method(NV4097_SET_SURFACE_COLOR_AOFFSET, 0x10000);
+    method(NV4097_SET_COLOR_CLEAR_VALUE, 0xFF0000FF);
+    method(NV4097_CLEAR_SURFACE, 0xF0);
+    if (!d3d12_submit(NULL) || off_rt_find(0) < 0 || off_rt_find(0) == off_rt_find(0x10000)) return 21;
+    s_dump_name = "ps3-native-scanout-fixture";
+    for (u32 i = 0; i < 5; ++i) {
+        if (i == 4) for (u32 pixel = 0; pixel < 64 * 64; ++pixel) word(0xC0040000u + pixel * 4, 0xFFFFFF00);
+        s_d3d.dump_frames_left = 1;
+        if (d3d12_scanout(NULL, i >= 3 ? 0x40000 : i == 1 ? 0x10000 : 0, 256, 64, 64) != 1) return 22;
+        void* mapped = NULL; D3D12_RANGE read = {0, (SIZE_T)s_d3d.readback_pitch * 64};
+        if (FAILED(s_d3d.readback_buf->lpVtbl->Map(s_d3d.readback_buf, 0, &read, &mapped)) || !mapped) return 23;
+        const u8* pixel = (const u8*)mapped + 32 * s_d3d.readback_pitch + 32 * 4;
+        const int correct = pixel[0] == (i == 1 || i == 3 ? 0 : 255) && pixel[1] == (i >= 3 ? 255 : 0) && pixel[2] == (i == 1 ? 255 : 0);
+        D3D12_RANGE written = {0, 0}; s_d3d.readback_buf->lpVtbl->Unmap(s_d3d.readback_buf, 0, &written);
+        char path[80]; snprintf(path, sizeof path, "ps3-native-scanout-fixture_%03u.bmp", i); remove(path);
+        if (!correct) return 24;
+    }
+    s_dump_name = NULL;
+    if (FAILED(s_d3d.swap_chain->lpVtbl->GetLastPresentCount(s_d3d.swap_chain, &presents_before)) ||
+        d3d12_scanout(NULL, 0x20000, 256, 64, 64) != -1 || d3d12_scanout(NULL, 0, 252, 64, 64) != -1 ||
+        FAILED(s_d3d.swap_chain->lpVtbl->GetLastPresentCount(s_d3d.swap_chain, &presents_after)) || presents_before != presents_after) return 25;
+    method(NV4097_SET_COLOR_CLEAR_VALUE, 0xFF00FFFF); method(NV4097_CLEAR_SURFACE, 0xF0);
+    const u64 reference_fence = s_d3d.fence_values[s_d3d.frame_index];
+    word(0x10000000, 0x40050); word(0x10000004, 0xC0FFEE);
+    word(VM_RSX_CONTEXT_BASE + 0x40, 8); word(VM_RSX_CONTEXT_BASE + 0x44, 0); word(VM_RSX_CONTEXT_BASE + 0x48, 0xA5A5A5A5);
+    cellGcm_rsx_process_fifo();
+    if (memcmp(vm_base + VM_RSX_CONTEXT_BASE + 0x48, "\x00\xC0\xFF\xEE", 4) ||
+        s_d3d.fence_values[s_d3d.frame_index] <= reference_fence ||
+        s_d3d.fence->lpVtbl->GetCompletedValue(s_d3d.fence) < s_d3d.fence_values[s_d3d.frame_index] ||
+        FAILED(s_d3d.swap_chain->lpVtbl->GetLastPresentCount(s_d3d.swap_chain, &presents_after)) || presents_after != presents_before) return 30;
     rsx_d3d12_backend_shutdown(); vm_shutdown();
     puts("Verified real GPU samples, timestamps, semaphore completion, preserved depth and no implicit present");
     return 0;

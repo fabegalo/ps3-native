@@ -262,19 +262,24 @@ Pacotes básicos de controle agora entregam botões/sticks medidos e erros de co
 a vibração valida a ABI de 8 bytes e o resultado do host. Pacotes estendidos de
 pressão e sensores continuam bloqueados. Contextos DMA da FIFO distinguem semáforos
 do dispositivo e dos relatórios; a inicialização original passa pela espera de prontidão.
-Estatísticas ZCULL podem informar um canal vazio antes de qualquer geometria, com
-timestamp real da GPU; estatísticas após geometria continuam bloqueadas. A sessão
-mais recente passa pelos relatórios iniciais e para no comando original de fila
-de imagem da FIFO (`0xE944`), que não tem registro de preparação HLE. Sua confirmação
-no dispositivo, apresentação do buffer escolhido e conclusão por interrupção ainda
-precisam de integração. O caminho original de flip/interrupções não foi verificado.
+Estatísticas ZCULL podem informar um intervalo vazio antes de geometria ou após
+reset explícito dos contadores, com timestamp real da GPU; estatísticas de geometria
+ativa continuam bloqueadas. O RSX controla o relógio de vídeo guest de 60000/1001 Hz.
+A fila original aguarda a conclusão da GPU e o próximo VBlank elegível; o D3D12
+apresenta o buffer escolhido e o LV2 entrega os eventos originais de interrupção.
+Referências da FIFO exigem conclusão da GPU. Regressões com GPU real verificam buffers
+renderizados preservados e a leitura atualizada de VRAM escrita pela CPU.
+O God of War produziu duas apresentações pretas por esse caminho e depois parou no
+tratamento de erro JPEG. O longjmp original restaura o estado guest, mas o retorno AOT
+continua a cadeia de chamadas host abandonada; uma reprodução sintética própria confirma
+esse defeito compartilhado de controle de fluxo PPU. Isso não comprova menu nem gameplay.
 Use `run ... --enter-button cross`
 ou `circle` explicitamente; idioma/região não inferem a preferência. Não há interpretação.
-Nenhum frame, transição para o seletor ou gameplay foi verificado.
+Nenhuma transição para o seletor ou gameplay foi verificado.
 Originais e derivados proprietários permanecem fora do Git.
-Criação/destruição de mutexes do kernel, locks sem disputa, recursão e erros de
-try-lock têm regressões sintéticas; esperas disputadas param explicitamente até
-implementar a ordem FIFO/prioridade dos waiters guest.
+Criação/destruição de mutexes do kernel, waiters em FIFO/prioridade guest, cancelamento
+por timeout, recursão e erros de try-lock têm regressões sintéticas. Herança de prioridade
+em disputa continua bloqueada. Condições retomam seu mutex pela mesma fila de waiters.
 Disponibilidade de módulo e execução de cada API são verificadas separadamente.
 Layouts de atributos/vídeo, quota e backing do mapper, esperas/callbacks e
 metadados de boot em disco têm regressões sintéticas; tiles comprimidos param.

@@ -257,19 +257,23 @@ Basic pad packets now deliver measured buttons/sticks and connection errors;
 actuator requests validate the 8-byte ABI and the host result. Extended pressure
 and sensor packets remain blocked. FIFO DMA contexts distinguish device and
 report semaphores; the original initialization now passes its device-ready wait.
-ZCULL statistics can report an empty channel before any geometry, with a real
-GPU timestamp; statistics after geometry remain blocked. The latest session
-passes those initial reports and stops at the original FIFO display-queue
-command (`0xE944`), which has no HLE preparation record. Its device acknowledgement,
-selected-buffer presentation and interrupt completion still require integration.
-The original flip/interrupt path is not yet verified. Pass
+ZCULL statistics can report an empty interval before geometry or after an explicit
+counter reset, with a real GPU timestamp; active-geometry statistics remain blocked.
+RSX owns the 60000/1001 Hz guest video clock. Original display-queue commands wait
+for GPU completion and the next eligible VBlank; D3D12 presents the selected buffer
+and LV2 delivers the original interrupt events. FIFO references require GPU completion.
+Real GPU regressions verify retained rendered buffers and fresh CPU-written VRAM.
+God of War produced two black scanouts through this path, then stopped during
+JPEG error handling. The original longjmp restores guest state, but the AOT return
+continues the abandoned host call chain; an own synthetic reproducer confirms this
+shared PPU control-flow defect. This is not menu or gameplay evidence. Pass
 `run ... --enter-button cross` or `circle` explicitly; no preference is inferred
 from language/region. No interpreter is used.
-No game frame, selector transition or gameplay is verified. Original and derived
+No selector transition or gameplay is verified. Original and derived
 proprietary files remain outside Git.
-Kernel mutex creation/destruction, uncontended locks, recursion and try-lock
-errors have synthetic regressions; contended blocking explicitly stops until
-guest FIFO/priority waiter ordering is implemented.
+Kernel mutex creation/destruction, FIFO/guest-priority waiters, timeout cancellation,
+recursion and try-lock errors have synthetic regressions. Contended priority
+inheritance remains blocked. Condition mutex reacquisition uses the same waiter queue.
 Module availability and per-API execution approval are separate. Attribute and
 video layouts, live mapper quota/backing, real waits/callbacks and disc boot
 metadata have focused synthetic regressions; compressed tiles remain blocked.

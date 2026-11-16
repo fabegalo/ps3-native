@@ -163,20 +163,35 @@
      static int on = -1;
      if (on < 0) on = getenv("PPU_CSCHECK") ? 1 : 0;
      { static int hg = -1; if (hg < 0) hg = getenv("PS3_ICALL_GATE") ? 1 : 0;
-@@ -2889,6 +2959,12 @@
+@@ -2889,6 +2959,27 @@
      }
  
      ppu_fn fn = ppu_lookup_icall(addr);
 +#ifdef PS3_NATIVE_STRICT
 +    if (!fn) {
 +        fprintf(stderr, "[native-blocked] unprepared indirect PPU target=0x%08X lr=0x%08X\n", addr, (uint32_t)ctx->lr);
++        ppu_dump_guest_stack(ctx, "unprepared");
++        for (unsigned row = 0; row < 4; ++row) {
++            fprintf(stderr, "[native-blocked] r%02u:", row * 8);
++            for (unsigned col = 0; col < 8; ++col)
++                fprintf(stderr, " %08X", (uint32_t)ctx->gpr[row * 8 + col]);
++            fputc('\n', stderr);
++        }
++        const uint32_t inspect[] = {addr, (uint32_t)ctx->gpr[3], (uint32_t)ctx->gpr[9]};
++        for (uint32_t ea : inspect) {
++            if (!ppu_dump_readable(ea, 32)) continue;
++            fprintf(stderr, "[native-blocked] memory %08X:", ea);
++            for (unsigned i = 0; i < 8; ++i)
++                fprintf(stderr, " %08X", vm_read32(ea + i * 4));
++            fputc('\n', stderr);
++        }
 +        fflush(stderr); ps3_native_stop();
 +    }
 +#endif
      if (!fn) {
          /* OPD-swap clobber fixup: a malformed memcpy (game func_0036FA74) writes
           * some handler/vtable OPDs as {TOC, func} (code & toc SWAPPED), so lifted
-@@ -3202,6 +3278,10 @@
+@@ -3202,6 +3293,10 @@
   * continue (the result is undefined, but it won't crash the link). */
  extern "C" void ppu_unlifted_stub(uint64_t addr, ppu_context* ctx)
  {
@@ -187,7 +202,7 @@
      (void)ctx;
      static int logged = 0;
      if (logged < 20) {
-@@ -3237,8 +3317,15 @@
+@@ -3237,8 +3332,15 @@
  #define PS3_SC_INFLIGHT_MAX 64
  extern "C" uint32_t g_sc_inflight[PS3_SC_INFLIGHT_MAX] = { 0 };
  
@@ -203,7 +218,7 @@
      /* One-shot: PPU_GUARD_EA=<hex> arms the page guard on that address without
       * waiting for a store watch to fire. Armed here because lv2_syscall runs
       * early and unconditionally; used to measure how far a guest block clear
-@@ -3312,11 +3399,10 @@
+@@ -3312,11 +3414,10 @@
      switch (num) {
      case 352: {   /* sys_memory_get_user_memory_size(sys_memory_info_t* info)
                     * info = { u32 total_user_memory; u32 available_user_memory } */
@@ -219,7 +234,7 @@
      }
      case 330: {   /* sys_mmapper_allocate_address(u64 size, u64 flags,
                     * u64 alignment, u32* alloc_addr) -> reserve guest VA range */
-@@ -3349,6 +3435,11 @@
+@@ -3349,6 +3450,11 @@
      case 988:     /* sys_tty_write — canonical LV2 number (psdevwiki); some CRTs
                     * use this instead of 403. Same ABI. */
      case 403: {   /* sys_tty_write(s32 ch, cptr buf, u32 len, ptr pwritelen) */
@@ -231,7 +246,7 @@
          uint32_t ch   = (uint32_t)ctx->gpr[3];
          uint32_t buf  = (uint32_t)ctx->gpr[4];
          uint32_t len  = (uint32_t)ctx->gpr[5];
-@@ -3527,6 +3618,10 @@
+@@ -3527,6 +3633,10 @@
                  return;
              }
          }
@@ -242,7 +257,7 @@
          static int logged = 0;
          if (logged < 30) {
              fprintf(stderr, "[ppu] lv2_syscall %llu (stub)\n", (unsigned long long)num);
-@@ -3558,6 +3653,17 @@
+@@ -3558,6 +3668,17 @@
   * allocations. BSS is owned too, even though it has no file-backed bytes. */
  struct ppu_image_range { uint64_t begin, end; };
  static std::vector<ppu_image_range> g_ppu_image_ranges;
@@ -260,7 +275,7 @@
  extern "C" void sys_memory_set_image_query(uint64_t (*query)(uint64_t, uint64_t));
  
  static uint64_t ppu_image_overlap_end(uint64_t addr, uint64_t end)
-@@ -3569,10 +3675,20 @@
+@@ -3569,10 +3690,20 @@
  }
  /* Default used by the PS3 executable entry path when PROC_PARAM is absent. */
  static int32_t g_ppu_primary_priority = 1001;
@@ -281,7 +296,7 @@
      FILE* f = fopen(path, "rb");
      if (!f) { fprintf(stderr, "[ppu] cannot open %s\n", path); return 0; }
      fseek(f, 0, SEEK_END);
-@@ -3612,7 +3728,12 @@
+@@ -3612,7 +3743,12 @@
                      be32(param + 4) == 0x13BCC5F6u &&
                      priority >= 0 && priority <= 3071) {
                      g_ppu_primary_priority = priority;
@@ -294,7 +309,7 @@
                  }
              }
              continue;
-@@ -3817,6 +3938,9 @@
+@@ -3817,6 +3953,9 @@
      uint32_t off  = __atomic_fetch_add(&s_bump, total, __ATOMIC_RELAXED);
      uint32_t base = PPU_TLS_IMG + total + off;  /* main block occupies the first */
      if (base + total > lim) {                   /* out of room: share, as before */
@@ -304,7 +319,7 @@
          static int s_warned = 0;
          if (!__atomic_exchange_n(&s_warned, 1, __ATOMIC_RELAXED))
              fprintf(stderr, "[ppu] TLS window full after %u thread blocks: later "
-@@ -3840,6 +3964,9 @@
+@@ -3840,6 +3979,9 @@
      if (!fn) {
          fprintf(stderr, "[ppu] thread entry 0x%08X (cia=0x%08X) not registered\n",
                  code, (uint32_t)ctx->cia);
@@ -314,7 +329,7 @@
          return;
      }
      g_active_ctx = ctx;
-@@ -3904,11 +4031,24 @@
+@@ -3904,11 +4046,24 @@
   * several per movie -- never runs out: only more than 64 host threads making
   * callbacks AT ONCE share a slot. */
  static std::atomic<uint64_t> s_cb_slots_used{0};
@@ -340,7 +355,7 @@
      }
  };
  static thread_local cb_slot_owner t_cb_slot;
-@@ -3936,11 +4076,18 @@
+@@ -3936,11 +4091,18 @@
              s_hi = s_lo + VM_CB_STACK_SIZE;
          } else {
              /* Out of slots: share the last one, and say so. */
@@ -359,7 +374,7 @@
      }
      if (active) {
          uint32_t sp = (uint32_t)active->gpr[1];
-@@ -3959,6 +4106,12 @@
+@@ -3959,6 +4121,12 @@
      uint32_t code = 0, toc = 0;
      ppu_opd_resolve(opd_addr, &code, &toc);
      ppu_fn fn = ppu_lookup(code);
@@ -372,7 +387,7 @@
      if (!fn) {  /* OPD code clobbered? fall back to a captured fixup */
          for (int i = 0; i < s_opd_fixup_n; i++)
              if (s_opd_fixups[i].opd == opd_addr) {
-@@ -3981,7 +4134,13 @@
+@@ -3981,7 +4149,13 @@
      ctx.gpr[2]  = toc;
      ctx.gpr[3]  = a0; ctx.gpr[4] = a1; ctx.gpr[5] = a2; ctx.gpr[6] = a3;
      ctx.gpr[7]  = a4; ctx.gpr[8] = a5; ctx.gpr[9] = a6; ctx.gpr[10] = a7;
@@ -387,7 +402,7 @@
      ctx.cia     = code;
      /* Save/restore g_active_ctx: this scratch ctx lives on the stack, so leaving
       * g_active_ctx pointing at it after we return leaves a DANGLING pointer once the
-@@ -4027,7 +4186,12 @@
+@@ -4027,7 +4201,12 @@
      *result = 0;
      if (!code) return 0;
      ppu_fn fn = ppu_lookup(code);
@@ -401,7 +416,7 @@
  
      ppu_context ctx;
      memset(&ctx, 0, sizeof(ctx));
-@@ -4035,7 +4199,12 @@
+@@ -4035,7 +4214,12 @@
      ctx.gpr[2]  = toc;
      ctx.gpr[3]  = a0; ctx.gpr[4] = a1; ctx.gpr[5] = a2; ctx.gpr[6] = a3;
      ctx.gpr[7]  = a4; ctx.gpr[8] = a5; ctx.gpr[9] = a6; ctx.gpr[10] = a7;
@@ -415,7 +430,7 @@
      ctx.cia     = code;
      /* Save/restore g_active_ctx (see ppu_guest_call): the scratch ctx is stack-local,
       * so a dangling g_active_ctx after return corrupts the crash handler / diagnostics. */
-@@ -4110,7 +4279,8 @@
+@@ -4110,7 +4294,8 @@
       * get_stack_information(49) would report a {0,0} stack for the main
       * thread. Backfill the real region now that the harness chose it. */
      { extern void ppu_thread_set_main_stack(uint32_t, uint32_t);
@@ -425,7 +440,7 @@
      /* For samplers on other threads (a port's periodic stack dump): the main
       * thread's context lives on this frame, not in the thread table. */
      g_ppu_main_ctx = &ctx;
-@@ -4245,6 +4415,9 @@
+@@ -4245,6 +4430,9 @@
      fprintf(stderr, "[ppu] run: code 0x%08X, toc 0x%08X, sp 0x%08X\n", code, toc, (uint32_t)ctx.gpr[1]);
      g_active_ctx = &ctx;
      ppu_resv_register(&ctx);   /* main/entry thread: join the reservation set too */
@@ -3096,7 +3111,15 @@
  }
 --- a/libs/video/cellGcmSys.c
 +++ b/libs/video/cellGcmSys.c
-@@ -74,7 +74,7 @@
+@@ -15,6 +15,7 @@
+ #include "../../runtime/platform/win32_compat.h"
+ #include "../../runtime/ppu/ppu_memory.h"   /* vm_write32 (translate + byte-swap, OOB-safe) */
+ #include "../../runtime/memory/vm.h"    /* VM_HLE_INJECT_BASE */
++#include "../../runtime/syscalls/sys_timer.h"
+ #include "../../runtime/spu/spu_coherency.h" /* the blit row copy's reservation bookkeeping */
+ #include "rsx_commands.h"                    /* rsx_state, rsx_process_command_buffer */
+ #include "../../include/ps3emu/guest_call.h" /* g_ps3_guest_caller for direct handler dispatch */
+@@ -74,7 +75,7 @@
   * -----------------------------------------------------------------------*/
  
  static int  s_gcm_initialized = 0;
@@ -3105,18 +3128,25 @@
  static u32  s_flip_status = CELL_GCM_FLIP_STATUS_DONE;
  /* Flip requests (each puts the status back to WAITING) and the request a
   * pending flip completion was marked for: a completion delivered late must not
-@@ -100,6 +100,10 @@
+@@ -100,6 +101,17 @@
   * while it's blocked in the FIFO-wrap recycle callback -- would show a
   * clear+few-draws frame as a visible flicker). */
  static volatile u32 s_flip_request_count = 0;
 +#ifdef PS3_NATIVE_STRICT
-+static struct { u32 index, buffer, command; int active, ready, requested; } s_prepared;
++static struct {
++    u32 index, buffer, command, head;
++    int active, ready, requested, kernel, ack_wait;
++    u64 ack_after, ack_edge;
++    CellGcmDisplayInfo display;
++} s_prepared;
++static u32 s_original_frames_presented;
++u32 cellGcm_original_frames_presented(void) { return __atomic_load_n(&s_original_frames_presented, __ATOMIC_ACQUIRE); }
 +static u32 s_prepare_tail;
 +#endif
  
  u32 cellGcm_flip_request_count(void)
  {
-@@ -150,8 +154,10 @@
+@@ -150,8 +162,10 @@
  
  int cellGcm_take_flip_pending(void)
  {
@@ -3127,14 +3157,14 @@
      return v;
  }
  
-@@ -164,6 +170,15 @@
+@@ -164,6 +178,15 @@
      if (rsx_draw_engine_enabled())
          rsx_draw_engine_note_flip(bufferId);
  }
 +#ifdef PS3_NATIVE_STRICT
 +static void gcm_prepared_publish_locked(void)
 +{
-+    if (!s_prepared.ready || !s_prepared.requested) return;
++    if (s_prepared.kernel || !s_prepared.ready || !s_prepared.requested) return;
 +    gcm_set_current_display_buffer(s_prepared.buffer);
 +    s_flip_pending = 1;
 +    s_flip_direct_pending = 1;
@@ -3143,7 +3173,7 @@
  
  
  /* The two JUMP encodings of the RSX FIFO: the old 0x20000000 | offset, and the new offset | 1 (the low two bits are 01
-@@ -269,6 +284,9 @@
+@@ -269,6 +292,9 @@
   * completes (cellGcmTickFlip), not also when it is requested. */
  static int gcm_flipcb_on_tick_only(void)
  {
@@ -3153,7 +3183,7 @@
      static int v = -1;
      if (v < 0) v = getenv("GCM_FLIPCB_ONTICK") ? 1 : 0;
      return v;
-@@ -372,6 +390,7 @@
+@@ -372,6 +398,7 @@
  
  /* Report data area (256 slots, each 16 bytes) */
  static CellGcmReportData s_report_data[CELL_GCM_MAX_REPORT_COUNT];
@@ -3161,18 +3191,19 @@
  
  /* NV4097_SET_CONTEXT_DMA_REPORT (0x1A8): where NV4097_GET_REPORT writes.
   * Local (0xFEED0000, the default): the s_report_data slots above, read back
-@@ -397,7 +416,9 @@
+@@ -397,7 +424,10 @@
   * recompiled game can poll them via vm_read32; cellGcmGetLabelAddress returns a
   * guest address into this window (16-byte spaced as on hardware). A host array
   * pointer would be read as a guest offset and land out of bounds. */
 -#define GCM_LABEL_GUEST_BASE  (VM_HLE_INJECT_BASE + 0x0000u)
 +static u32 s_kernel_label_base, s_kernel_control;
++int cellGcm_syscall_context_bound(void);
 +u32 cellGcm_semaphore_address(u32 offset);
 +#define GCM_LABEL_GUEST_BASE  (s_kernel_label_base ? s_kernel_label_base : VM_HLE_INJECT_BASE)
  #define GCM_LABEL_STRIDE      0x10u
  static u32 s_labels[CELL_GCM_MAX_LABEL_COUNT];
  
-@@ -407,7 +428,7 @@
+@@ -407,7 +437,7 @@
   * pointer would be read through vm_base as a guest address and never update, so
   * every FIFO-space / cellGcmFinish wait would hang. Placed just past the 256
   * label slots (0x03000000..0x03001000). Fields are big-endian (vm_write32). */
@@ -3181,7 +3212,7 @@
  
  /* Synthetic guest code EA for the FIFO command-buffer-full callback. The title's
   * inline gcmReserve calls context->callback(context, count) when `current` nears
-@@ -552,6 +573,8 @@
+@@ -552,6 +582,8 @@
          printf("[cellGcmSys] WARNING: already initialized\n");
          return CELL_GCM_ERROR_FAILURE;
      }
@@ -3190,7 +3221,7 @@
  
      memset(s_display_buffers, 0, sizeof(s_display_buffers));
      memset(s_display_buffer_set, 0, sizeof(s_display_buffer_set));
-@@ -593,7 +616,7 @@
+@@ -593,7 +625,7 @@
      s_second_v_handler = NULL;
      s_last_flip_time = get_timestamp_ns();
      s_flip_status = CELL_GCM_FLIP_STATUS_DONE;
@@ -3199,7 +3230,7 @@
      s_debug_level = CELL_GCM_DEBUG_LEVEL0;
      s_vblank_count = 0;
      s_io_map_reserved = 0;
-@@ -656,8 +679,9 @@
+@@ -656,8 +688,9 @@
  u32 cellGcmSetupContext(u32 ctx_out_addr, u32 cmdSize, u32 ioSize, u32 ioAddress,
                          CellGcmGuestAlloc galloc, CellGcmGuestWrite32 gwrite32)
  {
@@ -3211,7 +3242,7 @@
  
      /* PSL1GHT's gcmInitBody passes ioAddress = 0, expecting gcm to allocate the
       * IO region itself (the official SDK has the app allocate and pass it).
-@@ -667,7 +691,7 @@
+@@ -667,7 +700,7 @@
      if (ioAddress == 0 && galloc)
          ioAddress = galloc(ioSize ? ioSize : 0x100000, 0x100000);
  
@@ -3220,7 +3251,7 @@
  
      u32 cmdbuf = ioAddress;                 /* FIFO lives at the IO region start */
      {
-@@ -681,7 +705,7 @@
+@@ -681,7 +714,7 @@
                     s_ring_begin, s_ring_end, seg / 1024, 10);
          }
      }
@@ -3229,7 +3260,7 @@
      if (cdata && gwrite32) {
          gwrite32(cdata + 0x0, cmdbuf);              /* begin   */
          /* end: the wrap JUMP's slot, as in the SDK (#648); with GCM_FIFO_SEGMENT
-@@ -691,7 +715,7 @@
+@@ -691,7 +724,7 @@
          /* Command-buffer-full callback: a guest OPD {func, toc} routed to
           * hle_gcm_callback -> cellGcm_fifo_recycle. Without a real callback the
           * ring never recycles and the FIFO wedges once `current` reaches `end`. */
@@ -3238,7 +3269,7 @@
          if (opd) {
              gwrite32(opd + 0x0, GCM_FIFO_CALLBACK_SENTINEL_EA);  /* func EA */
              gwrite32(opd + 0x4, 0);                              /* toc (unused) */
-@@ -753,7 +777,7 @@
+@@ -753,7 +786,7 @@
  void cellGcmSetFlipMode(u32 mode)
  {
      printf("[cellGcmSys] SetFlipMode(mode=%u)\n", mode);
@@ -3247,7 +3278,7 @@
  }
  
  /* NID: 0xC44D8F34 */
-@@ -766,7 +790,7 @@
+@@ -766,7 +799,7 @@
  #ifdef _WIN32
      __declspec(dllimport) void __stdcall Sleep(unsigned long);
  #endif  /* elsewhere: runtime/platform/win32_compat.h */
@@ -3256,7 +3287,7 @@
          Sleep(1);
      /* A flip still WAITING after the bound is left to the tick. Forcing DONE
       * here skipped its completion: the tick only completes WAITING flips, so
-@@ -796,6 +820,9 @@
+@@ -796,6 +829,9 @@
  /* NID: 0xE315A0B2 */
  u32 cellGcmGetFlipStatus(void)
  {
@@ -3266,7 +3297,7 @@
      /* Avoid host-calling the guest OPDs directly (they're not valid host
       * function pointers). Use cellGcmTickVBlank() / TickFlip() instead,
       * which dispatch via g_ps3_guest_caller — see below. */
-@@ -807,8 +834,8 @@
+@@ -807,8 +843,8 @@
        static int fd = -1; if (fd < 0) fd = getenv("FLIP_DBG") ? 1 : 0;
        if (fd && PS3_LOG_FIRST(n, 24))
            fprintf(stderr, "[FLIP] GetFlipStatus -> %u (0=DONE 1=WAITING)%c",
@@ -3277,7 +3308,17 @@
  }
  
  /* Host-side ticks. The game's host driver (e.g. flow main.cpp) calls
-@@ -990,8 +1017,12 @@
+@@ -949,6 +985,9 @@
+ 
+ void ppu_gcm_pump(void)
+ {
++#ifdef PS3_NATIVE_STRICT
++    if (cellGcm_syscall_context_bound()) return;
++#endif
+     /* Every HLE call and timer sleep pumps, tens of thousands of times a
+      * second, and almost always nothing is pending. Look before taking the
+      * pump and swapping the pending words out: three atomic operations on
+@@ -990,8 +1029,12 @@
           * the flip handler, and hung with get == put on exactly that. Leave
           * the newer flip WAITING for the next tick. */
          FLIP_LOCK();
@@ -3291,7 +3332,87 @@
          FLIP_UNLOCK();
          if (s_flip_handler_opd && g_ps3_guest_caller) {
              ydkj_restore_handler_opd(s_flip_handler_opd, s_flip_handler_code);
-@@ -1070,6 +1101,24 @@
+@@ -1008,7 +1051,68 @@
+ 
+ /* Back-compat: the old direct entry points now just mark a tick pending (so any
+  * caller other than the ticker still works) -- delivery stays on the main thread. */
+-void cellGcmTickVBlank(void) { s_vblank_count++; GCM_PENDING_SET(1); }
++static struct { u64 epoch, last_now, ordinal, delivered; int initialized; } s_video_clock;
++_Static_assert(PS3_TIMEBASE_FREQ * 1001u % 60000u == 0, "video period must be exact in the guest timebase");
++/* RSX derives the display phase from the same timebase the original PPU reads.
++ * 60000/1001 Hz has an exact integer period at PS3_TIMEBASE_FREQ. */
++int cellGcmVideoNext(u64 now_ticks, u64* edge_ticks)
++{
++    extern u16 cellVideoOut_get_refresh_rate(void);
++    if (!edge_ticks) return 0;
++    FLIP_LOCK();
++    if (cellVideoOut_get_refresh_rate() != 1 ||
++        (s_video_clock.initialized && now_ticks < s_video_clock.last_now)) {
++        FLIP_UNLOCK();
++#ifdef PS3_NATIVE_STRICT
++        extern void ps3_native_stop(void);
++        fprintf(stderr, "[native-blocked] RSX video clock mode or monotonic time is invalid\n");
++        fflush(stderr); ps3_native_stop();
++#endif
++        return 0;
++    }
++    if (!s_video_clock.initialized) {
++        s_video_clock.epoch = now_ticks; s_video_clock.initialized = 1;
++    }
++    s_video_clock.last_now = now_ticks;
++    const u64 period = PS3_TIMEBASE_FREQ * 1001u / 60000u;
++    const u64 delta = now_ticks - s_video_clock.epoch;
++    const u64 due = delta / period;
++    if (due == s_video_clock.ordinal) { FLIP_UNLOCK(); return 0; }
++    const u64 next = ++s_video_clock.ordinal;
++    *edge_ticks = s_video_clock.epoch + next * period;
++    FLIP_UNLOCK();
++    return 1;
++}
++void cellGcmTickVBlank(void)
++{
++#ifdef PS3_NATIVE_STRICT
++    if (cellGcm_syscall_context_bound()) return;
++#endif
++    s_vblank_count++; GCM_PENDING_SET(1);
++}
++void cellGcmVideoTick(u64 edge_ticks)
++{
++#ifdef PS3_NATIVE_STRICT
++    extern void ps3_native_stop(void);
++    FLIP_LOCK();
++    if (!s_video_clock.initialized || s_video_clock.ordinal != s_video_clock.delivered + 1 ||
++        edge_ticks != s_video_clock.epoch + s_video_clock.ordinal * (PS3_TIMEBASE_FREQ * 1001u / 60000u)) {
++        FLIP_UNLOCK();
++        fprintf(stderr, "[native-blocked] RSX video edge was not issued by its clock\n");
++        fflush(stderr); ps3_native_stop();
++    }
++    s_video_clock.delivered = s_video_clock.ordinal;
++    extern void rsx_video_vblank(u64);
++    if (s_prepared.active && s_prepared.kernel && s_prepared.ready && s_prepared.ack_wait &&
++        s_video_clock.ordinal >= s_prepared.ack_after) {
++        vm_write32(VM_RSX_DEVICE_BASE + 0x30, 1);
++        s_prepared.ack_wait = 0; s_prepared.ack_edge = edge_ticks;
++    }
++    FLIP_UNLOCK();
++    rsx_video_vblank(edge_ticks);
++#endif
++    cellGcmTickVBlank();
++}
+ /* Only deliver a flip completion when a flip is actually outstanding.
+  *
+  * Ticking unconditionally at 60 Hz fires the guest's flip handler even when
+@@ -1023,6 +1127,9 @@
+  * the callback IS the flip interrupt -- no flip, no callback. */
+ void cellGcmTickFlip(void)
+ {
++#ifdef PS3_NATIVE_STRICT
++    if (cellGcm_syscall_context_bound()) return;
++#endif
+     /* Same rule as cellGcm_request_tick: a flip still ahead of the drain has
+      * not happened yet. */
+     FLIP_LOCK();
+@@ -1070,6 +1177,24 @@
  }
  
  static u32 s_sema_offset = 0;   /* NV406E semaphore offset (label window) */
@@ -3316,7 +3437,7 @@
  static int s_sema_blocked_pass = 0;   /* this drain stopped on a semaphore acquire */
  static int s_park_pass = 0;           /* this drain stopped on a self-JUMP park */
  static int s_report_hold_pass = 0;    /* this drain stopped on a held GET_REPORT */
-@@ -1669,6 +1718,14 @@
+@@ -1669,6 +1794,14 @@
   * and halved the frame rate). Call AFTER draining. */
  int cellGcm_take_flip_pending_synced(void)
  {
@@ -3331,7 +3452,7 @@
      if (!s_flip_pending) return 0;
      u32 put = vm_read32(GCM_CONTROL_GUEST_ADDR + 0);
      u32 get = vm_read32(GCM_CONTROL_GUEST_ADDR + 4);
-@@ -1887,7 +1944,7 @@
+@@ -1887,7 +2020,7 @@
                  if (m == 0x64u) s_sema_offset = v;
                  else if (m == 0x6Cu) {
                      atomic_thread_fence(memory_order_release);
@@ -3340,11 +3461,47 @@
                      labels++;
                  } else if (m == 0x01A4u || m == 0x1D6Cu || m == 0x1D70u || m == 0x1D74u) {
                      rsx_process_method(&s_resync_state, m, v);
-@@ -2230,6 +2287,41 @@
+@@ -1930,6 +2063,17 @@
+ 
+ static void gcm_ref_push_at(u32 v, u32 getoff)
+ {
++#ifdef PS3_NATIVE_STRICT
++    extern void ps3_native_stop(void);
++    rsx_backend* backend = rsx_get_backend();
++    if (!backend || !backend->submit || !backend->submit(backend->userdata)) {
++        fprintf(stderr, "[native-blocked] RSX reference requires completed GPU work\n");
++        fflush(stderr); ps3_native_stop();
++    }
++    atomic_thread_fence(memory_order_release);
++    vm_write32(GCM_CONTROL_GUEST_ADDR + 8, v);
++    return;
++#endif
+     { static int _d = -1; if (_d < 0) _d = getenv("GCM_REFLOG") ? 1 : 0;
+       if (_d) fprintf(stderr, "[refq] drained fence 0x%X at getoff=%08X\n", v, getoff); }
+     u32 t = s_ref_qtail;
+@@ -2027,6 +2171,10 @@
+ 
+ void cellGcm_ref_on_poll(void)
+ {
++#ifdef PS3_NATIVE_STRICT
++    if (s_gcm_kick_ev) SetEvent(s_gcm_kick_ev);
++    return;
++#endif
+     /* Pace: leave each published value observable for >= ~200us of spins
+      * (equality-waiters at any poll rate see every value; still ~5000/s so
+      * loading's fence storms clear in seconds, not minutes). */
+@@ -2230,6 +2378,48 @@
  static void gcm_3d_method(rsx_state* st, u32 m, u32 v, int legacy_state_live)
  {
      extern u32 g_rsx_last_reference;
 +#ifdef PS3_NATIVE_STRICT
++    if (cellGcm_syscall_context_bound() &&
++        (m == NV4097_SET_CONTEXT_DMA_COLOR_A || m == NV4097_SET_CONTEXT_DMA_COLOR_B ||
++         m == NV4097_SET_CONTEXT_DMA_ZETA || m == 0x1B4 || m == 0x1B8) && v != 0xFEED0000u) {
++        extern void ps3_native_stop(void);
++        fprintf(stderr, "[native-blocked] retained RSX targets require an audited local-memory DMA context\n");
++        fflush(stderr); ps3_native_stop();
++    }
 +    if (m == 0x17C8 || m == 0x17CC || m == 0x1800) {
 +        extern void ps3_native_stop(void);
 +        extern int ps3_native_guest_range_backed(u32, u32);
@@ -3382,7 +3539,7 @@
      /* #466: rsx_state feeds only the legacy vtable backend. With the draw
       * engine up and no vtable registered, the state it builds is never read,
       * so only the methods with effects outside it are worth handing over.
-@@ -2248,6 +2340,7 @@
+@@ -2248,6 +2438,7 @@
       * tells the title every queried object is occluded. */
      if (m == 0x1A8) s_report_dma = v;
      if (m == 0x1800) {
@@ -3390,7 +3547,7 @@
          const u32 off = v & 0xFFFFFFu, idx = off / 16u;
          const u32 val = (v >> 24) == 1u ? 0xFFFFu : 0u;
          const u64 ts = gcm_report_timestamp();
-@@ -2266,6 +2359,7 @@
+@@ -2266,6 +2457,7 @@
              s_report_data[idx].timestamp = ts;
              s_report_data[idx].value = val;
          }
@@ -3398,26 +3555,53 @@
      }
  }
  
-@@ -2315,6 +2409,10 @@
+@@ -2315,6 +2507,10 @@
   * RSX-thread profiles, so each is read once and cached, like the other knobs. */
  static void gcm_rsx_process_fifo_unlocked(void)
  {
 +#ifdef PS3_NATIVE_STRICT
-+    FLIP_LOCK(); const int prepared_wait = s_prepared.active && s_prepared.ready; FLIP_UNLOCK();
++    FLIP_LOCK(); const int prepared_wait = s_prepared.active && s_prepared.ready && !s_prepared.kernel; FLIP_UNLOCK();
 +    if (prepared_wait) return;
 +#endif
      { static unsigned _n = 0; static unsigned long long _t0 = 0;
        extern unsigned long long ps3_ms_now(void);
        _n++;
-@@ -2547,7 +2645,32 @@
+@@ -2547,7 +2743,90 @@
          if (park_off && (s_fifo_getoff != park_off || !is_jump || jump_tgt != park_off))
              park_off = 0;
  
 +#ifdef PS3_NATIVE_STRICT
-+        if (w == 0x0004E944u) {
++        if (w == 0x0004E940u || w == 0x0004E944u) {
 +            const u32 argument_ea = gcm_io2ea(s_fifo_getoff + 4);
 +            if (!argument_ea || (put > s_fifo_getoff && put - s_fifo_getoff < 8)) break;
 +            const u32 buffer = vm_read32(argument_ea);
++            if (cellGcm_syscall_context_bound()) {
++                extern int rsx_display_queue(u32, u32);
++                const u32 head = (w - 0x0004E940u) / 4;
++                FLIP_LOCK();
++                const int valid = head == 1 && buffer < CELL_GCM_MAX_DISPLAY_BUFFER_NUM &&
++                    s_display_buffer_set[buffer] && !s_prepared.active;
++                if (valid) {
++                    memset(&s_prepared, 0, sizeof s_prepared);
++                    s_prepared.active = s_prepared.kernel = 1;
++                    s_prepared.buffer = buffer; s_prepared.head = head;
++                    s_prepared.display = s_display_buffers[buffer];
++                }
++                FLIP_UNLOCK();
++                rsx_backend* backend = rsx_get_backend();
++                if (!valid || !backend || !backend->submit || !backend->submit(backend->userdata)) {
++                    fprintf(stderr, "[native-blocked] original display queue needs valid metadata and completed GPU work\n");
++                    fflush(stderr); ps3_native_stop();
++                }
++                FLIP_LOCK(); s_prepared.ready = 1; FLIP_UNLOCK();
++                s_fifo_getoff += 8; vm_write32(GCM_CONTROL_GUEST_ADDR + 4, s_fifo_getoff);
++                atomic_thread_fence(memory_order_release);
++                if (!rsx_display_queue(head, buffer)) {
++                    fprintf(stderr, "[native-blocked] original display queue has no kernel context\n");
++                    fflush(stderr); ps3_native_stop();
++                }
++                continue;
++            }
 +            FLIP_LOCK();
 +            const int matches = s_prepared.active && s_prepared.command == ea && s_prepared.buffer == buffer;
 +            FLIP_UNLOCK();
@@ -3431,6 +3615,37 @@
 +            break;
 +        }
 +#endif
++        if (w == 0x0004E924u && cellGcm_syscall_context_bound()) {
++            extern int rsx_display_completed(u32, u32, u64);
++            const u32 argument_ea = gcm_io2ea(s_fifo_getoff + 4);
++            if (!argument_ea || (put > s_fifo_getoff && put - s_fifo_getoff < 8)) break;
++            const u32 argument = vm_read32(argument_ea), selector = argument & 15;
++            FLIP_LOCK();
++            const int valid = s_prepared.active && s_prepared.kernel && s_prepared.ready && !s_prepared.ack_wait &&
++                s_prepared.ack_edge && (selector == 15 || selector == s_prepared.buffer) &&
++                argument == (0x80000100u | selector);
++            const CellGcmDisplayInfo display = s_prepared.display;
++            const u32 buffer = s_prepared.buffer, head = s_prepared.head;
++            const u64 edge = s_prepared.ack_edge;
++            FLIP_UNLOCK();
++            rsx_backend* backend = rsx_get_backend();
++            const int result = valid && backend && backend->scanout ?
++                backend->scanout(backend->userdata, display.offset, display.pitch, display.width, display.height) : -1;
++            if (result < 0) {
++                fprintf(stderr, "[native-blocked] original display flip needs retained selected-buffer scanout head=%u buffer=%u argument=0x%X offset=0x%X pitch=%u size=%ux%u protocol=%d\n",
++                    head, buffer, argument, display.offset, display.pitch, display.width, display.height, valid);
++                fflush(stderr); ps3_native_stop();
++            }
++            if (!result) break;
++            s_fifo_getoff += 8; vm_write32(GCM_CONTROL_GUEST_ADDR + 4, s_fifo_getoff);
++            FLIP_LOCK(); gcm_set_current_display_buffer(buffer); s_prepared.active = 0; FLIP_UNLOCK();
++            if (!rsx_display_completed(head, buffer, edge)) {
++                fprintf(stderr, "[native-blocked] original display completion lost its kernel context\n");
++                fflush(stderr); ps3_native_stop();
++            }
++            __atomic_add_fetch(&s_original_frames_presented, 1, __ATOMIC_RELEASE);
++            break;
++        }
          if ((w & 0xFFFF0000u) == 0xFEAD0000u) {
 +#ifdef PS3_NATIVE_STRICT
 +            FLIP_LOCK(); const int mixed_flip = s_prepared.active; FLIP_UNLOCK();
@@ -3442,7 +3657,7 @@
              /* lv1 driver flip: statically-linked libgcm cellGcmSetFlip writes
               * this word into the FIFO instead of calling any import. Fire the
               * flip (status/count/handler) and STOP this drain so the ticker's
-@@ -2596,6 +2719,9 @@
+@@ -2596,6 +2875,9 @@
               * 3 MB ring at boot, wraps, and a walker stopping at every flip
               * then crawled ~1 KB a tick while the title wrote over the
               * commands ahead of it. */
@@ -3452,7 +3667,7 @@
              if (gcm_fifo_backlog(put, s_fifo_getoff) < GCM_FIFO_CATCHUP_BYTES)
                  { why = "flip"; break; }
              continue;
-@@ -2715,14 +2841,16 @@
+@@ -2715,14 +2997,16 @@
                  s_report_hold_pass = 1;
                  break;
              }
@@ -3471,17 +3686,38 @@
                      { static int sn = 0, recdbg = -1; if (recdbg < 0) recdbg = getenv("GCM_RECDBG") ? 1 : 0;
                        if (recdbg && PS3_LOG_FIRST(sn, 12))
                          fprintf(stderr, "[SEMA] m=0x%02X v=0x%08X off=0x%X\n", m, v, s_sema_offset); }
-@@ -2731,8 +2859,7 @@
+@@ -2731,8 +3015,28 @@
                          ps3_ft_span(PS3_FT_SEMA, 0, s_sema_offset, v, s_ft_sema_t0, ps3_ft_now());
                          s_ft_sema_t0 = 0;
                      }
 -                    if (m == 0x64u)      s_sema_offset = v;
 -                    else if (m == 0x6Cu) {
 +                    if (m == 0x6Cu) {
++#ifdef PS3_NATIVE_STRICT
++                        if (cellGcm_syscall_context_bound() && la == VM_RSX_DEVICE_BASE + 0x30) {
++                            FLIP_LOCK();
++                            const int valid = !v && s_video_clock.initialized && s_prepared.active && s_prepared.kernel && s_prepared.ready && !s_prepared.ack_wait;
++                            if (valid) {
++                                s_prepared.ack_wait = 1; s_prepared.ack_edge = 0;
++                                const u64 now = ppu_timebase_now();
++                                if (now < s_video_clock.epoch) {
++                                    fprintf(stderr, "[native-blocked] display acknowledgement precedes the RSX clock epoch\n");
++                                    fflush(stderr); ps3_native_stop();
++                                }
++                                s_prepared.ack_after = (now - s_video_clock.epoch) / (PS3_TIMEBASE_FREQ * 1001u / 60000u) + 1;
++                                if (s_prepared.ack_after <= s_video_clock.ordinal) s_prepared.ack_after = s_video_clock.ordinal + 1;
++                            }
++                            FLIP_UNLOCK();
++                            if (!valid) {
++                                fprintf(stderr, "[native-blocked] device display semaphore release has no completed queue request\n");
++                                fflush(stderr); ps3_native_stop();
++                            }
++                        }
++#endif
                          /* The RSX has fetched past a RELEASE before its
                           * semaphore write lands, so a guest that sees the
                           * label must also see `get` past the command. `get`
-@@ -2755,8 +2882,12 @@
+@@ -2755,8 +3059,12 @@
               * ever writes would wedge the drain permanently, and RELEASE on
               * its own is the half that unblocks a waiting guest. */
              static int blk = -1; static unsigned blk_ms;
@@ -3494,7 +3730,7 @@
              if (blk) {
                  /* GCM_SEMA_ACQUIRE_MS=<ms>: a bounded wait. The hardware waits
                   * for ever; an emulated producer that never comes (a boot-time
-@@ -3330,6 +3461,11 @@
+@@ -3330,11 +3638,24 @@
      if (bufferId >= CELL_GCM_MAX_DISPLAY_BUFFER_NUM)
          return CELL_GCM_ERROR_INVALID_VALUE;
  
@@ -3502,11 +3738,24 @@
 +    if (!width || !height || (pitch & 3) || width > pitch / 4 ||
 +        (u64)offset + (u64)(height - 1) * pitch + (u64)width * 4 > s_config.localSize)
 +        return CELL_GCM_ERROR_INVALID_VALUE;
++    FLIP_LOCK();
++    if (s_prepared.active && s_prepared.buffer == bufferId) {
++        fprintf(stderr, "[native-blocked] queued display buffer metadata changed before completion\n");
++        fflush(stderr); ps3_native_stop();
++    }
 +#endif
      s_display_buffers[bufferId].offset = offset;
      s_display_buffers[bufferId].pitch  = pitch;
      s_display_buffers[bufferId].width  = width;
-@@ -3550,29 +3686,53 @@
+     s_display_buffers[bufferId].height = height;
+     s_display_buffer_set[bufferId] = 1;
++#ifdef PS3_NATIVE_STRICT
++    FLIP_UNLOCK();
++#endif
+ 
+     /* Tell the live engine too, or it has no registered scanout to present and
+      * falls back to whatever surface happens to be current. Display buffers are
+@@ -3550,29 +3871,53 @@
  /* NID: 0xA2478CA3 */
  s32 cellGcmSetPrepareFlip(void* ctx, u32 bufferId)
  {
@@ -3548,7 +3797,7 @@
 +        fprintf(stderr, "[native-blocked] multiple prepared display frames require retained surfaces\n");
 +        fflush(stderr); ps3_native_stop();
 +    }
-+    s_prepared.active = 1; s_prepared.ready = s_prepared.requested = 0;
++    s_prepared.active = 1; s_prepared.ready = s_prepared.requested = s_prepared.kernel = 0;
 +    FLIP_UNLOCK();
 +    if (!context || !gcm_ctx_room(context, 16)) {
 +        FLIP_LOCK(); s_prepared.active = 0; FLIP_UNLOCK(); return CELL_GCM_ERROR_FAILURE;
@@ -3583,7 +3832,7 @@
  }
  
  /* NID: 0x1BFAB6EE */
-@@ -3717,6 +3877,9 @@
+@@ -3717,6 +4062,9 @@
          return CELL_OK;
      }
  
@@ -3593,7 +3842,7 @@
      /* Auto-map unmapped main memory. On real hardware PSL1GHT pre-maps its
       * whole RSX heap in gcmInitBody, so its libraries never call MapMainMemory
       * before handing an EA to the RSX (Tiny3D's command ring lives in an
-@@ -4114,12 +4277,16 @@
+@@ -4114,12 +4462,16 @@
      if (index >= CELL_GCM_MAX_REPORT_COUNT)
          return 0;
  
@@ -3610,7 +3859,7 @@
  }
  
  /* ---------------------------------------------------------------------------
-@@ -4127,11 +4294,13 @@
+@@ -4127,11 +4479,13 @@
   * -----------------------------------------------------------------------*/
  
  /* NID: 0x0B4B62D5 */
@@ -3628,7 +3877,7 @@
  
      if (ps3_log_verbose())
          printf("[cellGcmSys] SetTile(index=%u, loc=%u, offset=0x%X, size=0x%X, pitch=%u)\n",
-@@ -4145,7 +4314,7 @@
+@@ -4145,7 +4499,7 @@
      s_tiles[index].bank   = bank;
      /* SetTile binds too (as it does on RPCS3), so a
       * title that never calls BindTile still has its tiles in force. */
@@ -3637,7 +3886,7 @@
  
      /* Build tile register value (simplified) */
      s_tiles[index].tile  = (location << 0) | (pitch << 8);
-@@ -4153,6 +4322,10 @@
+@@ -4153,6 +4507,10 @@
      gcm_tile_publish(index);
  
      return CELL_OK;
@@ -3648,7 +3897,7 @@
  }
  
  /* NID: 0x06EDEA25 */
-@@ -4311,7 +4484,7 @@
+@@ -4311,7 +4669,7 @@
                         u32 pitch, u8 comp, u16 base, u8 bank)
  {
      /* Delegates to existing SetTile */
@@ -3657,7 +3906,7 @@
  }
  
  /* Default FIFO size — configures command buffer size before init */
-@@ -4407,7 +4580,7 @@
+@@ -4407,7 +4765,7 @@
      printf("[cellGcmSys] Terminate\n");
  
      s_gcm_initialized = 0;
@@ -3666,7 +3915,7 @@
      s_flip_status = CELL_GCM_FLIP_STATUS_DONE;
      s_debug_level = CELL_GCM_DEBUG_LEVEL0;
      s_vblank_count = 0;
-@@ -4591,7 +4764,20 @@
+@@ -4591,7 +4949,20 @@
  s32 cellGcmSetFlipImmediate(u32 bufferId)
  {
      printf("[cellGcmSys] SetFlipImmediate(bufferId=%u)\n", bufferId);
@@ -3687,7 +3936,7 @@
  }
  
  /* Set flip status directly */
-@@ -4750,7 +4936,7 @@
+@@ -4750,7 +5121,7 @@
  u32 cellGcm_syscall_bringup(u32 local_size)
  {
      if (!s_gcm_initialized)
@@ -3696,18 +3945,19 @@
      if (local_size)
          s_config.localSize = local_size;
      s_gcm_syscall_mode = 1;
-@@ -4762,12 +4948,49 @@
+@@ -4762,12 +5133,50 @@
   * `lwz r3,0x18(r9)` / `addi r3,r3,64`), so the syscall returns this minus 0x40
   * and the driver's own flushes land exactly where the walker reads. */
  u32 cellGcm_control_guest_addr(void) { return GCM_CONTROL_GUEST_ADDR; }
 +u32 cellGcm_syscall_sync_mode(u32 head) { return __atomic_load_n(&s_flip_mode[head], __ATOMIC_ACQUIRE); }
++int cellGcm_syscall_context_bound(void) { return __atomic_load_n(&s_kernel_control, __ATOMIC_ACQUIRE) != 0; }
 +void cellGcm_syscall_set_sync_mode(u32 head, u32 mode) { __atomic_store_n(&s_flip_mode[head], mode, __ATOMIC_RELEASE); }
 +int cellGcm_syscall_bind_context(u32 control, u32 reports)
 +{
 +    if (!control || !reports || s_kernel_control) return 0;
-+    s_kernel_control = control;
 +    s_kernel_label_base = reports;
 +    s_kernel_report_base = reports + 0x1400u;
++    __atomic_store_n(&s_kernel_control, control, __ATOMIC_RELEASE);
 +    return 1;
 +}
 +u32 cellGcm_semaphore_address(u32 offset)
@@ -3746,7 +3996,7 @@
      populate_offset_table(ea, io, size);
      /* A free slot, not s_io_mappings[count]: an unmap leaves a hole, and the
       * count then indexes a live slot. */
-@@ -4777,6 +5000,9 @@
+@@ -4777,6 +5186,9 @@
          s_io_mapping_count++;
      }
      if (!s_config.ioSize) { s_config.ioAddress = ea; s_config.ioSize = size; }
@@ -3756,7 +4006,7 @@
  }
  
  void cellGcm_syscall_iounmap(u32 io, u32 size)
-@@ -4790,10 +5016,46 @@
+@@ -4790,10 +5202,46 @@
  /* sys_rsx_context_attribute(0x001): the driver's explicit FIFO reset. Move the
   * walker with it -- leaving s_fifo_getoff where it was makes the next drain walk
   * from a stale offset through whatever the driver has since overwritten. */
@@ -4022,7 +4272,17 @@
 +}
 --- a/libs/video/cellVideoOut.c
 +++ b/libs/video/cellVideoOut.c
-@@ -84,6 +84,8 @@
+@@ -24,6 +24,9 @@
+ static u8  s_color_format   = CELL_VIDEO_OUT_BUFFER_COLOR_FORMAT_X8R8G8B8;
+ static u8  s_aspect         = CELL_VIDEO_OUT_ASPECT_16_9;
+ static u32 s_pitch          = 1280 * 4;
++
++/* The native output advertises only progressive 720p at 60000/1001 Hz. */
++u16 cellVideoOut_get_refresh_rate(void) { return 1; }
+ 
+ static void get_resolution_wh(u32 resId, u16* w, u16* h);
+ 
+@@ -84,6 +87,8 @@
  
      if (videoOut != CELL_VIDEO_OUT_PRIMARY && videoOut != CELL_VIDEO_OUT_SECONDARY)
          return CELL_VIDEO_OUT_ERROR_UNSUPPORTED_VIDEO_OUT;
@@ -4031,16 +4291,18 @@
  
      state = GUEST_PTR(state, CellVideoOutState*);
      memset(state, 0, sizeof(CellVideoOutState));
-@@ -98,7 +100,7 @@
+@@ -98,8 +103,8 @@
          state->displayMode.resolutionId = (u8)s_resolution_id;
          state->displayMode.scanMode     = CELL_VIDEO_OUT_SCAN_MODE_PROGRESSIVE;
          state->displayMode.conversion   = 0;
 -        state->displayMode.aspect       = CELL_VIDEO_OUT_ASPECT_16_9;
+-        state->displayMode.refreshRates = ps3_bswap16(0x0001); /* 59.94Hz flag */
 +        state->displayMode.aspect       = s_aspect;
-         state->displayMode.refreshRates = ps3_bswap16(0x0001); /* 59.94Hz flag */
++        state->displayMode.refreshRates = ps3_bswap16(cellVideoOut_get_refresh_rate());
      } else {
          state->state = 0; /* disabled */
-@@ -190,6 +192,7 @@
+     }
+@@ -190,6 +195,7 @@
  
      if (videoOut != CELL_VIDEO_OUT_PRIMARY)
          return CELL_VIDEO_OUT_ERROR_UNSUPPORTED_VIDEO_OUT;
@@ -4048,7 +4310,7 @@
  
      info = GUEST_PTR(info, CellVideoOutDeviceInfo*);
      memset(info, 0, sizeof(CellVideoOutDeviceInfo));
-@@ -197,9 +200,18 @@
+@@ -197,9 +203,18 @@
      info->portType       = CELL_VIDEO_OUT_OUTPUT_HDMI;
      info->colorSpace     = CELL_VIDEO_OUT_COLOR_SPACE_RGB;
      info->latency        = 0;
@@ -4062,13 +4324,13 @@
 +    info->availableModes[0].resolutionId = s_resolution_id;
 +    info->availableModes[0].scanMode = CELL_VIDEO_OUT_SCAN_MODE_PROGRESSIVE;
 +    info->availableModes[0].aspect = s_aspect;
-+    info->availableModes[0].refreshRates = ps3_bswap16(1);
++    info->availableModes[0].refreshRates = ps3_bswap16(cellVideoOut_get_refresh_rate());
 +    return CELL_OK;
 +#endif
      /* Report supported modes */
      int idx = 0;
  
-@@ -238,8 +250,7 @@
+@@ -238,8 +253,7 @@
  
      if (videoOut == CELL_VIDEO_OUT_PRIMARY)
          return 1;
@@ -4078,7 +4340,7 @@
  }
  
  /* Is (resolutionId, aspect) available on this output? Return 1 (available) for
-@@ -248,6 +259,12 @@
+@@ -248,6 +262,12 @@
  s32 cellVideoOutGetResolutionAvailability(u32 videoOut, u32 resolutionId,
                                            u32 aspect, u32 option)
  {
@@ -4135,7 +4397,18 @@
  
  /* This project's own: load whatever real system PRX modules the title needs
   * into guest RAM and register their exports. stubs.cpp has the empty version
-@@ -179,6 +181,8 @@
+@@ -107,6 +109,10 @@
+ 
+ /* The GCM half of the frame clock. */
+ void     cellGcmTickVBlank(void);
++int      cellGcmVideoNext(uint64_t now_ticks, uint64_t* edge_ticks);
++void     cellGcmVideoTick(uint64_t edge_ticks);
++unsigned cellGcm_original_frames_presented(void);
++uint64_t ppu_timebase_now(void);
+ void     cellGcmTickFlip(void);
+ int      cellGcm_take_flip_pending(void);
+ void     cellGcm_rsx_process_fifo(void);      /* drain get -> put */
+@@ -179,6 +185,8 @@
   * took. A hidden or occluded window makes present block hard, and pacing the
   * ticks behind it paces the whole game behind it. */
  static volatile LONG g_frames_presented = 0;
@@ -4144,7 +4417,19 @@
  
  /* Frames handed to the backend at a guest FLIP boundary -- one per frame the
   * guest actually finished. The presents made before the guest's first flip, so
-@@ -203,10 +207,10 @@
+@@ -186,7 +194,11 @@
+  * and are deliberately not counted. */
+ extern "C" unsigned ppu_boot_frames_presented(void)
+ {
++#ifdef PS3_NATIVE_STRICT
++    return (unsigned)g_frames_presented + cellGcm_original_frames_presented();
++#else
+     return (unsigned)g_frames_presented;
++#endif
+ }
+ 
+ static void present_guest_frame(void)
+@@ -203,10 +215,10 @@
      if (!title || !*title) title = "ps3recomp";
  
      int rsx_ok = (rsx_backend_init(WINDOW_WIDTH, WINDOW_HEIGHT, title) == 0);
@@ -4156,15 +4441,29 @@
      ULONGLONG next_tick = GetTickCount64();
  
      for (;;) {
-@@ -216,7 +220,6 @@
+@@ -214,9 +226,19 @@
+         ULONGLONG now = GetTickCount64();
+ 
          int fired = 0;
-         while ((long long)(now - next_tick) >= 0 && fired < 240) {
+-        while ((long long)(now - next_tick) >= 0 && fired < 240) {
++        uint64_t edge_ticks = 0;
++        while (fired < 240 &&
++#ifdef PS3_NATIVE_STRICT
++               cellGcmVideoNext(ppu_timebase_now(), &edge_ticks)
++#else
++               (long long)(now - next_tick) >= 0
++#endif
++        ) {
++#ifdef PS3_NATIVE_STRICT
++            cellGcmVideoTick(edge_ticks);
++#else
              cellGcmTickVBlank();
 -            cellGcmTickFlip();
++#endif
              /* Present a pending flip BEFORE draining any further. The flip
               * fires at a get==put frame boundary on the guest thread, so the
               * batch held right now is exactly the completed frame; presenting
-@@ -224,8 +227,8 @@
+@@ -224,8 +246,8 @@
               * mixed one. */
              if (rsx_ok && cellGcm_take_flip_pending()) {
                  present_guest_frame();
@@ -4174,7 +4473,17 @@
              /* Drain the FIFO every tick. This is what writes the RSX sync-fence
               * labels the game's per-frame logic blocks on, so it has to keep
               * advancing at 60 Hz even while present() throttles. */
-@@ -242,7 +245,6 @@
+@@ -233,7 +255,9 @@
+             next_tick += 16;             /* ~60 Hz */
+             fired++;
+         }
++#ifndef PS3_NATIVE_STRICT
+         if (fired >= 240) next_tick = now;   /* fell too far behind -- resync */
++#endif
+ 
+         /* Drain at the outer cadence too, not only on the 16 ms tick: titles
+          * fence every render pass on a label the drain writes, and one wave of
+@@ -242,7 +266,6 @@
          if (rsx_ok) {
              if (cellGcm_take_flip_pending()) {
                  present_guest_frame();
@@ -4182,7 +4491,7 @@
              }
              cellGcm_rsx_process_fifo();
  
-@@ -253,16 +255,8 @@
+@@ -253,16 +276,8 @@
                  ps3_host_quit("window closed");
                  continue;
              }
@@ -4201,7 +4510,7 @@
          }
      }
      return 0;
-@@ -415,9 +409,9 @@
+@@ -415,9 +430,9 @@
       * inflates every shorter wait the title makes and throttles the whole
       * thing. POSIX timers are already fine-grained. */
      timeBeginPeriod(1);
@@ -4214,7 +4523,7 @@
      printf("=== ps3recomp game runner ===\n");
  
      if (!alloc_guest_vm()) {
-@@ -446,15 +440,20 @@
+@@ -446,15 +461,20 @@
      g_ps3_guest_caller = harness_guest_caller;
      CreateThread(NULL, 4u * 1024 * 1024, frame_clock, NULL, 0, NULL);
  
@@ -5552,7 +5861,7 @@
  
  /* ppu_loader.cpp - PPU reservation bookkeeping. The ppu_memory.h inlines call
   * these on every store so lwarx/stwcx reservations can be broken; with no PPU
-@@ -121,6 +147,11 @@
+@@ -121,6 +147,13 @@
  uint32_t g_spu_image_src_ea = 0;
  uint32_t g_spu_image_ls_start = 0;
  uint32_t g_spu_image_span = 0;
@@ -5563,7 +5872,9 @@
 +uint32_t ps3_spu_image_source_ea(uint32_t img_ea) { (void)img_ea; return 0; }
 +int ps3_spu_image_record(uint32_t img, uint32_t src) { (void)img; (void)src; return 0; }
 +void ps3_spu_image_forget(uint32_t img) { (void)img; }
++#ifndef PS3RECOMP_HOST_BACKING_QUERY_PROVIDED
 +int ps3_native_guest_range_backed(uint32_t addr, uint32_t size) { (void)addr; (void)size; return 0; }
++#endif
  
 --- a/runtime/syscalls/sys_semaphore.c
 +++ b/runtime/syscalls/sys_semaphore.c
@@ -6233,7 +6544,7 @@
  /* Called from spu_indirect_branch on every dispatch. Restores + clears when
 --- a/libs/video/rsx_commands.h
 +++ b/libs/video/rsx_commands.h
-@@ -457,6 +457,12 @@
+@@ -457,6 +457,15 @@
  
      /* Texture */
      void (*bind_texture)(void* userdata, u32 unit, const rsx_texture_state* tex);
@@ -6243,6 +6554,9 @@
 +    int (*report)(void* userdata, u32 method, u32 argument, u64* timestamp, u32* value);
 +    /* Complete preceding GPU work without presenting a display buffer. */
 +    int (*submit)(void* userdata);
++    /* Present this retained local RGB surface after completing GPU work.
++     * 1 = accepted and GPU complete, 0 = temporarily unavailable, -1 = unsupported. */
++    int (*scanout)(void* userdata, u32 offset, u32 pitch, u32 width, u32 height);
  } rsx_backend;
  
  /* Register a backend. Call before any RSX processing. */
@@ -6257,7 +6571,7 @@
      /* Indexed VP draw (upload_tris_vp_ix): ib_first/index_count are u32
       * indices into vp_ib, relative to the vertex at vb_byte_offset. */
      int   indexed;
-@@ -292,6 +294,15 @@
+@@ -292,6 +294,16 @@
      ID3D12Resource*            render_targets[FRAME_COUNT];
      ID3D12CommandAllocator*    cmd_allocators[FRAME_COUNT];
      ID3D12GraphicsCommandList* cmd_list;
@@ -6270,10 +6584,11 @@
 +    int report_enabled;
 +    int report_timestamp_requested;
 +    int zcull_geometry_seen;
++    int explicit_scanout, scanout_slot, last_present_succeeded;
  
      /* Synchronization */
      ID3D12Fence* fence;
-@@ -418,6 +429,40 @@
+@@ -418,6 +430,40 @@
  } D3D12State;
  
  static D3D12State s_d3d;
@@ -6314,7 +6629,7 @@
  char g_rsx_title_base[128] = "ps3recomp";
  static u32 s_dbg_last_draws = 0;
  static u64 s_req_verts = 0, s_req_draws = 0, s_drop_draws = 0;
-@@ -1409,11 +1454,18 @@
+@@ -1409,11 +1455,18 @@
  {
      u32 fi = s_d3d.frame_index;
      s_d3d.fence_values[fi]++;
@@ -6335,7 +6650,7 @@
          /* NEVER wait unbounded here: this runs on the vblank ticker, which also
           * drives the guest's vblank handlers, the FIFO drain, and the fence
           * publication. A device removal (TDR) leaves the D3D12 fence unsignaled
-@@ -1424,8 +1476,15 @@
+@@ -1424,8 +1477,15 @@
           * carry on (subsequent D3D calls fail visibly but the game keeps
           * running headless). */
          for (int tries = 0; tries < 3; tries++) {
@@ -6352,7 +6667,7 @@
              HRESULT rr = s_d3d.device->lpVtbl->GetDeviceRemovedReason(s_d3d.device);
              printf("[D3D12] wait_for_gpu STUCK %ds: want %llu got %llu removed=0x%08lX\n",
                     2 * (tries + 1),
-@@ -1436,6 +1495,9 @@
+@@ -1436,6 +1496,9 @@
              if (rr != 0 /* S_OK: device still alive, keep waiting a bit */)
                  break;
          }
@@ -6362,7 +6677,69 @@
      }
  }
  
-@@ -4167,6 +4229,7 @@
+@@ -3700,6 +3763,19 @@
+                 st->surface_format, st->color_target, st->surface_color_offset[0], st->surface_color_offset[1],
+                 st->surface_zeta_offset, st->surface_clip_w, st->surface_clip_h,
+                 cellGcmOffsetIsDisplay(raw), cellGcmOffsetIsDisplay(raw) ? 0 : raw); } } }
++#ifdef PS3_NATIVE_STRICT
++    extern int cellGcm_syscall_context_bound(void);
++    if (cellGcm_syscall_context_bound()) {
++        if (out_w) *out_w = st->surface_clip_w;
++        if (out_h) *out_h = st->surface_clip_h;
++        if (out_mrt) {
++            const int count = st->color_target >= 0x1F ? 3 : st->color_target >= 0x17 ? 2 : st->color_target >= 0x13 ? 1 : 0;
++            for (int i = 0; i < count; ++i) if (!out_mrt[i]) out_mrt[i] = 0x7FFFFFFFu;
++        }
++        /* Internal cache key only: guest local offset zero is a real surface. */
++        return raw ? raw : 0x7FFFFFFFu;
++    }
++#endif
+     if (cellGcmOffsetIsDisplay(raw)) return 0;
+     /* RT_DISPLAY_BY_SIZE=1: also treat a single-target surface whose clip
+      * exactly matches the display resolution as the backbuffer.
+@@ -3738,6 +3814,10 @@
+ 
+ static int off_rt_find(u32 off)
+ {
++#ifdef PS3_NATIVE_STRICT
++    extern int cellGcm_syscall_context_bound(void);
++    if (!off && cellGcm_syscall_context_bound()) off = 0x7FFFFFFFu;
++#endif
+     if (!off) return -1;
+     for (int i = 0; i < MAX_OFF_RTS; i++)
+         if (s_d3d.off_rt[i].res && s_d3d.off_rt[i].off == off) return i;
+@@ -3776,6 +3856,10 @@
+         for (int i = 0; i < MAX_OFF_RTS; i++)
+             if (!s_d3d.off_rt[i].res) { slot = i; break; }
+         if (slot < 0) {   /* evict an entry not used this frame */
++#ifdef PS3_NATIVE_STRICT
++            extern int cellGcm_syscall_context_bound(void);
++            if (cellGcm_syscall_context_bound()) report_failure("retained RSX surface capacity");
++#endif
+             for (int i = 0; i < MAX_OFF_RTS; i++)
+                 if (!s_d3d.off_rt[i].used) { slot = i; break; }
+             if (slot < 0) return -1;
+@@ -3820,7 +3904,18 @@
+                   (want_fmt == DXGI_FORMAT_R32G32B32A32_FLOAT) ? 16u :
+                   (want_fmt == DXGI_FORMAT_R32_FLOAT) ? 4u : 4u;
+         u32 pitch = (w * bpp + 255) & ~255u;
+-        u32 src = cellGcmResolveOffset(off);
++        u32 src = cellGcmResolveOffset(off == 0x7FFFFFFFu ? 0 : off);
++#ifdef PS3_NATIVE_STRICT
++        extern int cellGcm_syscall_context_bound(void);
++        extern int ps3_native_guest_range_backed(u32, u32);
++        if (cellGcm_syscall_context_bound()) {
++            const u32 local = off == 0x7FFFFFFFu ? 0 : off;
++            const u64 bytes = (u64)w * h * bpp;
++            if (local >= 0x10000000u || bytes > UINT32_MAX ||
++                !ps3_native_guest_range_backed(0xC0000000u + local, (u32)bytes)) report_failure("unbacked retained local surface");
++            src = 0xC0000000u + local;
++        }
++#endif
+         if (vm_base && src != 0xFFFFFFFFu) {
+             D3D12_HEAP_PROPERTIES hu = {0}; hu.Type = D3D12_HEAP_TYPE_UPLOAD;
+             D3D12_RESOURCE_DESC bd = {0};
+@@ -4167,6 +4262,7 @@
   * render-to-texture pass) must still run -- it is what fills the texture a
   * later batch samples -- but presenting it would show a half-built frame. */
  static int s_present_this_frame = 1;
@@ -6370,7 +6747,7 @@
  
  /* Resolve a DRAW_*_TEX value: a hex raw offset, or the literal "duck" for the
   * content-identified duck texture. */
-@@ -4530,6 +4593,12 @@
+@@ -4530,6 +4626,12 @@
  {
      double _rf0 = perf_on() ? perf_now() : 0.0;
      u32 fi = s_d3d.frame_index;
@@ -6383,7 +6760,7 @@
  
      /* Drain the GPU before touching shared upload resources (vp_vb vertices,
       * vp_cb constants, per-frame texture staging): the previous frame's draws
-@@ -5053,6 +5122,8 @@
+@@ -5053,6 +5155,8 @@
      /* Set render target + depth */
      s_d3d.cmd_list->lpVtbl->OMSetRenderTargets(s_d3d.cmd_list, 1, &rtv_handle, FALSE, &dsv_handle);
  
@@ -6392,7 +6769,7 @@
      /* Clear color and depth */
      s_d3d.cmd_list->lpVtbl->ClearRenderTargetView(
          s_d3d.cmd_list, rtv_handle, s_d3d.clear_color, 0, NULL);
-@@ -5060,6 +5131,7 @@
+@@ -5060,6 +5164,7 @@
          s_d3d.cmd_list, dsv_handle,
          D3D12_CLEAR_FLAG_DEPTH | D3D12_CLEAR_FLAG_STENCIL,
          1.0f, 0, 0, NULL);
@@ -6400,7 +6777,7 @@
  
      /* Set viewport and scissor */
      D3D12_VIEWPORT viewport = {0, 0, (float)s_d3d.width, (float)s_d3d.height, 0.0f, 1.0f};
-@@ -5170,14 +5242,18 @@
+@@ -5170,14 +5275,18 @@
                  last_topo = dr->topology;
              }
              u32 start_vert = dr->vb_byte_offset / VERTEX_STRIDE;
@@ -6420,7 +6797,7 @@
          int any = 0;
          for (u32 d = 0; d < s_d3d.draw_count && d < MAX_DRAWS; d++)
              if (s_d3d.draws[d].is_vp) { any = 1; break; }
-@@ -5187,6 +5263,10 @@
+@@ -5187,6 +5296,10 @@
              (s_d3d.tex_ready && s_d3d.pipeline_state_vp) ? s_d3d.pipeline_state_vp
                                                           : s_d3d.pipeline_state_vp_color;
          if (!vpso) vpso = s_d3d.pipeline_state_vp;
@@ -6431,7 +6808,7 @@
          { static int cap = -1, n = 0;
            if (cap < 0) { const char* e = getenv("VP_SUBMIT"); cap = e ? atoi(e) : 0; }
            if (cap && n < cap) { n++;
-@@ -5198,9 +5278,11 @@
+@@ -5198,9 +5311,11 @@
              fprintf(stderr, "[VPPASS] records=%u is_vp=%u clears=%u any=%d vpso=%p rootsig=%p\n",
                      s_d3d.draw_count, nvp, nclr, any,
                      (void*)vpso, (void*)s_d3d.vp_root_sig); } }
@@ -6445,7 +6822,7 @@
              s_d3d.cmd_list->lpVtbl->IASetPrimitiveTopology(s_d3d.cmd_list, D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
              s_d3d.cmd_list->lpVtbl->SetGraphicsRootConstantBufferView(s_d3d.cmd_list, 0,
                  s_d3d.vp_cb->lpVtbl->GetGPUVirtualAddress(s_d3d.vp_cb));
-@@ -5306,6 +5388,7 @@
+@@ -5306,6 +5421,7 @@
                                                                 dr->no_color ? NULL : rh, FALSE, &cur_dsv);
                      s_d3d.cmd_list->lpVtbl->RSSetViewports(s_d3d.cmd_list, 1, &vp);
                      s_d3d.cmd_list->lpVtbl->RSSetScissorRects(s_d3d.cmd_list, 1, &sc);
@@ -6453,7 +6830,7 @@
                      if (wantz >= 0) {
                          /* A depth surface keeps its contents across passes; the
                           * guest clears it when it wants it cleared. */
-@@ -5319,6 +5402,7 @@
+@@ -5319,6 +5435,7 @@
                          s_d3d.cmd_list->lpVtbl->ClearDepthStencilView(s_d3d.cmd_list, dsv_handle,
                              D3D12_CLEAR_FLAG_DEPTH | D3D12_CLEAR_FLAG_STENCIL, 1.0f, 0, 0, NULL);
                      }
@@ -6461,7 +6838,7 @@
                      cur_z = wantz; cur_nc = dr->no_color; force_rebind = 0;
                      /* RT_CLEARDBG=2: magenta-clear the surface the DRAWS bind,
                       * at the moment they bind it. The guest's own clears may go
-@@ -5366,6 +5450,7 @@
+@@ -5366,6 +5483,7 @@
                      for (int _m = 0; _m < 3; _m++) cur_m[_m] = wantm[_m];
                  }
                  if (dr->is_clear) {
@@ -6469,7 +6846,7 @@
                      D3D12_CPU_DESCRIPTOR_HANDLE rh =
                          (cur_rt >= 0) ? off_rt_rtv(cur_rt) : rtv_handle;
                      /* RT_CLEARDBG=1: clear offscreen targets to magenta rather
-@@ -5383,22 +5468,25 @@
+@@ -5383,22 +5501,25 @@
                              (((dr->clear_mask & 0x1u) ? D3D12_CLEAR_FLAG_DEPTH : 0) |
                               ((dr->clear_mask & 0x2u) ? D3D12_CLEAR_FLAG_STENCIL : 0));
                          s_d3d.cmd_list->lpVtbl->ClearDepthStencilView(s_d3d.cmd_list, cur_dsv,
@@ -6498,7 +6875,7 @@
                          }
                      continue;
                  }
-@@ -5414,6 +5502,9 @@
+@@ -5414,6 +5535,9 @@
                                                  dr->fp_ctrl, dr->cmask, dr->cull,
                                                  dr_cube_mask(dr),
                                                  unnorm_mask, unnorm_dim, dr->zs_key) : NULL;
@@ -6508,7 +6885,7 @@
                  s_d3d.cmd_list->lpVtbl->SetPipelineState(s_d3d.cmd_list,
                                                           dpso ? dpso : vpso);
                  s_d3d.cmd_list->lpVtbl->OMSetStencilRef(s_d3d.cmd_list, dr->stencil_ref & 0xFFu);
-@@ -5511,6 +5602,8 @@
+@@ -5511,6 +5635,8 @@
                        s_d3d.cmd_list->lpVtbl->OMSetRenderTargets(
                            s_d3d.cmd_list, bn, brh, FALSE, &cur_dsv);
                    } }
@@ -6517,7 +6894,7 @@
                  if (dr->indexed) {
                      if (!ib_bound) {
                          D3D12_INDEX_BUFFER_VIEW ibv;
-@@ -5526,6 +5619,9 @@
+@@ -5526,6 +5652,9 @@
                  } else
                  s_d3d.cmd_list->lpVtbl->DrawInstanced(s_d3d.cmd_list,
                      dr->vertex_count, 1, dr->vb_byte_offset / 256, 0);
@@ -6527,22 +6904,38 @@
                  /* VP_SUBMIT=<N>: prove the VP pass actually reaches the GPU.
                   * "records exist" and "draws were submitted" are different
                   * claims, and every blank-output investigation conflates them. */
-@@ -5746,9 +5842,11 @@
+@@ -5746,10 +5875,26 @@
        if (mind > 0 && s_dbg_last_draws < (u32)mind) goto skip_dump_consider; }
      if (s_d3d.dump_skip_left > 0 && s_d3d.dump_frames_left > 0) s_d3d.dump_skip_left--;
  skip_dump_consider: ;
 -    guest_fb_present(fi);
 -    scanout_auto_present(fi);
 -    composite_present(fi);
-+    if (s_present_this_frame && !s_pending_display_content) {
+-    int dumping = (s_d3d.dump_frames_left > 0 && s_d3d.readback_buf
++    if (s_present_this_frame && s_d3d.explicit_scanout) {
++        const int slot = s_d3d.scanout_slot;
++        off_rt_transition(slot, D3D12_RESOURCE_STATE_COPY_SOURCE);
++        D3D12_RESOURCE_BARRIER copy = {0}; copy.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
++        copy.Transition.pResource = s_d3d.render_targets[fi];
++        copy.Transition.Subresource = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
++        copy.Transition.StateBefore = D3D12_RESOURCE_STATE_RENDER_TARGET;
++        copy.Transition.StateAfter = D3D12_RESOURCE_STATE_COPY_DEST;
++        s_d3d.cmd_list->lpVtbl->ResourceBarrier(s_d3d.cmd_list, 1, &copy);
++        s_d3d.cmd_list->lpVtbl->CopyResource(s_d3d.cmd_list, s_d3d.render_targets[fi], s_d3d.off_rt[slot].res);
++        copy.Transition.StateBefore = D3D12_RESOURCE_STATE_COPY_DEST;
++        copy.Transition.StateAfter = D3D12_RESOURCE_STATE_RENDER_TARGET;
++        s_d3d.cmd_list->lpVtbl->ResourceBarrier(s_d3d.cmd_list, 1, &copy);
++        off_rt_transition(slot, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
++    } else if (s_present_this_frame && !s_pending_display_content) {
 +        guest_fb_present(fi);
 +        scanout_auto_present(fi);
 +        composite_present(fi);
 +    }
-     int dumping = (s_d3d.dump_frames_left > 0 && s_d3d.readback_buf
++    int dumping = (s_present_this_frame && s_d3d.dump_frames_left > 0 && s_d3d.readback_buf
                     && s_d3d.dump_skip_left == 0);
      { static int mind2 = -1;
-@@ -5799,9 +5897,40 @@
+       if (mind2 < 0) { const char* e = getenv("CELLMARK_DUMP_MINDRAWS");
+@@ -5799,9 +5944,40 @@
      }
  
      /* Close and execute */
@@ -6584,10 +6977,11 @@
  
      /* D3D12_IQ=1: drain the debug layer's message queue after submitting the
       * frame. The legacy (is_vp=0) DrawInstanced path silently produced ZERO
-@@ -5956,11 +6085,16 @@
+@@ -5956,11 +6132,17 @@
      /* Present, on the vblank unless D3D12_VSYNC=0: that one is for measuring a
       * title past the display's rate. Skipped for an offscreen-only batch. */
      if (s_present_this_frame) {
++        s_d3d.last_present_succeeded = 0;
 +        HRESULT present_hr;
          if (!d3d12_vsync_off())
 -            s_d3d.swap_chain->lpVtbl->Present(s_d3d.swap_chain, 1, 0);
@@ -6599,11 +6993,11 @@
 +#ifdef PS3_NATIVE_STRICT
 +        if (FAILED(present_hr)) report_failure("swap chain present failed");
 +#endif
-+        if (present_hr == S_OK) s_pending_display_content = 0;
++        if (present_hr == S_OK) { s_pending_display_content = 0; s_d3d.last_present_succeeded = 1; }
      }
      rdoc_frame_end();
  
-@@ -5973,7 +6107,7 @@
+@@ -5973,7 +6155,7 @@
      {
          static ULONGLONG s_tt0 = 0;
          static u64 s_tframes = 0;
@@ -6612,7 +7006,7 @@
          ULONGLONG tnow = GetTickCount64();
          if (s_tt0 == 0) s_tt0 = tnow;
          if (tnow - s_tt0 >= 1000 && s_d3d.hwnd) {
-@@ -6049,7 +6183,7 @@
+@@ -6049,7 +6231,7 @@
       * it would strobe the bare backbuffer clear. Keep accumulating -- the
       * composite draw that targets the display presents the whole chain, in
       * order, in one command list. Empty batches still present (boot/idle). */
@@ -6621,7 +7015,15 @@
      for (u32 _i = 0; _i < s_d3d.draw_count && _i < MAX_DRAWS; _i++)
          if (!s_d3d.draws[_i].is_clear && s_d3d.draws[_i].rt_off == 0) {
              flip_has_display = 1;
-@@ -6089,6 +6223,28 @@
+@@ -6072,6 +6254,7 @@
+ static void d3d12_clear(void* ud, u32 flags, u32 color, float depth, u8 stencil)
+ {
+     (void)ud;
++    if (!(flags & 0xF3u)) return;
+ 
+     /* Convert RSX ARGB u32 to float[4] RGBA */
+     float cc[4];
+@@ -6089,6 +6272,28 @@
  
      u32 rt_w = 0, rt_h = 0, mrt[3] = {0, 0, 0};
      u32 rt = current_rt_off(&rt_w, &rt_h, mrt);
@@ -6650,7 +7052,7 @@
  
      /* An OFFSCREEN clear is just an ordered op in the current frame's pass
       * chain (demosaic clears each effect pass's surface) -- record it, don't
-@@ -7193,6 +7349,7 @@
+@@ -7193,6 +7398,7 @@
  
  static void d3d12_draw_arrays(void* ud, u32 primitive, u32 first, u32 count)
  {
@@ -6658,7 +7060,7 @@
      /* RSX_LIVE_FEED_DBG=1: pair with the [feed] method counts so "the FIFO
       * carries no draw batches" can be checked against "the backend is told
       * to draw" in the same run. */
-@@ -7457,6 +7614,7 @@
+@@ -7457,6 +7663,7 @@
  
  static void d3d12_draw_indexed(void* ud, u32 primitive, u32 first, u32 count)
  {
@@ -6666,7 +7068,7 @@
      /* RSX_LIVE_FEED_DBG=1: pair with the [feed] method counts so "the FIFO
       * carries no draw batches" can be checked against "the backend is told
       * to draw" in the same run. */
-@@ -7850,6 +8008,42 @@
+@@ -7850,6 +8057,81 @@
   * -----------------------------------------------------------------------*/
  
  static rsx_backend s_d3d12_backend = {0};
@@ -6685,11 +7087,11 @@
 +{
 +    (void)user;
 +    /* NVIDIA US8525842B1, table 2: ZCULL stats count geometry blocks. Only
-+     * the empty channel is known exactly without a block-culling model. */
++     * an interval without geometry since reset is known without a culling model. */
 +    const u32 type = argument >> 24;
 +    const int empty_zcull = type >= 2 && type <= 5 && !s_d3d.zcull_geometry_seen;
 +    if (!s_d3d.initialized || (method != 0x17C8 && method != 0x17CC && method != 0x1800) ||
-+        (method == 0x17C8 && argument != 1) || (method == 0x17CC && argument > 1) ||
++        (method == 0x17C8 && (!argument || argument > 3)) || (method == 0x17CC && argument > 1) ||
 +        (method == 0x1800 && (((argument >> 24) != 1 && !empty_zcull) || !timestamp || !value))) return 0;
 +    report_resources();
 +    const int saved_present = s_present_this_frame;
@@ -6698,7 +7100,10 @@
 +    if (s_d3d.draw_count || s_d3d.report_timestamp_requested) render_frame();
 +    s_d3d.report_timestamp_requested = 0;
 +    s_present_this_frame = saved_present;
-+    if (method == 0x17C8) s_d3d.report_value = 0;
++    if (method == 0x17C8) {
++        if (argument & 1) s_d3d.report_value = 0;
++        if (argument & 2) s_d3d.zcull_geometry_seen = 0;
++    }
 +    if (method == 0x17CC) s_d3d.report_enabled = argument != 0;
 +    if (method == 0x1800) {
 +        if (!timestamp || !value) return 0;
@@ -6706,10 +7111,46 @@
 +    }
 +    return 1;
 +}
++
++static int d3d12_scanout(void* user, u32 offset, u32 pitch, u32 width, u32 height)
++{
++    extern int cellGcmOffsetIsDisplay(u32);
++    if (!s_d3d.initialized || width != s_d3d.width || height != s_d3d.height ||
++        !cellGcmOffsetIsDisplay(offset) || (u64)pitch != (u64)width * 4 || !d3d12_submit(user)) return -1;
++    int slot = off_rt_find(offset);
++    const int imported_pixels = slot < 0;
++    if (slot < 0) {
++        /* A registered display buffer with no GPU writes still contains its
++         * actual local-memory pixels. Import through the existing RT path. */
++        const u32 fi = s_d3d.frame_index;
++        if (FAILED(s_d3d.cmd_allocators[fi]->lpVtbl->Reset(s_d3d.cmd_allocators[fi])) ||
++            FAILED(s_d3d.cmd_list->lpVtbl->Reset(s_d3d.cmd_list, s_d3d.cmd_allocators[fi], NULL))) report_failure("scanout import command reset");
++        slot = off_rt_get(offset ? offset : 0x7FFFFFFFu, width, height, 0x08);
++        if (slot < 0 || FAILED(s_d3d.cmd_list->lpVtbl->Close(s_d3d.cmd_list))) report_failure("scanout local-memory import");
++        ID3D12CommandList* list = (ID3D12CommandList*)s_d3d.cmd_list;
++        s_d3d.cmd_queue->lpVtbl->ExecuteCommandLists(s_d3d.cmd_queue, 1, &list);
++        wait_for_gpu();
++    }
++    if (slot < 0 || s_d3d.off_rt[slot].w != width || s_d3d.off_rt[slot].h != height ||
++        s_d3d.off_rt[slot].dxgi != DXGI_FORMAT_R8G8B8A8_UNORM) return -1;
++    s_d3d.scanout_slot = slot; s_d3d.explicit_scanout = 1;
++    s_d3d.last_present_succeeded = 0;
++    const int saved_present = s_present_this_frame;
++    s_present_this_frame = 1; render_frame(); s_present_this_frame = saved_present;
++    s_d3d.explicit_scanout = 0;
++    wait_for_gpu();
++    if (imported_pixels) {
++        /* CPU-only display memory remains authoritative between flips. */
++        OffRT* source = &s_d3d.off_rt[slot];
++        source->res->lpVtbl->Release(source->res); source->res = NULL;
++        if (source->up) { source->up->lpVtbl->Release(source->up); source->up = NULL; }
++    }
++    return s_d3d.last_present_succeeded;
++}
  
  /* ---------------------------------------------------------------------------
   * Public API
-@@ -7858,6 +8052,7 @@
+@@ -7858,6 +8140,7 @@
  int rsx_d3d12_backend_init(u32 width, u32 height, const char* title)
  {
      memset(&s_d3d, 0, sizeof(s_d3d));
@@ -6717,15 +7158,16 @@
      s_d3d.width = width;
      s_d3d.height = height;
      s_d3d.clear_color[0] = 0.0f;
-@@ -7903,6 +8098,7 @@
+@@ -7903,6 +8186,8 @@
      s_d3d12_backend.begin_frame       = d3d12_begin_frame;
      s_d3d12_backend.end_frame         = d3d12_end_frame;
      s_d3d12_backend.present           = d3d12_present;
 +    s_d3d12_backend.submit            = d3d12_submit;
++    s_d3d12_backend.scanout           = d3d12_scanout;
      s_d3d12_backend.clear             = d3d12_clear;
      s_d3d12_backend.set_render_target = d3d12_set_render_target;
      s_d3d12_backend.set_viewport      = d3d12_set_viewport;
-@@ -7913,6 +8109,7 @@
+@@ -7913,6 +8198,7 @@
      s_d3d12_backend.draw_arrays       = d3d12_draw_arrays;
      s_d3d12_backend.draw_indexed      = d3d12_draw_indexed;
      s_d3d12_backend.bind_texture      = d3d12_bind_texture;
@@ -6733,7 +7175,7 @@
  
      rsx_set_backend(&s_d3d12_backend);
  
-@@ -7930,6 +8127,9 @@
+@@ -7930,6 +8216,9 @@
      wait_for_gpu();
  
      /* Release D3D12 resources */
@@ -6743,7 +7185,7 @@
      if (s_d3d.vertex_buffer) {
          s_d3d.vertex_buffer->lpVtbl->Unmap(s_d3d.vertex_buffer, 0, NULL);
          s_d3d.vertex_buffer->lpVtbl->Release(s_d3d.vertex_buffer);
-@@ -7997,7 +8197,7 @@
+@@ -7997,7 +8286,7 @@
       * empty present is a flip/drain race and wipes the screen for a frame
       * (wave: black flashes and layout flicker between frames). */
      static int s_seen_content = 0;
@@ -7328,9 +7770,11 @@
       * but never returns). Each SPU job runs on its own host thread, so a
 --- a/runtime/syscalls/sys_mutex.c
 +++ b/runtime/syscalls/sys_mutex.c
-@@ -6,9 +6,15 @@
+@@ -5,12 +5,20 @@
+ #include "sys_mutex.h"
  #include "../platform/darwin_compat.h"
  #include "sys_timer.h"   /* lv2_usec_deadline: sub-ms timed waits */
++#include "sys_ppu_thread.h"
  #include "../memory/vm.h"
 +#include "../ppu/ppu_memory.h"
  #include <string.h>
@@ -7343,8 +7787,11 @@
 +#endif
  #ifndef _WIN32
  #include <unistd.h>   /* sleep: MUTEX_WATCH=2 reporter */
++#include <sched.h>
  #endif
-@@ -19,8 +25,7 @@
+ 
+ /* ---------------------------------------------------------------------------
+@@ -19,8 +27,7 @@
  sys_mutex_info g_sys_mutexes[SYS_MUTEX_MAX];
  
  #ifdef _WIN32
@@ -7354,7 +7801,7 @@
  #else
  static pthread_mutex_t  s_mtx_table_lock = PTHREAD_MUTEX_INITIALIZER;
  #endif
-@@ -28,11 +33,7 @@
+@@ -28,11 +35,7 @@
  static void mtx_table_lock(void)
  {
  #ifdef _WIN32
@@ -7367,7 +7814,7 @@
  #else
      pthread_mutex_lock(&s_mtx_table_lock);
  #endif
-@@ -41,7 +42,7 @@
+@@ -41,7 +44,7 @@
  static void mtx_table_unlock(void)
  {
  #ifdef _WIN32
@@ -7376,7 +7823,7 @@
  #else
      pthread_mutex_unlock(&s_mtx_table_lock);
  #endif
-@@ -54,6 +55,20 @@
+@@ -54,6 +57,20 @@
              return i;
      }
      return -1;
@@ -7397,7 +7844,7 @@
  }
  
  /* Byteswap helper for writing u32 to guest memory */
-@@ -64,7 +79,11 @@
+@@ -64,7 +81,11 @@
      val = ((val >> 24) & 0xFF) | ((val >> 8) & 0xFF00) |
            ((val <<  8) & 0xFF0000) | ((val << 24) & 0xFF000000u);
  #endif
@@ -7409,7 +7856,7 @@
  }
  
  /* ---------------------------------------------------------------------------
-@@ -78,6 +97,23 @@
+@@ -78,6 +99,23 @@
      uint32_t id_out_addr = LV2_ARG_PTR(ctx, 0);
      uint32_t attr_addr   = LV2_ARG_PTR(ctx, 1);
  
@@ -7433,7 +7880,7 @@
      mtx_table_lock();
  
      int slot = mtx_find_free();
-@@ -88,7 +124,6 @@
+@@ -88,7 +126,6 @@
  
      sys_mutex_info* m = &g_sys_mutexes[slot];
      memset(m, 0, sizeof(*m));
@@ -7441,7 +7888,7 @@
  
      /* Read attributes from guest memory */
      if (attr_addr != 0) {
-@@ -121,6 +156,11 @@
+@@ -121,6 +158,11 @@
  #ifdef _WIN32
      InitializeCriticalSection(&m->cs);
      m->wait_handle = CreateEventA(NULL, FALSE, TRUE, NULL);
@@ -7453,7 +7900,7 @@
  #else
      {
          pthread_mutexattr_t mattr;
-@@ -130,13 +170,18 @@
+@@ -130,13 +172,18 @@
          } else {
              pthread_mutexattr_settype(&mattr, PTHREAD_MUTEX_ERRORCHECK);
          }
@@ -7473,7 +7920,7 @@
      if (id_out_addr != 0) {
          write_be32(id_out_addr, mutex_id);
      }
-@@ -163,6 +208,11 @@
+@@ -163,6 +210,11 @@
      if (!m->active) {
          mtx_table_unlock();
          return (int64_t)(int32_t)CELL_ESRCH;
@@ -7485,11 +7932,56 @@
      }
  
      /* lv2 refuses to destroy a mutex that is held or has waiters (EBUSY).
-@@ -252,8 +302,60 @@
+@@ -252,8 +304,135 @@
  }
  #endif
  
 +#ifdef PS3_NATIVE_STRICT
++struct sys_mutex_waiter {
++    struct sys_mutex_waiter* next;
++    uint64_t tid;
++};
++#ifdef _WIN32
++static CONDITION_VARIABLE s_mtx_changed = CONDITION_VARIABLE_INIT;
++static void strict_mutex_wake(void) { WakeAllConditionVariable(&s_mtx_changed); }
++#else
++static pthread_cond_t s_mtx_changed = PTHREAD_COND_INITIALIZER;
++static void strict_mutex_wake(void) { pthread_cond_broadcast(&s_mtx_changed); }
++#endif
++
++static struct sys_mutex_waiter* strict_mutex_first(sys_mutex_info* m)
++{
++    struct sys_mutex_waiter* best = m->pending;
++    if (m->protocol == SYS_SYNC_FIFO) return best;
++    int32_t best_priority = INT32_MAX;
++    for (struct sys_mutex_waiter* w = m->pending; w; w = w->next) {
++        int32_t priority;
++        if (!ppu_thread_priority(w->tid, &priority)) {
++            fprintf(stderr, "[native-blocked] mutex waiter has no guest priority\n");
++            fflush(stderr); ps3_native_stop();
++        }
++        if (priority < best_priority) { best = w; best_priority = priority; }
++    }
++    return best;
++}
++
++int32_t sys_mutex_condition_release(ppu_context* ctx, uint32_t id, int* depth)
++{
++    if (!id || id > SYS_MUTEX_MAX) return (int32_t)CELL_ESRCH;
++    mtx_table_lock();
++    sys_mutex_info* m = &g_sys_mutexes[id - 1];
++    int32_t result = CELL_OK;
++    if (!m->active) result = (int32_t)CELL_ESRCH;
++    else if (!m->lock_count || m->owner_tid != ctx->thread_id) result = (int32_t)CELL_EPERM;
++    else {
++        *depth = m->lock_count;
++        m->lock_count = 0; m->owner_tid = 0;
++        strict_mutex_wake();
++    }
++    mtx_table_unlock();
++    return result;
++}
++
 +static int64_t strict_mutex_acquire(ppu_context* ctx, int try_only)
 +{
 +    uint32_t id = LV2_ARG_U32(ctx, 0);
@@ -7503,31 +7995,61 @@
 +        fprintf(stderr, "[native-blocked] LV2 mutex caller has no thread identity\n");
 +        fflush(stderr); ps3_native_stop();
 +    }
-+    else if (m->lock_count && m->owner_tid != ctx->thread_id) {
-+        if (!try_only) {
-+            mtx_table_unlock();
-+            /* shortcut: host mutexes cannot enforce guest waiter order; add the
-+             * guest FIFO/priority queue before allowing contended blocking. */
-+            fprintf(stderr, "[native-blocked] contended LV2 mutex requires guest waiter ordering\n");
-+            fflush(stderr); ps3_native_stop();
-+        }
-+        result = (int64_t)(int32_t)CELL_EBUSY;
-+    }
-+    else if (m->lock_count && !m->recursive) result = (int64_t)(int32_t)CELL_EDEADLK;
++    else if (m->lock_count && m->owner_tid == ctx->thread_id && !m->recursive)
++        result = (int64_t)(int32_t)CELL_EDEADLK;
 +    else {
++        if ((m->lock_count && m->owner_tid != ctx->thread_id) || (!m->lock_count && m->pending)) {
++            if (try_only) { mtx_table_unlock(); return (int64_t)(int32_t)CELL_EBUSY; }
++            if (m->protocol == SYS_SYNC_PRIORITY_INHERIT) {
++                mtx_table_unlock();
++                fprintf(stderr, "[native-blocked] contended mutex priority inheritance requires implementation\n");
++                fflush(stderr); ps3_native_stop();
++            }
++            struct sys_mutex_waiter waiter = {NULL, ctx->thread_id};
++            struct sys_mutex_waiter** tail = &m->pending;
++            while (*tail) tail = &(*tail)->next;
++            *tail = &waiter;
++            __atomic_add_fetch(&m->waiters, 1, __ATOMIC_SEQ_CST);
++            ppu_thread_note_block(ctx->thread_id);
++            uint64_t timeout = LV2_ARG_U64(ctx, 1);
++            if (timeout > ((1ull << 48) - 1)) timeout = (1ull << 48) - 1;
++            const uint64_t start = ppu_timebase_now();
++            const uint64_t ticks = (timeout / 1000000) * PS3_TIMEBASE_FREQ +
++                ((timeout % 1000000) * PS3_TIMEBASE_FREQ + 999999) / 1000000;
++            while (m->lock_count || strict_mutex_first(m) != &waiter) {
++                const uint64_t elapsed = ppu_timebase_now() - start;
++                if (timeout && elapsed >= ticks) { result = (int64_t)(int32_t)CELL_ETIMEDOUT; break; }
++#ifdef _WIN32
++                if (timeout) {
++                    const uint64_t left = ticks - elapsed;
++                    if (left < PS3_TIMEBASE_FREQ / 1000) {
++                        mtx_table_unlock(); SwitchToThread(); mtx_table_lock();
++                    } else {
++                        uint64_t ms = (left / PS3_TIMEBASE_FREQ) * 1000 +
++                            ((left % PS3_TIMEBASE_FREQ) * 1000 + PS3_TIMEBASE_FREQ - 1) / PS3_TIMEBASE_FREQ;
++                        if (ms >= INFINITE) ms = INFINITE - 1;
++                        SleepConditionVariableSRW(&s_mtx_changed, &s_mtx_table_lock, (DWORD)ms, 0);
++                    }
++                } else SleepConditionVariableSRW(&s_mtx_changed, &s_mtx_table_lock, INFINITE, 0);
++#else
++                if (timeout) {
++                    mtx_table_unlock();
++                    if (ticks - elapsed < PS3_TIMEBASE_FREQ / 1000) sched_yield();
++                    else { const struct timespec slice = {0, 1000000}; nanosleep(&slice, NULL); }
++                    mtx_table_lock();
++                } else pthread_cond_wait(&s_mtx_changed, &s_mtx_table_lock);
++#endif
++            }
++            struct sys_mutex_waiter** link = &m->pending;
++            while (*link != &waiter) link = &(*link)->next;
++            *link = waiter.next;
++            __atomic_sub_fetch(&m->waiters, 1, __ATOMIC_SEQ_CST);
++            strict_mutex_wake();
++            if (result) { mtx_table_unlock(); return result; }
++        }
 +        if (m->lock_count == INT32_MAX) {
 +            mtx_table_unlock();
 +            fprintf(stderr, "[native-blocked] LV2 mutex recursion exceeds host counter\n");
-+            fflush(stderr); ps3_native_stop();
-+        }
-+#ifdef _WIN32
-+        int acquired = TryEnterCriticalSection(&m->cs);
-+#else
-+        int acquired = pthread_mutex_trylock(&m->mtx) == 0;
-+#endif
-+        if (!acquired) {
-+            mtx_table_unlock();
-+            fprintf(stderr, "[native-blocked] LV2 mutex host ownership disagrees with guest state\n");
 +            fflush(stderr); ps3_native_stop();
 +        }
 +        m->owner_tid = ctx->thread_id;
@@ -7546,7 +8068,7 @@
      uint32_t mutex_id    = LV2_ARG_U32(ctx, 0);
      uint64_t timeout_us  = LV2_ARG_U64(ctx, 1);
      /* lv2_usec_deadline multiplies by the QPC frequency in 64 bits, which wraps
-@@ -357,6 +459,9 @@
+@@ -357,6 +536,9 @@
   * -----------------------------------------------------------------------*/
  int64_t sys_mutex_trylock(ppu_context* ctx)
  {
@@ -7556,7 +8078,7 @@
      uint32_t mutex_id = LV2_ARG_U32(ctx, 0);
  
      if (mutex_id == 0 || mutex_id > SYS_MUTEX_MAX)
-@@ -426,6 +531,26 @@
+@@ -426,6 +608,21 @@
   * -----------------------------------------------------------------------*/
  int64_t sys_mutex_unlock(ppu_context* ctx)
  {
@@ -7570,12 +8092,7 @@
 +    else if (!locked->lock_count || locked->owner_tid != ctx->thread_id)
 +        result = (int64_t)(int32_t)CELL_EPERM;
 +    else {
-+        if (!--locked->lock_count) locked->owner_tid = 0;
-+#ifdef _WIN32
-+        LeaveCriticalSection(&locked->cs);
-+#else
-+        pthread_mutex_unlock(&locked->mtx);
-+#endif
++        if (!--locked->lock_count) { locked->owner_tid = 0; strict_mutex_wake(); }
 +    }
 +    mtx_table_unlock();
 +    return result;
@@ -7583,7 +8100,7 @@
      uint32_t mutex_id = LV2_ARG_U32(ctx, 0);
  
      if (mutex_id == 0 || mutex_id > SYS_MUTEX_MAX)
-@@ -465,14 +590,7 @@
+@@ -465,14 +662,7 @@
   * -----------------------------------------------------------------------*/
  void sys_mutex_init(lv2_syscall_table* tbl)
  {
@@ -7938,21 +8455,79 @@
      cond_unlock(c);
      table_unlock();
      return result;
+@@ -167,17 +189,25 @@
+     if (!c) return (int32_t)CELL_ESRCH;
+     sys_mutex_info* m = &g_sys_mutexes[c->mutex_id - 1];
+     if (!m->active) { cond_unlock(c); return (int32_t)CELL_ESRCH; }
++#ifndef PS3_NATIVE_STRICT
+     if (m->owner_tid != ctx->thread_id || m->lock_count <= 0) {
+         cond_unlock(c); return (int32_t)CELL_EPERM;
+     }
++#endif
+     struct sys_cond_waiter waiter = {NULL, 0};
+     struct sys_cond_waiter** tail = &c->waiters;
+     while (*tail) tail = &(*tail)->next;
+     *tail = &waiter;
++#ifdef PS3_NATIVE_STRICT
++    int depth = 0;
++    int32_t released = sys_mutex_condition_release(ctx, c->mutex_id, &depth);
++    if (released) { *tail = NULL; cond_unlock(c); return released; }
++#else
+     int depth = m->lock_count;
+     m->owner_tid = 0;
+     m->lock_count = 0;
+     for (int i = 0; i < depth; ++i) guest_unlock(m);
++#endif
+ 
+     int32_t result = CELL_OK;
+ #ifdef _WIN32
+@@ -219,13 +249,29 @@
+     struct sys_cond_waiter** link = &c->waiters;
+     while (*link != &waiter) link = &(*link)->next;
+     *link = waiter.next;
++#ifdef PS3_NATIVE_STRICT
++    const uint32_t retained_mutex = c->mutex_id;
++    if (sys_mutex_condition_ref(retained_mutex, 1) != CELL_OK) ps3_native_stop();
++#endif
+     cond_unlock(c);
++#ifdef PS3_NATIVE_STRICT
++    ppu_context reacquire = *ctx;
++    reacquire.gpr[3] = retained_mutex; reacquire.gpr[4] = 0;
++    for (int i = 0; i < depth; ++i) {
++        if (sys_mutex_lock(&reacquire) != CELL_OK) {
++            fprintf(stderr, "[native-blocked] condition failed to reacquire its retained mutex\n");
++            fflush(stderr); ps3_native_stop();
++        }
++    }
++    sys_mutex_condition_ref(retained_mutex, -1);
++#else
+     /* Re-acquiring counts as waiting on the mutex (sys_mutex_destroy). */
+     __atomic_add_fetch(&m->waiters, 1, __ATOMIC_SEQ_CST);
+     for (int i = 0; i < depth; ++i) guest_lock(m);
+     __atomic_sub_fetch(&m->waiters, 1, __ATOMIC_SEQ_CST);
+     m->owner_tid = ctx->thread_id;
+     m->lock_count = depth;
++#endif
+     return result;
+ }
+ 
 --- a/runtime/syscalls/sys_mutex.h
 +++ b/runtime/syscalls/sys_mutex.h
-@@ -63,6 +63,7 @@
+@@ -63,6 +63,8 @@
      uint64_t owner_tid;   /* thread_id of current owner (for recursive/error checking) */
      int      lock_count;  /* recursive lock count */
      volatile int waiters; /* threads blocked acquiring it (sys_mutex_lock, cond re-lock) */
 +    unsigned cond_count; /* live conditions retain the mutex descriptor */
++    struct sys_mutex_waiter* pending;
  
  #ifdef _WIN32
      CRITICAL_SECTION cs;
-@@ -74,6 +75,7 @@
+@@ -74,6 +76,8 @@
  } sys_mutex_info;
  
  extern sys_mutex_info g_sys_mutexes[SYS_MUTEX_MAX];
 +int32_t sys_mutex_condition_ref(uint32_t id, int delta);
++int32_t sys_mutex_condition_release(ppu_context* ctx, uint32_t id, int* depth);
  
  /* Syscall handlers */
  int64_t sys_mutex_create(ppu_context* ctx);
@@ -8726,7 +9301,7 @@
  
  /* Push one RSX event, filtered by the handler mask gcm publishes at +0x12C0,
   * exactly as rsx::thread::send_event does. Sending an unmasked event is not
-@@ -196,7 +230,16 @@
+@@ -196,7 +230,56 @@
      uint32_t mask = vm_read32(RSX_DRIVER_INFO_EA + RSX_DI_HANDLERS);
      flags &= (uint64_t)mask;
      if (!flags) return;
@@ -8740,10 +9315,50 @@
 +#else
      sys_event_queue_push_by_id(s_isr_qid, 0, 0, flags, 0);
 +#endif
++}
++
++int rsx_display_queue(u32 head, u32 buffer)
++{
++    if (!__atomic_load_n(&s_context_ready, __ATOMIC_ACQUIRE) || head != 1 || buffer >= 8) return 0;
++    device_lock();
++    const u32 flags = RSX_DRIVER_INFO_EA + RSX_DI_HEAD_BASE + head * RSX_DI_HEAD_STRIDE + RSX_DI_HEAD_FLIPFLAGS;
++    vm_write32(flags, vm_read32(flags) | 0x40000000u | (1u << buffer));
++    device_unlock();
++    rsx_send_event(SYS_RSX_EVENT_QUEUE_BASE << head);
++    return 1;
++}
++
++void rsx_video_vblank(u64 timebase)
++{
++    if (!__atomic_load_n(&s_context_ready, __ATOMIC_ACQUIRE)) return;
++    device_lock();
++    /* Original primary getters select head 1 and convert raw timebase values. */
++    const u32 head = RSX_DRIVER_INFO_EA + RSX_DI_HEAD_BASE + RSX_DI_HEAD_STRIDE;
++    vm_write32(head + 0x1C, (u32)timebase);
++    vm_write32(head + 0x3C, (u32)(timebase >> 32));
++    vm_write64(head + 0x20, timebase);
++    vm_write64(head + 0x30, vm_read64(head + 0x30) + 1);
++    device_unlock();
++    rsx_send_event(SYS_RSX_EVENT_VBLANK);
++}
++
++int rsx_display_completed(u32 head, u32 buffer, u64 timebase)
++{
++    extern void ppu_write_coherent(u32, const void*, u32);
++    if (!__atomic_load_n(&s_context_ready, __ATOMIC_ACQUIRE) || head != 1 || buffer >= 8) return 0;
++    device_lock();
++    const u32 info = RSX_DRIVER_INFO_EA + RSX_DI_HEAD_BASE + head * RSX_DI_HEAD_STRIDE;
++    vm_write64(info, timebase);
++    vm_write32(info + 0x10, buffer);
++    const u8 cleared[16] = {0}; ppu_write_coherent(RSX_REPORTS_EA + 0x10, cleared, sizeof cleared);
++    vm_write32(info + 8, vm_read32(info + 8) | 0x80000000u);
++    device_unlock();
++    rsx_send_event(SYS_RSX_EVENT_FLIP_BASE << head);
++    return 1;
  }
  
  /* The RSX raises this when the FIFO executes GCM_SET_USER_COMMAND (method
-@@ -252,6 +295,34 @@
+@@ -252,6 +335,34 @@
   * take it from there rather than inventing a second one. */
  static int64_t sc_rsx_memory_allocate(ppu_context* ctx)
  {
@@ -8778,7 +9393,7 @@
      u32 h_ea    = (u32)ctx->gpr[3];
      u32 addr_ea = (u32)ctx->gpr[4];
      u32 size    = (u32)ctx->gpr[5];
-@@ -267,6 +338,7 @@
+@@ -267,6 +378,7 @@
                          "local=0x%08X handle=0x%08X\n",
                  size, (u32)ctx->gpr[6], local, RSX_MEM_HANDLE);
      return CELL_OK;
@@ -8786,7 +9401,7 @@
  }
  
  static int64_t sc_rsx_memory_free(ppu_context* ctx) { (void)ctx; return CELL_OK; }
-@@ -276,6 +348,68 @@
+@@ -276,6 +388,68 @@
   *                               u64 mem_handle, u64 system_mode) */
  static int64_t sc_rsx_context_allocate(ppu_context* ctx)
  {
@@ -8855,7 +9470,7 @@
      u32 id_ea  = (u32)ctx->gpr[3];
      u32 dma_ea = (u32)ctx->gpr[4];
      u32 di_ea  = (u32)ctx->gpr[5];
-@@ -306,6 +440,7 @@
+@@ -306,6 +480,7 @@
              RSX_DRIVER_INFO_EA, RSX_REPORTS_EA,
              (unsigned long long)ctx->gpr[8]);
      return CELL_OK;
@@ -8863,7 +9478,7 @@
  }
  
  static int64_t sc_rsx_context_free(ppu_context* ctx) { (void)ctx; return CELL_OK; }
-@@ -315,11 +450,26 @@
+@@ -315,11 +490,26 @@
   * r30=r28=ea, r29=io, r31=size and passes r4=r29(io), r5=r28(ea), r6=r31. */
  static int64_t sc_rsx_context_iomap(ppu_context* ctx)
  {
@@ -8890,7 +9505,7 @@
      if (rsx_dbg())
          fprintf(stderr, "[sys_rsx] iomap io=0x%08X <- ea=0x%08X size=0x%X\n",
                  io, ea, size);
-@@ -336,15 +486,70 @@
+@@ -336,15 +526,70 @@
  /* 674: sys_rsx_context_attribute(u32 ctx, u32 packet_id, u64 a3..a6) */
  static int64_t sc_rsx_context_attribute(ppu_context* ctx)
  {
@@ -8964,7 +9579,7 @@
          return CELL_OK;
  
      case 0x104: {                     /* display buffer set */
-@@ -382,6 +587,24 @@
+@@ -382,6 +627,24 @@
   * unmap) and copes with a failure, so report only the device we have. */
  static int64_t sc_rsx_device_map(ppu_context* ctx)
  {
@@ -8989,7 +9604,7 @@
      u32 a_ea = (u32)ctx->gpr[3], b_ea = (u32)ctx->gpr[4];
      uint64_t dev = ctx->gpr[5];
  
-@@ -396,10 +619,32 @@
+@@ -396,10 +659,32 @@
      if (rsx_dbg())
          fprintf(stderr, "[sys_rsx] device_map(dev=8) -> 0x%08X\n", RSX_DEVICE_EA);
      return CELL_OK;

@@ -8,6 +8,10 @@
 #include "spu_coherency.h"
 #include "spu_lifted_thread.h"
 #include "spu_overlay_residency.h"
+#define PPU_CONTEXT_H // ppu_recomp.h already supplies the generated context ABI.
+#include "sys_mutex.h"
+#include "sys_ppu_thread.h"
+#include "sys_cond.h"
 extern "C" {
 #include "thread/spu_recomp.h"
 }
@@ -54,6 +58,10 @@ void ppu_fs_register(void);
 void ps3_load_prx_modules(void);
 extern ps3_guest_caller_fn g_ps3_guest_caller;
 void cellGcmTickVBlank(void);
+int cellGcmVideoNext(u64, u64*);
+void cellGcmVideoTick(u64);
+u64 ppu_timebase_now(void);
+u32 cellGcm_original_frames_presented(void);
 void ppu_gcm_pump(void);
 int cellGcmOffsetIsDisplay(u32);
 extern PPU_THREAD_LOCAL ppu_context* g_active_ctx;
@@ -101,11 +109,38 @@ static bool synthetic_report_early;
 static unsigned synthetic_submits;
 static u32 synthetic_semaphore_target;
 static bool synthetic_semaphore_early;
+static u32 synthetic_scanout_reports, synthetic_scanout_driver;
+static unsigned synthetic_scanout_calls;
+static int synthetic_scanout_result;
+static bool synthetic_scanout_early;
+static bool synthetic_queue_delay;
+static u64 synthetic_queue_completed;
+static u32 synthetic_reference_control;
+static unsigned synthetic_reference_checks;
+static bool synthetic_reference_early;
+static int synthetic_scanout(void*, u32 offset, u32 pitch, u32 width, u32 height) {
+    ++synthetic_scanout_calls;
+    if (offset != 0x10000 || pitch != 256 || width != 64 || height != 64 ||
+        vm_read32(synthetic_scanout_reports + 0x10) != UINT32_MAX ||
+        (vm_read32(synthetic_scanout_driver + 0x1100) & 0x80000000u) || cellGcm_original_frames_presented())
+        synthetic_scanout_early = true;
+    return synthetic_scanout_result;
+}
 static int synthetic_submit(void*) {
     ++synthetic_submits;
+    if (synthetic_reference_control) {
+        const u32 previous[2] = {0xA5A5A5A5, 0x12345678};
+        if (synthetic_reference_checks >= 2 || vm_read32(synthetic_reference_control + 8) != previous[synthetic_reference_checks])
+            synthetic_reference_early = true;
+        ++synthetic_reference_checks;
+    }
     if (synthetic_semaphore_target && vm_read32(synthetic_semaphore_target) != 0xA5A5A5A5)
         synthetic_semaphore_early = true;
     if (cellGcm_take_flip_pending()) synthetic_report_early = true;
+    if (synthetic_queue_delay) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(20));
+        synthetic_queue_completed = ppu_timebase_now(); synthetic_queue_delay = false;
+    }
     return 1; // Explicit CPU-only completion fixture.
 }
 static int synthetic_report(void*, u32 method, u32, u64* timestamp, u32* value) {
@@ -168,6 +203,88 @@ static void call(ppu_context& ctx, const char* name, uint64_t a0) {
     ps3_hle_call(ps3_compute_nid(name), &ctx);
 }
 int main(int argc, char** argv) {
+    if (argc == 2 && !strncmp(argv[1], "mutex_queue", 11)) {
+        if (vm_init() || vm_commit(0x30000, 0x10000)) return 1;
+        g_ppu_main_stack_addr = 0x30000; g_ppu_main_stack_size = 0x10000;
+        lv2_init_syscalls();
+        ppu_context owner{}; owner.thread_id = 1;
+        auto mutex_call = [](ppu_context& c, u32 number, u32 id, u64 value = 0) {
+            c.gpr[11] = number; c.gpr[3] = id; c.gpr[4] = value;
+            lv2_syscall(&c); return (u32)c.gpr[3];
+        };
+        const bool priority = !strcmp(argv[1], "mutex_queue_priority");
+        const bool inherit = !strcmp(argv[1], "mutex_queue_inherit");
+        vm_write32(0x31010, inherit ? 3 : priority ? 2 : 1);
+        vm_write32(0x31014, 0x10); vm_write32(0x31018, 0x200); vm_write32(0x3101C, 0x2000);
+        if (mutex_call(owner, 100, 0x31000, 0x31010)) return 2;
+        const u32 id = vm_read32(0x31000);
+        if (mutex_call(owner, 102, id) || mutex_call(owner, 102, id)) return 3;
+        // These are fixture-owned guest identities; no host scheduling determines their order.
+        for (unsigned i = 0; i < 4; ++i) {
+            g_ppu_threads[i].state = PPU_THREAD_STATE_RUNNING;
+            g_ppu_threads[i].ctx.thread_id = i + 1;
+            g_ppu_threads[i].priority = i == 2 ? 100 : 1000;
+        }
+        ppu_context timed{}; timed.thread_id = 4;
+        const auto before = std::chrono::steady_clock::now();
+        if (!inherit && (mutex_call(timed, 102, id, 30) != (u32)CELL_ETIMEDOUT ||
+            std::chrono::steady_clock::now() - before < std::chrono::microseconds(30) ||
+            __atomic_load_n(&g_sys_mutexes[id - 1].waiters, __ATOMIC_SEQ_CST))) return 4;
+        std::atomic<unsigned> order{0}; unsigned observed[3]{};
+        std::thread waiters[3];
+        for (unsigned i = 0; i < 3; ++i) {
+            waiters[i] = std::thread([&, i] {
+                ppu_context c{}; c.thread_id = i + 2;
+                if (mutex_call(c, 102, id)) std::abort();
+                observed[order.fetch_add(1)] = i;
+                if (mutex_call(c, 104, id)) std::abort();
+            });
+            const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(2);
+            while (__atomic_load_n(&g_sys_mutexes[id - 1].waiters, __ATOMIC_SEQ_CST) != (int)i + 1) {
+                if (std::chrono::steady_clock::now() > deadline) std::abort();
+                std::this_thread::yield();
+            }
+        }
+        if (mutex_call(owner, 101, id) != (u32)CELL_EBUSY || mutex_call(owner, 104, id) || order.load()) std::abort();
+        if (mutex_call(owner, 104, id)) std::abort();
+        for (auto& w : waiters) w.join();
+        if (order != 3 || observed[0] != (priority ? 1u : 0u) ||
+            observed[1] != (priority ? 0u : 1u) || observed[2] != 2) return 5;
+        vm_write32(0x31060, 0x200);
+        owner.gpr[11] = 105; owner.gpr[3] = 0x31050; owner.gpr[4] = id; owner.gpr[5] = 0x31060;
+        lv2_syscall(&owner);
+        if (owner.gpr[3] || mutex_call(owner, 102, id) || mutex_call(owner, 102, id)) return 6;
+        const u32 condition = vm_read32(0x31050);
+        std::thread signal([&] {
+            ppu_context c{}; c.thread_id = 2;
+            if (mutex_call(c, 102, id)) std::abort();
+            c.gpr[3] = condition;
+            if (sys_cond_signal(&c) || mutex_call(c, 104, id)) std::abort();
+        });
+        owner.gpr[3] = condition; owner.gpr[4] = 1000000;
+        const auto signalled_result = sys_cond_wait(&owner);
+        signal.join();
+        if (signalled_result || g_sys_mutexes[id - 1].lock_count != 2 || g_sys_mutexes[id - 1].owner_tid != 1) return 7;
+        owner.gpr[3] = condition; owner.gpr[4] = 30;
+        if ((u32)sys_cond_wait(&owner) != (u32)CELL_ETIMEDOUT || g_sys_mutexes[id - 1].lock_count != 2) return 8;
+        owner.gpr[11] = 106; owner.gpr[3] = condition; lv2_syscall(&owner);
+        if (owner.gpr[3] || mutex_call(owner, 104, id) || mutex_call(owner, 104, id) || mutex_call(owner, 101, id)) return 9;
+        puts("Verified guest mutex FIFO/priority ordering, recursive release, timed cancellation and retained lifetime");
+        vm_shutdown(); return 0;
+    }
+    if (argc == 2 && !strncmp(argv[1], "video_clock", 11)) {
+        u64 edge = UINT64_MAX;
+        const u64 epoch = 50000000, period = 1331330, end = epoch + period * 60000u;
+        if (!strcmp(argv[1], "video_clock_edge")) { cellGcmVideoTick(epoch); return 5; }
+        if (cellGcmVideoNext(epoch, &edge) || edge != UINT64_MAX ||
+            cellGcmVideoNext(epoch + period - 1, &edge) || !cellGcmVideoNext(epoch + period, &edge) ||
+            edge != epoch + period || cellGcmVideoNext(edge, &edge)) return 1;
+        if (!strcmp(argv[1], "video_clock_reverse")) { cellGcmVideoNext(edge - 1, &edge); return 2; }
+        for (u64 i = 2; i <= 60000; ++i)
+            if (!cellGcmVideoNext(end, &edge) || edge != epoch + i * period) return 3;
+        if (edge != end || cellGcmVideoNext(edge, &edge)) return 4;
+        puts("Verified RSX 60000/1001 video phase, sub-millisecond edges and lossless catch-up"); return 0;
+    }
     if (argc == 2 && (!strcmp(argv[1], "process_sfo") || !strcmp(argv[1], "strncmp_invalid"))) {
         if (vm_init() || vm_commit(0x30000, 0x10000)) return 1;
         g_ppu_main_stack_addr = 0x30000; g_ppu_main_stack_size = 0x10000;
@@ -222,6 +339,8 @@ int main(int argc, char** argv) {
         vm_write32((u32)local + 0x1FFFFC, 0xCAFEBABE);
         if (!strncmp(argv[1], "rsx_context", 11)) {
             const u32 handle = vm_read32(0x31000);
+            g_ps3_guest_caller = callback;
+            cellGcmSetVBlankHandler((CellGcmVBlankHandler)(uintptr_t)0x37000);
             memory.gpr[11] = 675; memory.gpr[3] = 0x31140; memory.gpr[4] = 0; memory.gpr[5] = 8;
             lv2_syscall(&memory);
             if (memory.gpr[3] || vm_read64(0x31140) != VM_RSX_DEVICE_BASE || vm_read32(VM_RSX_DEVICE_BASE + 0x30)) return 32;
@@ -356,6 +475,79 @@ int main(int argc, char** argv) {
             vm_write32(reports + 0x30, 2); cellGcm_rsx_process_fifo();
             if (vm_read32(VM_RSX_CONTEXT_BASE + 0x44) != 0x1040 || vm_read32(reports + 0x40) != 3 ||
                 vm_read32(VM_RSX_DEVICE_BASE + 0x40) || attribute(id, 1, 0, 0)) return 36;
+            vm_write32(mapped + 0x1000, 0x40050); vm_write32(mapped + 0x1004, 0x12345678);
+            vm_write32(mapped + 0x1008, 0x40050); vm_write32(mapped + 0x100C, 0x87654321);
+            if (attribute(id, 1, 0x1000, 0x1010)) return 51;
+            synthetic_reference_control = VM_RSX_CONTEXT_BASE + 0x40;
+            vm_write32(synthetic_reference_control + 8, 0xA5A5A5A5);
+            if (!strcmp(argv[1], "rsx_context_reference_backend")) semaphore_backend.submit = nullptr;
+            cellGcm_rsx_process_fifo(); cellGcm_rsx_process_fifo();
+            if (synthetic_reference_early || synthetic_reference_checks != 2 ||
+                vm_read32(synthetic_reference_control + 4) != 0x1010 || vm_read32(synthetic_reference_control + 8) != 0x87654321) return 52;
+            synthetic_reference_control = 0;
+            if (attribute(id, 1, 0, 0)) return 53;
+            if (!strcmp(argv[1], "rsx_context_device_release")) {
+                const u32 bad_release[] = {0x40060, 0x56616661, 0x40064, 0x30, 0x4006C, 0};
+                for (u32 i = 0; i < 6; ++i) vm_write32(mapped + 0x1000 + i * 4, bad_release[i]);
+                attribute(id, 1, 0x1000, 0x1018); cellGcm_rsx_process_fifo(); return 37;
+            }
+            if (!strcmp(argv[1], "rsx_context_main_surface")) {
+                vm_write32(mapped + 0x1000, 0x40194); vm_write32(mapped + 0x1004, 0xFEED0001);
+                attribute(id, 1, 0x1000, 0x1008); cellGcm_rsx_process_fifo(); return 50;
+            }
+            if (attribute(id, 0x104, 1, (64ull << 32) | 64, (256ull << 32) | 0x10000)) return 38;
+            const u32 original_flip[] = {0x4E944, 1, 0x40060, 0x56616661, 0x40064, 0x30, 0x4006C, 0,
+                0x40064, 0x30, 0x40068, 1, 2, 0x40064, 0x10, 0x4006C, UINT32_MAX, 0x4E924, 0x8000010F};
+            for (u32 i = 0; i < 19; ++i) vm_write32(mapped + 0x1000 + i * 4, original_flip[i]);
+            vm_write32(mapped, 0x40060); vm_write32(mapped + 4, 0x66616661);
+            vm_write32(mapped + 8, 0x40194); vm_write32(mapped + 12, 0xFEED0000); vm_write32(mapped + 16, 0x20000);
+            vm_write32(driver + 0x12C0, 0x52);
+            for (u32 i = 0; i < 16; i += 4) vm_write32(reports + 0x10 + i, 0xA5A5A5A5);
+            semaphore_backend.scanout = synthetic_scanout;
+            synthetic_scanout_reports = reports; synthetic_scanout_driver = driver;
+            u64 edge = 0;
+            const u64 epoch = ppu_timebase_now(), period = 1331330;
+            if (cellGcmVideoNext(epoch, &edge) || attribute(id, 1, 0x1000, 0x104C)) return 39;
+            const unsigned before_queue = synthetic_submits;
+            synthetic_queue_delay = true;
+            if (!strcmp(argv[1], "rsx_context_queue_backend")) semaphore_backend.submit = nullptr;
+            cellGcm_rsx_process_fifo();
+            const u64 queue_finished = ppu_timebase_now();
+            if (synthetic_submits != before_queue + 1 || vm_read32(VM_RSX_CONTEXT_BASE + 0x44) != 0x1028 ||
+                vm_read32(VM_RSX_DEVICE_BASE + 0x30) || vm_read32(reports + 0x10) != 0xA5A5A5A5 ||
+                vm_read32(driver + 0x1100) != 0x40000002 || synthetic_scanout_calls) return 40;
+            auto receive = [&](u64 flags) {
+                memory.gpr[11] = 130; memory.gpr[3] = queue; memory.gpr[4] = 0x31200; memory.gpr[5] = 1000;
+                lv2_syscall(&memory); return !memory.gpr[3] && memory.gpr[6] == flags;
+            };
+            if (!receive(0x40) || cellGcmVideoNext(epoch + period - 1, &edge)) return 41;
+            cellGcm_rsx_process_fifo();
+            if (vm_read32(VM_RSX_DEVICE_BASE + 0x30)) return 42;
+            if (!strcmp(argv[1], "rsx_context_queue_metadata")) attribute(id, 0x104, 1, (64ull << 32) | 64, (256ull << 32) | 0x10000);
+            u64 ticks = 0;
+            while (cellGcmVideoNext(ppu_timebase_now() + period, &edge)) {
+                cellGcmVideoTick(edge); ++ticks;
+                if (!receive(2) || (edge <= synthetic_queue_completed && vm_read32(VM_RSX_DEVICE_BASE + 0x30))) return 48;
+                if (vm_read32(VM_RSX_DEVICE_BASE + 0x30)) break;
+                if (ticks > 240) return 49;
+            }
+            if (edge <= synthetic_queue_completed || edge > queue_finished + period ||
+                vm_read64(driver + 0x1118) != edge || vm_read64(driver + 0x1128) != ticks ||
+                vm_read32(driver + 0x1114) != (u32)edge || vm_read32(driver + 0x1134) != (u32)(edge >> 32) ||
+                vm_read32(VM_RSX_DEVICE_BASE + 0x30) != 1) return 43;
+            ppu_gcm_pump(); if (gcm_callbacks) return 54;
+            if (!strcmp(argv[1], "rsx_context_scanout_backend")) semaphore_backend.scanout = nullptr;
+            cellGcm_rsx_process_fifo();
+            if (vm_read32(VM_RSX_CONTEXT_BASE + 0x44) != 0x1044 || synthetic_scanout_calls != 1 ||
+                vm_read32(reports + 0x10) != UINT32_MAX || (vm_read32(driver + 0x1100) & 0x80000000u) ||
+                cellGcm_original_frames_presented()) return 44;
+            synthetic_scanout_result = 1; cellGcm_rsx_process_fifo();
+            if (!receive(0x10) || synthetic_scanout_calls != 2 || synthetic_scanout_early ||
+                vm_read32(VM_RSX_CONTEXT_BASE + 0x44) != 0x104C || vm_read32(driver + 0x1108) != 1 ||
+                vm_read64(driver + 0x10F8) != edge || vm_read32(driver + 0x1100) != 0xC0000002 ||
+                cellGcm_original_frames_presented() != 1) return 45;
+            for (u32 i = 0; i < 16; i += 4) if (vm_read32(reports + 0x10 + i)) return 46;
+            if (attribute(id, 1, 0, 0)) return 47;
             rsx_set_backend(nullptr); synthetic_submits = 0;
             const u32 flip_status = driver + 0x10C0;
             if (attribute(id, 0x10A, 0, 0, 0x80000000) || vm_read32(flip_status) != 0x80000000 ||
@@ -956,9 +1148,6 @@ int main(int argc, char** argv) {
         if ((u32)other.gpr[3] != (u32)CELL_EBUSY) std::abort();
         other.gpr[11] = 104; other.gpr[3] = mutex_id; lv2_syscall(&other);
         if ((u32)other.gpr[3] != (u32)CELL_EPERM) std::abort();
-        if (argc > 1 && !strcmp(argv[1], "mutex_contended")) {
-            other.gpr[11] = 102; other.gpr[3] = mutex_id; lv2_syscall(&other);
-        }
     });
     mutex_other.join();
     for (unsigned depth = 0; depth < 2; ++depth) {
