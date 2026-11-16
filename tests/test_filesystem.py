@@ -32,7 +32,7 @@ class FilesystemTests(unittest.TestCase):
             snapshot = {p: p.read_bytes() for p in game.iterdir()}
             env = dict(os.environ, PS3_VFS_ROOT=str(root), PS3_HDD0_ROOT=str(Path(tmp) / 'state'),
                        FS_FSTAT_CAP='1', FS_FSTAT_CAP_PATH='own.txt')
-            for mode, expected in (('fs', 0), ('fs_syscall', 0), ('fs_boot', 0), ('fs_write', 86), ('fs_traversal', 86), ('fs_edat', 86)):
+            for mode, expected in (('fs', 0), ('fs_syscall', 0), ('fs_relative', 0), ('fs_boot', 0), ('fs_write', 86), ('fs_traversal', 86), ('fs_edat', 86)):
                 before_free = shutil.disk_usage(tmp).free // 1024
                 result = subprocess.run([str(exe), mode, str(root)], capture_output=True, timeout=20, env=env)
                 self.assertEqual(result.returncode, expected, (mode, result.stdout, result.stderr))

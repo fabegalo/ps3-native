@@ -135,7 +135,71 @@
      if (__builtin_expect(ppu_vm_size == 0, 1)) return 0;
      if (__builtin_expect((uint64_t)a + n <= ppu_vm_size, 1)) return 0;
      return vm_oob_report(a, n);
-@@ -2315,8 +2373,14 @@
+@@ -2117,6 +2175,63 @@
+  * (ctx->pc, updated by lifted code at block boundaries) of a host AV. */
+ extern "C" PPU_THREAD_LOCAL ppu_context* g_active_ctx = nullptr;
+ 
++#ifdef PS3_NATIVE_STRICT
++extern "C" int ps3_native_guest_range_backed(uint32_t, uint32_t);
++static PPU_THREAD_LOCAL ppu_aot_frame* s_aot_frame;
++
++ppu_aot_frame::ppu_aot_frame(ppu_context* ctx, const uint32_t* points, uint64_t* saved, unsigned n)
++    : previous(s_aot_frame), context(ctx), thread(ctx->thread_id), pcs(points), stacks(saved), count(n)
++{
++    s_aot_frame = this;
++}
++ppu_aot_frame::~ppu_aot_frame()
++{
++    if (s_aot_frame != this) {
++        fprintf(stderr, "[native-blocked] AOT frame lifetime is inconsistent\n");
++        fflush(stderr); ps3_native_stop();
++    }
++    s_aot_frame = previous;
++}
++void ppu_aot_frame::note(unsigned slot)
++{
++    stacks[slot] = context->gpr[1];
++}
++bool ppu_aot_frame::accepts(const ppu_aot_transfer& transfer) const
++{
++    if (transfer.destination != this || transfer.context != context ||
++        transfer.thread != thread || context->thread_id != thread ||
++        context->gpr[1] != transfer.stack || context->lr != transfer.pc) return false;
++    for (unsigned i = 0; i < count; ++i)
++        if (pcs[i] == transfer.pc && stacks[i] == transfer.stack) return true;
++    return false;
++}
++extern "C" void ppu_aot_check_return(ppu_context* context, uint64_t expected_pc, uint64_t expected_stack, uint64_t thread)
++{
++    if (context->thread_id == thread && context->lr == expected_pc && context->gpr[1] == expected_stack) return;
++    const uint64_t sp = context->gpr[1], pc = context->lr;
++    if (thread && context->thread_id == thread && sp <= UINT32_MAX && !(sp & 15) &&
++        pc <= UINT32_MAX && !(pc & 3) && ps3_native_guest_range_backed((uint32_t)sp, 8)) {
++        for (ppu_aot_frame* target = s_aot_frame; target; target = target->previous) {
++            if (target->context != context || target->thread != thread) continue;
++            for (unsigned i = 0; i < target->count; ++i) {
++                if (target->pcs[i] == pc && target->stacks[i] == sp) {
++                    g_trampoline_fn = nullptr;
++                    throw ppu_aot_transfer{target, context, thread, sp, (uint32_t)pc};
++                }
++            }
++        }
++    }
++    fprintf(stderr, "[native-blocked] unprepared AOT nonlocal return pc=0x%llX sp=0x%llX thread=%llu expected=0x%08X/0x%llX\n",
++        (unsigned long long)pc, (unsigned long long)sp, (unsigned long long)context->thread_id,
++        (uint32_t)expected_pc, (unsigned long long)expected_stack);
++    fflush(stderr); ps3_native_stop();
++}
++void ppu_aot_frame::after(unsigned slot)
++{
++    ppu_aot_check_return(context, pcs[slot], stacks[slot], thread);
++}
++#endif
++
+ /* Caller LR of the guest function currently in an HLE call (for HLE-side
+  * diagnostics: pin which lifted function invoked us). 0 if none. */
+ extern "C" uint32_t ppu_active_lr(void)
+@@ -2315,8 +2430,14 @@
   * read into a commit; on POSIX it is a SIGSEGV, and the diagnostic takes the
   * title down with it. Off Windows, ask the kernel first: write() from an
   * unreadable page fails with EFAULT instead of faulting. */
@@ -150,7 +214,7 @@
      if (vm_oob(ea, n)) return false;
  #ifdef _WIN32
      return true;
-@@ -2610,6 +2674,12 @@
+@@ -2610,6 +2731,12 @@
  
  extern "C" void ps3_indirect_call(ppu_context* ctx)
  {
@@ -163,7 +227,7 @@
      static int on = -1;
      if (on < 0) on = getenv("PPU_CSCHECK") ? 1 : 0;
      { static int hg = -1; if (hg < 0) hg = getenv("PS3_ICALL_GATE") ? 1 : 0;
-@@ -2889,6 +2959,27 @@
+@@ -2889,6 +3016,27 @@
      }
  
      ppu_fn fn = ppu_lookup_icall(addr);
@@ -191,7 +255,20 @@
      if (!fn) {
          /* OPD-swap clobber fixup: a malformed memcpy (game func_0036FA74) writes
           * some handler/vtable OPDs as {TOC, func} (code & toc SWAPPED), so lifted
-@@ -3202,6 +3293,10 @@
+@@ -2917,6 +3065,12 @@
+                 fprintf(stderr, "[ppu] recursion cap @0x%08X depth=%d -- skipping\n", addr, s_depth);
+             return;
+         }
++#ifdef PS3_NATIVE_STRICT
++        struct dispatch_scope {
++            int depth, calls;
++            ~dispatch_scope() { g_dispatch_depth = depth; g_vcall_sp = calls; }
++        } dispatch_state{s_depth, g_vcall_sp};
++#endif
+         s_depth++;
+         /* PPU_TOCFIX: the dispatched function's TOC (r2) is the OPD toc we were
+          * called with. Tail-call trampoline links (`b target`) are intra-module, so
+@@ -3202,6 +3356,10 @@
   * continue (the result is undefined, but it won't crash the link). */
  extern "C" void ppu_unlifted_stub(uint64_t addr, ppu_context* ctx)
  {
@@ -202,7 +279,7 @@
      (void)ctx;
      static int logged = 0;
      if (logged < 20) {
-@@ -3237,8 +3332,15 @@
+@@ -3237,8 +3395,15 @@
  #define PS3_SC_INFLIGHT_MAX 64
  extern "C" uint32_t g_sc_inflight[PS3_SC_INFLIGHT_MAX] = { 0 };
  
@@ -218,7 +295,7 @@
      /* One-shot: PPU_GUARD_EA=<hex> arms the page guard on that address without
       * waiting for a store watch to fire. Armed here because lv2_syscall runs
       * early and unconditionally; used to measure how far a guest block clear
-@@ -3312,11 +3414,10 @@
+@@ -3312,11 +3477,10 @@
      switch (num) {
      case 352: {   /* sys_memory_get_user_memory_size(sys_memory_info_t* info)
                     * info = { u32 total_user_memory; u32 available_user_memory } */
@@ -234,7 +311,7 @@
      }
      case 330: {   /* sys_mmapper_allocate_address(u64 size, u64 flags,
                     * u64 alignment, u32* alloc_addr) -> reserve guest VA range */
-@@ -3349,6 +3450,11 @@
+@@ -3349,6 +3513,11 @@
      case 988:     /* sys_tty_write — canonical LV2 number (psdevwiki); some CRTs
                     * use this instead of 403. Same ABI. */
      case 403: {   /* sys_tty_write(s32 ch, cptr buf, u32 len, ptr pwritelen) */
@@ -246,7 +323,7 @@
          uint32_t ch   = (uint32_t)ctx->gpr[3];
          uint32_t buf  = (uint32_t)ctx->gpr[4];
          uint32_t len  = (uint32_t)ctx->gpr[5];
-@@ -3527,6 +3633,10 @@
+@@ -3527,6 +3696,10 @@
                  return;
              }
          }
@@ -257,7 +334,7 @@
          static int logged = 0;
          if (logged < 30) {
              fprintf(stderr, "[ppu] lv2_syscall %llu (stub)\n", (unsigned long long)num);
-@@ -3558,6 +3668,17 @@
+@@ -3558,6 +3731,17 @@
   * allocations. BSS is owned too, even though it has no file-backed bytes. */
  struct ppu_image_range { uint64_t begin, end; };
  static std::vector<ppu_image_range> g_ppu_image_ranges;
@@ -275,7 +352,7 @@
  extern "C" void sys_memory_set_image_query(uint64_t (*query)(uint64_t, uint64_t));
  
  static uint64_t ppu_image_overlap_end(uint64_t addr, uint64_t end)
-@@ -3569,10 +3690,20 @@
+@@ -3569,10 +3753,20 @@
  }
  /* Default used by the PS3 executable entry path when PROC_PARAM is absent. */
  static int32_t g_ppu_primary_priority = 1001;
@@ -296,7 +373,7 @@
      FILE* f = fopen(path, "rb");
      if (!f) { fprintf(stderr, "[ppu] cannot open %s\n", path); return 0; }
      fseek(f, 0, SEEK_END);
-@@ -3612,7 +3743,12 @@
+@@ -3612,7 +3806,12 @@
                      be32(param + 4) == 0x13BCC5F6u &&
                      priority >= 0 && priority <= 3071) {
                      g_ppu_primary_priority = priority;
@@ -309,7 +386,7 @@
                  }
              }
              continue;
-@@ -3817,6 +3953,9 @@
+@@ -3817,6 +4016,9 @@
      uint32_t off  = __atomic_fetch_add(&s_bump, total, __ATOMIC_RELAXED);
      uint32_t base = PPU_TLS_IMG + total + off;  /* main block occupies the first */
      if (base + total > lim) {                   /* out of room: share, as before */
@@ -319,7 +396,7 @@
          static int s_warned = 0;
          if (!__atomic_exchange_n(&s_warned, 1, __ATOMIC_RELAXED))
              fprintf(stderr, "[ppu] TLS window full after %u thread blocks: later "
-@@ -3840,6 +3979,9 @@
+@@ -3840,6 +4042,9 @@
      if (!fn) {
          fprintf(stderr, "[ppu] thread entry 0x%08X (cia=0x%08X) not registered\n",
                  code, (uint32_t)ctx->cia);
@@ -329,7 +406,7 @@
          return;
      }
      g_active_ctx = ctx;
-@@ -3904,11 +4046,24 @@
+@@ -3904,11 +4109,24 @@
   * several per movie -- never runs out: only more than 64 host threads making
   * callbacks AT ONCE share a slot. */
  static std::atomic<uint64_t> s_cb_slots_used{0};
@@ -355,7 +432,7 @@
      }
  };
  static thread_local cb_slot_owner t_cb_slot;
-@@ -3936,11 +4091,18 @@
+@@ -3936,11 +4154,18 @@
              s_hi = s_lo + VM_CB_STACK_SIZE;
          } else {
              /* Out of slots: share the last one, and say so. */
@@ -374,7 +451,7 @@
      }
      if (active) {
          uint32_t sp = (uint32_t)active->gpr[1];
-@@ -3959,6 +4121,12 @@
+@@ -3959,6 +4184,12 @@
      uint32_t code = 0, toc = 0;
      ppu_opd_resolve(opd_addr, &code, &toc);
      ppu_fn fn = ppu_lookup(code);
@@ -387,7 +464,7 @@
      if (!fn) {  /* OPD code clobbered? fall back to a captured fixup */
          for (int i = 0; i < s_opd_fixup_n; i++)
              if (s_opd_fixups[i].opd == opd_addr) {
-@@ -3981,7 +4149,13 @@
+@@ -3981,7 +4212,13 @@
      ctx.gpr[2]  = toc;
      ctx.gpr[3]  = a0; ctx.gpr[4] = a1; ctx.gpr[5] = a2; ctx.gpr[6] = a3;
      ctx.gpr[7]  = a4; ctx.gpr[8] = a5; ctx.gpr[9] = a6; ctx.gpr[10] = a7;
@@ -402,7 +479,7 @@
      ctx.cia     = code;
      /* Save/restore g_active_ctx: this scratch ctx lives on the stack, so leaving
       * g_active_ctx pointing at it after we return leaves a DANGLING pointer once the
-@@ -4027,7 +4201,12 @@
+@@ -4027,7 +4264,12 @@
      *result = 0;
      if (!code) return 0;
      ppu_fn fn = ppu_lookup(code);
@@ -416,7 +493,7 @@
  
      ppu_context ctx;
      memset(&ctx, 0, sizeof(ctx));
-@@ -4035,7 +4214,12 @@
+@@ -4035,7 +4277,12 @@
      ctx.gpr[2]  = toc;
      ctx.gpr[3]  = a0; ctx.gpr[4] = a1; ctx.gpr[5] = a2; ctx.gpr[6] = a3;
      ctx.gpr[7]  = a4; ctx.gpr[8] = a5; ctx.gpr[9] = a6; ctx.gpr[10] = a7;
@@ -430,7 +507,7 @@
      ctx.cia     = code;
      /* Save/restore g_active_ctx (see ppu_guest_call): the scratch ctx is stack-local,
       * so a dangling g_active_ctx after return corrupts the crash handler / diagnostics. */
-@@ -4110,7 +4294,8 @@
+@@ -4110,7 +4357,8 @@
       * get_stack_information(49) would report a {0,0} stack for the main
       * thread. Backfill the real region now that the harness chose it. */
      { extern void ppu_thread_set_main_stack(uint32_t, uint32_t);
@@ -440,7 +517,7 @@
      /* For samplers on other threads (a port's periodic stack dump): the main
       * thread's context lives on this frame, not in the thread table. */
      g_ppu_main_ctx = &ctx;
-@@ -4245,6 +4430,9 @@
+@@ -4245,6 +4493,9 @@
      fprintf(stderr, "[ppu] run: code 0x%08X, toc 0x%08X, sp 0x%08X\n", code, toc, (uint32_t)ctx.gpr[1]);
      g_active_ctx = &ctx;
      ppu_resv_register(&ctx);   /* main/entry thread: join the reservation set too */
@@ -1457,7 +1534,7 @@
              __atomic_store_n(&g_files[i], f, __ATOMIC_RELEASE);
              return i;
          }
-@@ -268,13 +307,43 @@
+@@ -268,13 +307,46 @@
      return fd >= 0 && fd < FS_MAX ? __atomic_load_n(&g_dirs[fd], __ATOMIC_ACQUIRE) : nullptr;
  }
  
@@ -1484,6 +1561,9 @@
 +#endif
      char gpath[1024], hpath[1100];
      guest_strcpy(gpath, (uint32_t)ctx->gpr[3], sizeof gpath);
++#ifdef PS3_NATIVE_STRICT
++    if (gpath[0] != '/') { ctx->gpr[3] = (int64_t)CELL_FS_ENOENT; return; }
++#endif
      uint32_t flags  = (uint32_t)ctx->gpr[4];
      uint32_t fd_ptr = (uint32_t)ctx->gpr[5];
 +#ifdef PS3_NATIVE_STRICT
@@ -1501,7 +1581,7 @@
      host_path(hpath, sizeof hpath, gpath);
  
      /* NPDRM: see the note in sys_fs.c -- an EDAT is decrypted once into a cache
-@@ -302,13 +371,17 @@
+@@ -302,13 +374,17 @@
       * instead read as "no disc" and it drew nothing but a clear colour.
       * S_IFMT/S_IFDIR rather than S_ISDIR: MSVC's CRT does not define the macro. */
      {
@@ -1521,7 +1601,7 @@
      if (hfd < 0) {
          fprintf(stderr, "[fs] open FAIL '%s' -> '%s' (flags=0x%X)\n", gpath, hpath, flags);
          ctx->gpr[3] = (uint64_t)(int64_t)CELL_FS_ENOENT; return;
-@@ -323,15 +396,13 @@
+@@ -323,15 +399,13 @@
          close(hfd);
          ctx->gpr[3] = (uint64_t)(int64_t)CELL_FS_EIO; return;
      }
@@ -1538,7 +1618,7 @@
      { char who[64] = "?";
        if (ps3_env_once("FS_CALLER")) { ppu_guest_caller(who, sizeof who);
            fprintf(stderr, "[fs] open '%s' -> fd %d  (opened by %s)\n", gpath, fd, who);
-@@ -351,6 +422,21 @@
+@@ -351,6 +425,21 @@
      }
      ctx->gpr[3] = CELL_OK;
  }
@@ -1560,7 +1640,7 @@
  
  /* cellFsSdataOpen(path, flags, fd*, arg*, size): opens a PS3 SDATA/EDAT
   * encrypted-data file and returns an fd whose reads yield the DECRYPTED
-@@ -452,10 +538,11 @@
+@@ -452,10 +541,11 @@
              if (g_fd_usm[fd] && ps3_env_once("PS3_FSLOG_READS")) fprintf(stderr, "[USMRD] CLOSE usm fd=%d\n", fd);
              __atomic_store_n(&g_files[fd], (FILE*)nullptr, __ATOMIC_RELEASE);
              g_fd_usm[fd] = 0; g_fd_dir[fd] = 0;
@@ -1574,7 +1654,7 @@
  }
  
  /* Pre-fault a guest range so the kernel can write into it.
-@@ -482,6 +569,40 @@
+@@ -482,6 +572,40 @@
  
  static void cellFsRead(ppu_context* ctx)
  {
@@ -1615,7 +1695,7 @@
      int fd          = (int)(uint32_t)ctx->gpr[3];
      uint32_t buf    = (uint32_t)ctx->gpr[4];
      uint64_t nbytes = ctx->gpr[5];
-@@ -554,6 +675,32 @@
+@@ -554,6 +678,32 @@
  
  static void cellFsWrite(ppu_context* ctx)
  {
@@ -1648,7 +1728,7 @@
      int fd          = (int)(uint32_t)ctx->gpr[3];
      uint32_t buf    = (uint32_t)ctx->gpr[4];
      uint64_t nbytes = ctx->gpr[5];
-@@ -636,6 +783,12 @@
+@@ -636,6 +786,12 @@
  
  static void cellFsLseek(ppu_context* ctx)
  {
@@ -1661,7 +1741,7 @@
      int fd        = (int)(uint32_t)ctx->gpr[3];
      int64_t off   = (int64_t)ctx->gpr[4];
      uint32_t wh   = (uint32_t)ctx->gpr[5];
-@@ -670,8 +823,29 @@
+@@ -670,8 +826,29 @@
   * field right after the stat (the fd at obj+0x10c), which later fails lseek.
   * Layout: mode@0 uid@4 gid@8 atime@0x0C mtime@0x14 ctime@0x1C size@0x24 blksize@0x2C. */
  static void write_stat(uint32_t sb, uint32_t mode, uint64_t size,
@@ -1693,7 +1773,7 @@
      vm_write32(sb + 0x00, mode);
      vm_write32(sb + 0x04, 0);            /* uid */
      vm_write32(sb + 0x08, 0);            /* gid */
-@@ -684,6 +858,11 @@
+@@ -684,8 +861,16 @@
  
  static void cellFsStat(ppu_context* ctx)
  {
@@ -1704,8 +1784,13 @@
 +#endif
      char gpath[1024], hpath[1100];
      guest_strcpy(gpath, (uint32_t)ctx->gpr[3], sizeof gpath);
++#ifdef PS3_NATIVE_STRICT
++    if (gpath[0] != '/') { ctx->gpr[3] = (int64_t)CELL_FS_ENOENT; return; }
++#endif
      uint32_t sb = (uint32_t)ctx->gpr[4];
-@@ -700,13 +879,32 @@
+     host_path(hpath, sizeof hpath, gpath);
+     fs_stat64_t st;
+@@ -700,13 +885,32 @@
       * that lists a directory and shows or compares file dates saw all of them
       * equal. */
      if (sb) write_stat(sb, mode, (uint64_t)st.st_size,
@@ -1739,7 +1824,7 @@
      int fd      = (int)(uint32_t)ctx->gpr[3];
      uint32_t sb = (uint32_t)ctx->gpr[4];
      FILE* f = fd_file(fd);
-@@ -894,6 +1092,22 @@
+@@ -894,6 +1098,22 @@
  static void cellFsUnlink(ppu_context* ctx) { ctx->gpr[3] = CELL_OK; }
  static void cellFsFsync(ppu_context* ctx)
  {
@@ -1762,7 +1847,7 @@
      int fd = (int)(uint32_t)ctx->gpr[3];
      if (FILE* f = fd_file(fd)) fflush(f);
      ctx->gpr[3] = CELL_OK;
-@@ -1074,6 +1288,22 @@
+@@ -1074,6 +1294,22 @@
                                   (uint64_t)(int64_t)id, (uint64_t)n, 0, 0, 0, 0);
  }
  
@@ -9670,3 +9755,99 @@
  } CellPadActParam;
  
  /* ---------------------------------------------------------------------------
+--- a/tools/ppu_lifter.py
++++ b/tools/ppu_lifter.py
+@@ -108,6 +108,36 @@
+     int      reserve_valid; /* lwarx/stwcx. reservation flag    */
+     uint32_t vrsave;        /* VRSAVE (SPR 256): plain state      */
+ } ppu_context;
++
++#if defined(__cplusplus) && defined(PS3_NATIVE_STRICT)
++struct ppu_aot_frame;
++struct ppu_aot_transfer {
++    ppu_aot_frame* destination;
++    ppu_context* context;
++    uint64_t thread, stack;
++    uint32_t pc;
++};
++struct ppu_aot_frame {
++    ppu_aot_frame* previous;
++    ppu_context* context;
++    uint64_t thread;
++    const uint32_t* pcs;
++    uint64_t* stacks;
++    unsigned count;
++    ppu_aot_frame(ppu_context*, const uint32_t*, uint64_t*, unsigned);
++    ~ppu_aot_frame();
++    void note(unsigned);
++    void after(unsigned);
++    bool accepts(const ppu_aot_transfer&) const;
++    ppu_aot_frame(const ppu_aot_frame&) = delete;
++    ppu_aot_frame& operator=(const ppu_aot_frame&) = delete;
++};
++#define PPU_AOT_NOTE(frame, slot) (frame).note(slot)
++#define PPU_AOT_AFTER(frame, slot) (frame).after(slot)
++#else
++#define PPU_AOT_NOTE(frame, slot) ((void)0)
++#define PPU_AOT_AFTER(frame, slot) ((void)0)
++#endif
+ 
+ /* Memory access helpers (provided by runtime) */
+ #ifdef __cplusplus
+@@ -2084,7 +2114,8 @@
+         # stack). LR holds the target (set by the preceding mtlr); dispatch like
+         # bctrl, then CONTINUE (link = call).
+         if mn == "blrl":
+-            return "ctx->ctr = (uint32_t)ctx->lr; ps3_indirect_call(ctx); DRAIN_TRAMPOLINE(ctx);"
++            return (f"{{ const uint32_t _t = (uint32_t)ctx->lr; ctx->lr = 0x{insn.addr + 4:08X}; "
++                    "ps3_indirect_call_to(ctx, _t); DRAIN_TRAMPOLINE(ctx); }")
+ 
+         if mn == "b":
+             target = ops[0]
+@@ -4178,7 +4209,31 @@
+                       f"extern int {g};", "#endif"]
+         lines.append(f"void {weak}{func.name}(ppu_context* ctx) {{")
+         lines.append("    PPU_MM_SNAP")
+-        for bline in _fuse_cr(func.body_lines):
++        body = list(func.body_lines)
++        resumes = []
++        for i, bline in enumerate(body):
++            match = re.search(r"ctx->lr = 0x([0-9A-Fa-f]+);", bline)
++            if match and "DRAIN_TRAMPOLINE(ctx);" in bline:
++                pc = int(match.group(1), 16)
++                slot = len(resumes)
++                resumes.append(pc)
++                body[i] = bline.replace(match.group(0), f"PPU_AOT_NOTE(_aot, {slot}); " + match.group(0), 1).replace(
++                    "DRAIN_TRAMPOLINE(ctx);", f"DRAIN_TRAMPOLINE(ctx); PPU_AOT_AFTER(_aot, {slot});", 1)
++                body[i] += f"\naot_resume_{pc:08X}: ;"
++        if resumes:
++            # Entry snapshots must survive a nonlocal return to this live frame.
++            snapshots = [b for b in body if re.match(r"\s*uint64_t _cs_\d+ =", b)]
++            body = [b for b in body if b not in snapshots]
++            lines.extend(snapshots)
++            lines += ["#ifdef PS3_NATIVE_STRICT",
++                      "    const uint32_t _aot_pcs[] = {" + ",".join(f"0x{pc:08X}u" for pc in resumes) + "};",
++                      f"    uint64_t _aot_stacks[{len(resumes)}] = {{}};",
++                      f"    ppu_aot_frame _aot(ctx, _aot_pcs, _aot_stacks, {len(resumes)});",
++                      "    uint32_t _aot_resume = 0;",
++                      "    for (;;) { try { switch (_aot_resume) { case 0: break;"]
++            lines += [f"    case 0x{pc:08X}u: goto aot_resume_{pc:08X};" for pc in resumes]
++            lines += ["    }", "#endif"]
++        for bline in _fuse_cr(body):
+             lines.append(f"    {bline}" if not bline.endswith(":") else bline)
+ 
+         # If a function doesn't end with blr/b/bctr (a return or unconditional
+@@ -4213,6 +4268,13 @@
+                       f"0x{func.fallthrough_to:08X}; emitting halt", flush=True)
+                 lines.append(f"        /* missing continuation 0x{func.fallthrough_to:08X}: halt */ return;")
+ 
++        if resumes:
++            lines += ["#ifdef PS3_NATIVE_STRICT",
++                      "    return;",
++                      "    } catch (const ppu_aot_transfer& transfer) {",
++                      "        if (!_aot.accepts(transfer)) throw;",
++                      "        _aot_resume = transfer.pc;",
++                      "    } }", "#endif"]
+         lines.append("}")
+         lines.append("")
+         return lines

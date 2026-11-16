@@ -263,10 +263,13 @@ RSX owns the 60000/1001 Hz guest video clock. Original display-queue commands wa
 for GPU completion and the next eligible VBlank; D3D12 presents the selected buffer
 and LV2 delivers the original interrupt events. FIFO references require GPU completion.
 Real GPU regressions verify retained rendered buffers and fresh CPU-written VRAM.
-God of War produced two black scanouts through this path, then stopped during
-JPEG error handling. The original longjmp restores guest state, but the AOT return
-continues the abandoned host call chain; an own synthetic reproducer confirms this
-shared PPU control-flow defect. This is not menu or gameplay evidence. Pass
+God of War produced two black scanouts through this path. Original setjmp/longjmp
+now remains entirely AOT: offline return points bind to live frames, guest stacks,
+threads and contexts; nonlocal returns unwind abandoned host calls and retain the
+restored guest state. Foreign, stale and unprepared targets stop. The real boot
+passes JPEG error recovery and relative filesystem probes (ENOENT, without host
+path resolution), then stops at RSX context packet `0x301`: active ZCULL region
+binding still requires implementation. This is not menu or gameplay evidence. Pass
 `run ... --enter-button cross` or `circle` explicitly; no preference is inferred
 from language/region. No interpreter is used.
 No selector transition or gameplay is verified. Original and derived

@@ -5,6 +5,7 @@
 #include <cstdio>
 #include <cstring>
 #include <array>
+#include <exception>
 
 extern "C" int ppu_register_image_region(uint32_t, uint32_t);
 extern "C" void ppu_register_function(uint64_t, void (*)(ppu_context*));
@@ -13,6 +14,7 @@ extern "C" [[noreturn]] void ps3_native_stop(void);
 extern "C" PPU_THREAD_LOCAL ppu_context* g_active_ctx;
 extern "C" PPU_THREAD_LOCAL void (*g_trampoline_fn)(void*);
 extern "C" int ps3_native_guest_range_backed(uint32_t, uint32_t);
+extern "C" void ppu_aot_check_return(ppu_context*, uint64_t, uint64_t, uint64_t);
 
 struct Resident { const NativeLleModule* module = nullptr; std::atomic<int> started{0}; };
 // shortcut: 64 resident prepared modules; expand on measured firmware requirements.
@@ -165,10 +167,18 @@ extern "C" void ps3_native_call_opd(ppu_context* ctx, uint32_t opd) {
         uint64_t toc;
         ppu_context* active;
         void (*trampoline)(void*);
-        ~Restore() { ctx->gpr[2] = toc; g_active_ctx = active; g_trampoline_fn = trampoline; }
-    } restore{ctx, ctx->gpr[2], g_active_ctx, g_trampoline_fn};
+        int exceptions;
+        ~Restore() {
+            const bool unwinding = std::uncaught_exceptions() > exceptions;
+            if (!unwinding) ctx->gpr[2] = toc;
+            g_active_ctx = active;
+            g_trampoline_fn = unwinding ? nullptr : trampoline;
+        }
+    } restore{ctx, ctx->gpr[2], g_active_ctx, g_trampoline_fn, std::uncaught_exceptions()};
+    const auto return_pc = ctx->lr, return_stack = ctx->gpr[1], return_thread = ctx->thread_id;
     g_trampoline_fn = nullptr;
     ctx->gpr[2] = vm_read32(opd + 4);
     ctx->ctr = vm_read32(opd);
     ps3_indirect_call(ctx);
+    ppu_aot_check_return(ctx, return_pc, return_stack, return_thread);
 }

@@ -269,10 +269,13 @@ A fila original aguarda a conclusão da GPU e o próximo VBlank elegível; o D3D
 apresenta o buffer escolhido e o LV2 entrega os eventos originais de interrupção.
 Referências da FIFO exigem conclusão da GPU. Regressões com GPU real verificam buffers
 renderizados preservados e a leitura atualizada de VRAM escrita pela CPU.
-O God of War produziu duas apresentações pretas por esse caminho e depois parou no
-tratamento de erro JPEG. O longjmp original restaura o estado guest, mas o retorno AOT
-continua a cadeia de chamadas host abandonada; uma reprodução sintética própria confirma
-esse defeito compartilhado de controle de fluxo PPU. Isso não comprova menu nem gameplay.
+O God of War produziu duas apresentações pretas por esse caminho. O setjmp/longjmp
+original continua inteiramente AOT: pontos de retorno preparados ficam vinculados a
+frames ativos, pilhas, threads e contextos guest; o salto abandona as chamadas host
+intermediárias e preserva o estado restaurado. Destinos de outro contexto, expirados
+ou sem preparação param. O boot real passa pela recuperação JPEG e pelas sondagens de
+caminhos relativos (ENOENT, sem resolução no host), depois para no pacote RSX `0x301`:
+o vínculo de região ZCULL ativa ainda exige implementação. Isso não comprova menu nem gameplay.
 Use `run ... --enter-button cross`
 ou `circle` explicitamente; idioma/região não inferem a preferência. Não há interpretação.
 Nenhuma transição para o seletor ou gameplay foi verificado.

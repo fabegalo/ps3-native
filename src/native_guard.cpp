@@ -62,6 +62,8 @@ static void filesystem_path(ppu_context* ctx) {
             path += value;
         }
     }
+    // Relative names are rejected by the LV2 handlers before any host translation.
+    if (path.size() < 1024 && (path.empty() || path[0] != '/')) return;
     bool mount = false;
     for (const char* name : {"/dev_bdvd", "/app_home", "/dev_hdd0", "/dev_hdd1"}) {
         std::string prefix(name);
@@ -75,7 +77,7 @@ static void filesystem_path(ppu_context* ctx) {
         start = end + 1;
     }
     if (!safe) {
-        std::fprintf(stderr, "[native-blocked] unsupported or escaping filesystem path\n");
+        std::fprintf(stderr, "[native-blocked] unsupported or escaping filesystem path='%s' lr=0x%08X\n", path.c_str(), (uint32_t)ctx->lr);
         std::fflush(stderr); ps3_native_stop();
     }
 }

@@ -819,6 +819,24 @@ int main(int argc, char** argv) {
         if (ctx.gpr[3]) return 19;
         call(ctx, "cellSysmoduleIsLoaded", 0xE);
         if (ctx.gpr[3]) return 20;
+        if (!strcmp(argv[1], "fs_relative")) {
+            for (const char* relative : {"PS3_GAME/own.txt", "./PS3_GAME/own.txt", "../outside.txt", "", "C:\\host-file", "CON"}) {
+                std::strcpy((char*)vm_base + 0x30000, relative);
+                for (bool raw : {false, true}) {
+                    vm_write32(0x31000, 0xA5A5A5A5);
+                    ctx.gpr[4] = 0; ctx.gpr[5] = 0x31000; ctx.gpr[6] = ctx.gpr[7] = ctx.gpr[8] = 0;
+                    if (raw) { ctx.gpr[11] = 801; ctx.gpr[3] = 0x30000; lv2_syscall(&ctx); }
+                    else call(ctx, "cellFsOpen", 0x30000);
+                    if ((u32)ctx.gpr[3] != (u32)CELL_ENOENT || vm_read32(0x31000) != 0xA5A5A5A5) return 95;
+                    std::memset(vm_base + 0x32100, 0xA5, 52); ctx.gpr[4] = 0x32100;
+                    if (raw) { ctx.gpr[11] = 808; ctx.gpr[3] = 0x30000; lv2_syscall(&ctx); }
+                    else call(ctx, "cellFsStat", 0x30000);
+                    if ((u32)ctx.gpr[3] != (u32)CELL_ENOENT) return 96;
+                    for (unsigned i = 0; i < 52; ++i) if (vm_base[0x32100 + i] != 0xA5) return 97;
+                }
+            }
+            vm_shutdown(); return 0;
+        }
         std::string path = !strcmp(argv[1], "fs_traversal") ? "/dev_bdvd/../outside.txt" :
                            !strcmp(argv[1], "fs_edat") ? "/dev_bdvd/PS3_GAME/protected.edat" : "/dev_bdvd/PS3_GAME/own.txt";
         std::memcpy(vm_base + 0x30000, path.c_str(), path.size() + 1);

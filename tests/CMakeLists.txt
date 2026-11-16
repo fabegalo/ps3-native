@@ -5,6 +5,7 @@ add_custom_command(OUTPUT "${gen}/ppu_recomp.c" "${gen}/ppu_recomp.h" "${gen}/pp
     "${gen}/spu_bytes.h"
     "${gen}/thread/spu_recomp.c" "${gen}/thread/spu_recomp.h"
     "${gen}/lle_bridge.cpp" "${gen}/lle_recomp.cpp"
+    "${gen}/nonlocal_recomp.cpp" "${gen}/nonlocal_recomp.h"
     "${gen}/variants/owner.c" "${gen}/variants/first.c" "${gen}/variants/second.c" "${gen}/variants/registry.c" "${gen}/variants/meta.h"
     COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/generate_fixtures.py" "${PROJECT_SOURCE_DIR}" "${gen}"
     DEPENDS generate_fixtures.py lle_fixture.py "${PROJECT_SOURCE_DIR}/src/ps3native/firmware.py" ${tools})
@@ -22,6 +23,12 @@ target_include_directories(fixture_ppu PUBLIC "${PROJECT_SOURCE_DIR}/src" "${gen
 target_link_libraries(fixture_ppu PUBLIC ps3recomp_runtime)
 add_executable(ps3-native-ppu ppu_main.cpp)
 target_link_libraries(ps3-native-ppu PRIVATE fixture_ppu)
+add_executable(ps3-native-nonlocal nonlocal_main.cpp "${gen}/nonlocal_recomp.cpp")
+target_compile_definitions(ps3-native-nonlocal PRIVATE PS3_NATIVE_STRICT)
+target_link_libraries(ps3-native-nonlocal PRIVATE fixture_ppu)
+add_test(NAME ppu.aot.nonlocal COMMAND ps3-native-nonlocal)
+add_test(NAME ppu.aot.nonlocal.negative COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/check_nonlocal.py" $<TARGET_FILE:ps3-native-nonlocal>)
+set_tests_properties(ppu.aot.nonlocal ppu.aot.nonlocal.negative PROPERTIES TIMEOUT 15)
 add_executable(ps3-native-spu spu_main.c "${gen}/spu_recomp.c"
     "${gen}/variants/owner.c" "${gen}/variants/first.c" "${gen}/variants/second.c" "${gen}/variants/registry.c")
 target_compile_definitions(ps3-native-spu PRIVATE PS3_NATIVE_STRICT)

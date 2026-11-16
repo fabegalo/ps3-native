@@ -112,3 +112,37 @@ meta = f'#define OWN_VARIANT_OWNER_ID {owner_id}\n#define OWN_VARIANT_ENTRY {tar
 for name, data in payloads.items():
     meta += f'static const unsigned char own_variant_{name}[] = {{' + ','.join(str(x) for x in data) + '};\n'
 (variants / 'meta.h').write_text(meta)
+
+# Own PPU setjmp/longjmp-shaped instructions; no proprietary code or ABI substitution.
+from ppu_disasm import decode
+from ppu_lifter import PPULifter
+def addi(rt, ra, value): return (14 << 26) | (rt << 21) | (ra << 16) | (value & 0xffff)
+def ld(rt, ra, offset): return (58 << 26) | (rt << 21) | (ra << 16) | (offset & 0xfffc)
+def std(rs, ra, offset): return (62 << 26) | (rs << 21) | (ra << 16) | (offset & 0xfffc)
+def stdu(offset): return std(1, 1, offset) | 1
+def bl(pc, target): return (18 << 26) | ((target - pc) & 0x3fffffc) | 1
+def cmpwi(reg): return (11 << 26) | (reg << 16)
+def bc(pc, target, equal): return (16 << 26) | ((12 if equal else 4) << 21) | (2 << 16) | ((target - pc) & 0xfffc)
+own_nl = PPULifter(prefix='own_nl_')
+top = [0x7c0802a6, stdu(-128), std(0,1,144), std(31,1,112), addi(31,3,0),
+       bl(0x30014,0x30100), cmpwi(3), bc(0x3001c,0x30038,False), cmpwi(4), bc(0x30024,0x30038,True),
+       addi(3,31,0), bl(0x3002c,0x30200), addi(3,0,99), 0x60000000,
+       ld(31,1,112), ld(0,1,144), addi(1,1,128), 0x7c0803a6, 0x4e800020]
+save = [std(1,3,0), std(2,3,8), std(14,3,16), 0x7c0802a6, std(0,3,24), addi(3,0,0), 0x4e800020]
+middle = [0x7c0802a6, stdu(-128), std(0,1,144), addi(14,0,123), bl(0x30210,0x30400),
+          addi(3,0,99), ld(0,1,144), addi(1,1,128), 0x7c0803a6, 0x4e800020]
+restore = [ld(1,3,0), ld(2,3,8), ld(14,3,16), ld(0,3,24), 0x7c0803a6, addi(3,0,1), 0x4e800020]
+deep = [0x7c0802a6, stdu(-128), std(0,1,144), addi(12,0,0x30300 & 0xffff),
+        (15 << 26) | (12 << 21) | (12 << 16) | 3, (15 << 26) | (2 << 21) | 0x2345, 0x7d8903a6, 0x4e800421,
+        addi(3,0,99), ld(0,1,144), addi(1,1,128), 0x7c0803a6, 0x4e800020]
+lr_call = [0x7c0802a6, stdu(-128), std(0,1,144), addi(12,0,0x100),
+           (15 << 26) | (12 << 21) | (12 << 16) | 3, 0x7d8803a6, 0x4e800021,
+           ld(0,1,144), addi(1,1,128), 0x7c0803a6, 0x4e800020]
+for base, words in [(0x30000,top),(0x30100,save),(0x30200,middle),(0x30300,restore),(0x30400,deep),(0x30500,lr_call)]:
+    own_nl.lift_function([decode(w,base+i*4) for i,w in enumerate(words)],base,base+len(words)*4)
+with (out / 'nonlocal_recomp.h').open('w') as header:
+    header.write('#pragma once\n#include "ppu_recomp.h"\n#ifdef __cplusplus\nextern "C" {\n#endif\n')
+    for f in own_nl.functions: header.write(f'void {f.name}(ppu_context*);\n')
+    header.write('#ifdef __cplusplus\n}\n#endif\n')
+own_nl.header_name = 'nonlocal_recomp.h'
+(out / 'nonlocal_recomp.cpp').write_text(own_nl.emit_source())
