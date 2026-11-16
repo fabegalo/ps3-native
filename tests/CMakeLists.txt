@@ -92,6 +92,7 @@ endif()
 add_test(NAME runtime.fail_closed COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/check_blocked.py"
     $<TARGET_FILE:ps3-native-contracts> $<TARGET_FILE:ps3-native-spu> $<TARGET_FILE:ps3-native-lle> "${gen}/ppu.elf" $<TARGET_FILE:ps3-native-audio>)
 add_test(NAME runtime.boot_services COMMAND ps3-native-contracts)
+add_test(NAME memory.mapper.named COMMAND ps3-native-contracts mapper_named)
 add_test(NAME rsx.lv2.memory COMMAND ps3-native-contracts rsx_memory)
 add_test(NAME rsx.lv2.context COMMAND ps3-native-contracts rsx_context)
 add_test(NAME runtime.process_sfo COMMAND ps3-native-contracts process_sfo)

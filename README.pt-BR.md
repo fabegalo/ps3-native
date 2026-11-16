@@ -216,8 +216,16 @@ original de 96.738 bytes e publica o diretório atomicamente com um SFO real.
 O SHA-256 do ícone copiado coincide com o original. O boot seguinte preserva e
 reconhece essa instalação. O estudo offline da interface de jogo do
 `basic_plugins` original confirmou `sysSizeKB=3` para GAMEDATA; o tamanho de
-conteúdo ainda não calculado permanece NOTCALC. O boot agora para em
-`sceNpTrophyCreateContext`, cuja gestão de contexto/assinatura ainda exige auditoria.
+conteúdo ainda não calculado permanece NOTCALC. Aquele boot pelo HLE parou em
+`sceNpTrophyCreateContext`; seu caminho substituto de contexto/assinatura permanece bloqueado.
+O cliente original autorizado de troféus (123 funções, 28 exports), o serviço
+(2.076 funções, 61 exports) e a `libsysutil` (390 funções, 225 exports) agora estão
+compilados e residentes localmente. A inicialização mais recente das bibliotecas
+originais aguarda a área IPC nomeada que o VSH inicializa; a execução limitada de
+30 segundos não alcançou um menu. O mapper LV2 respeita modos de criação/abertura,
+tamanho, páginas, quotas e erros de objetos ausentes, sem fabricar uma página de
+sistema. VSH e jogo carregam em `0x10000`; o espaço guest global atual não pode
+manter ambos residentes. A integração dos processos/contextos originais permanece pendente.
 Frames originais continuam sem verificação.
 O TTY preserva bytes binários e quantidades reais. A consulta somente de leitura
 valida caminhos, categoria SFO e buffers; diretórios vazios não são instalações.

@@ -321,6 +321,7 @@ extern "C" void ps3_native_syscall_gate(ppu_context* ctx) {
     if (number == 134 && guest_backed((uint32_t)ctx->gpr[3], 4) &&
         ctx->gpr[4] == 1) return;
     if (number == 136) return;
+    if (number == 332 && ctx->gpr[6] <= UINT32_MAX && guest_backed((uint32_t)ctx->gpr[6], 4)) return;
     if (number == 330) {
         const auto flags = ctx->gpr[4];
         const auto page = flags & ~0xFull;

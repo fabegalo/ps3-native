@@ -212,8 +212,16 @@ copies and synchronizes the original 96,738-byte icon, and atomically publishes
 the directory with a real SFO. The copied icon matches the original SHA-256.
 The next boot preserves and recognizes this installation. Offline study of the
 original `basic_plugins` game interface confirmed `sysSizeKB=3` for GAMEDATA;
-unknown content size remains NOTCALC. Startup now stops at
-`sceNpTrophyCreateContext`, whose context/signature handling still requires audit.
+unknown content size remains NOTCALC. That HLE boot stopped at
+`sceNpTrophyCreateContext`; its placeholder context/signature path remains blocked.
+The authorized original trophy client (123 functions, 28 exports), trophy service
+(2,076 functions, 61 exports) and `libsysutil` (390 functions, 225 exports) are now
+compiled and resident locally. The latest original-library startup waits for the
+named IPC area initialized by VSH; the bounded 30-second run did not reach a menu.
+LV2 named mapper operations now honor create/open modes, geometry, quotas and
+missing-object errors, without substituting a fabricated system page. VSH and the
+game both load at `0x10000`; the current global guest address space cannot keep
+both resident. Original process/context integration remains pending.
 Original game frames remain unverified.
 TTY output preserves binary bytes and real write counts. Read-only game-data
 checks validate paths, SFO category and output ranges; empty directories are not

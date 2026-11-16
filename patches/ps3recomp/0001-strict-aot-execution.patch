@@ -3049,7 +3049,7 @@
      bump_lock();
      int slot = -1;
      for (int i = 0; i < SYS_MEMORY_ALLOC_MAX; ++i)
-@@ -461,22 +481,43 @@
+@@ -461,22 +481,54 @@
  int64_t sys_mmapper_allocate_shared_memory(ppu_context* ctx)
  {
      uint64_t key      = LV2_ARG_U64(ctx, 0);
@@ -3061,7 +3061,7 @@
 -
 +    if (!id_out || id_out > UINT32_MAX - 3u) return (int64_t)(int32_t)CELL_EFAULT;
 +    uint32_t page = (flags & 0xF00u) == 0x200 ? 0x10000u : 0x100000u;
-+    if ((flags & ~0xF0Full) || ((flags & 0xF00u) != 0 && (flags & 0xF00u) != 0x200 && (flags & 0xF00u) != 0x400))
++    if ((flags & ~0xCF0Full) || ((flags & 0xF00u) != 0 && (flags & 0xF00u) != 0x200 && (flags & 0xF00u) != 0x400))
 +        return (int64_t)(int32_t)CELL_EINVAL;
 +    if (!size64 || size64 % page) return (int64_t)(int32_t)CELL_EALIGN;
 +    if (size64 > UINT32_MAX) return (int64_t)(int32_t)CELL_ENOMEM;
@@ -3069,13 +3069,24 @@
 +    if ((flags & 0xF) != 0 && (flags & 0xF) != 0xF) {
 +        fprintf(stderr, "[native-blocked] restricted shared-memory access rights are unsupported\n"); fflush(stderr); ps3_native_stop();
 +    }
-+    if (key != 0xFFFF000000000000ull) {
-+        fprintf(stderr, "[native-blocked] cross-process shared memory keys are unsupported\n"); fflush(stderr); ps3_native_stop();
-+    }
 +#endif
 +    uint32_t size = (uint32_t)size64;
 +    bump_lock();
 +    if (size > SYS_MEM_USER_TOTAL - s_total_allocated) { bump_unlock(); return (int64_t)(int32_t)CELL_ENOMEM; }
++    if (key != 0xFFFF000000000000ull) {
++        for (int i = 0; i < SYS_MMAPPER_SHARED_MAX; ++i) {
++            const sys_mmapper_shared_info* old = &g_sys_mmapper_shared[i];
++            if (!old->active || old->key != key) continue;
++            /* LV2 rejects exclusive creation first, then checks the existing
++             * object's geometry. This process already holds its public ID. */
++            int64_t result = (flags & 0xC000u) == 0xC000u ? (int32_t)CELL_EEXIST :
++                old->size != size || old->alignment != page ? (int32_t)CELL_EPERM : (int32_t)CELL_EEXIST;
++            bump_unlock(); return result;
++        }
++        /* LV2 7B1BC: absent names require creation bit 0x8000; otherwise ESRCH.
++         * A missing system-service object is never replaced with a zero page. */
++        if (!(flags & 0x8000u)) { bump_unlock(); return (int64_t)(int32_t)CELL_ESRCH; }
++    }
      int slot = -1;
      for (int i = 0; i < SYS_MMAPPER_SHARED_MAX; i++) {
          if (!g_sys_mmapper_shared[i].active) { slot = i; break; }
@@ -3098,7 +3109,7 @@
  
      uint32_t shm_id = (uint32_t)(slot + 1);
      if (id_out != 0) {
-@@ -484,6 +525,38 @@
+@@ -484,6 +536,38 @@
      }
  
      return CELL_OK;
@@ -3137,7 +3148,7 @@
  }
  
  /* ---------------------------------------------------------------------------
-@@ -556,21 +629,49 @@
+@@ -556,21 +640,49 @@
      uint32_t addr   = LV2_ARG_U32(ctx, 0);
      uint32_t shm_id = LV2_ARG_U32(ctx, 1);
      /* uint32_t flags = LV2_ARG_U32(ctx, 2); */

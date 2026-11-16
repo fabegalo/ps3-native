@@ -322,6 +322,40 @@ int main(int argc, char** argv) {
         for (u32 i = 10; i < 64; ++i) if (vm_read8(0x31000 + i)) return 5;
         vm_shutdown(); std::puts("Verified process SFO identity, 64-byte ABI and failed-call preservation"); return 0;
     }
+    if (argc == 2 && !strncmp(argv[1], "mapper_named", 12)) {
+        if (vm_init() || vm_commit(0x30000, 0x10000)) return 1;
+        g_ppu_main_stack_addr = 0x30000; g_ppu_main_stack_size = 0x10000;
+        lv2_init_syscalls(); ppu_context memory{}; memory.gpr[1] = 0x3FF00;
+        auto named = [&](u64 key, u64 size, u64 flags, u64 output = 0x31000) {
+            memory.gpr[11] = 332; memory.gpr[3] = key; memory.gpr[4] = size;
+            memory.gpr[5] = flags; memory.gpr[6] = output; lv2_syscall(&memory); return (u32)memory.gpr[3];
+        };
+        const u64 key = 0x123456789ABCDEF0ull;
+        vm_write32(0x31000, 0xA5A5A5A5);
+        if (!strcmp(argv[1], "mapper_named_pointer")) { named(key, 0x10000, 0xC200, 0x40000); return 2; }
+        if (named(key, 0x10000, 0x200) != (u32)CELL_ESRCH || vm_read32(0x31000) != 0xA5A5A5A5) return 3;
+        memory.gpr[11] = 352; memory.gpr[3] = 0x31010; lv2_syscall(&memory);
+        if (memory.gpr[3]) return 4;
+        const u32 available = vm_read32(0x31014);
+        if (named(key, 0x10000, 0xC200) || !vm_read32(0x31000)) return 5;
+        const u32 id = vm_read32(0x31000);
+        if (named(key, 0x10000, 0xC200) != (u32)CELL_EEXIST || vm_read32(0x31000) != id ||
+            named(key, 0x10000, 0x200) != (u32)CELL_EEXIST ||
+            named(key, 0x20000, 0x200) != (u32)CELL_EPERM ||
+            named(key, 0x100000, 0x400) != (u32)CELL_EPERM ||
+            named(key, 0x20000, 0xC200) != (u32)CELL_EEXIST ||
+            named(key + 1, 0x10000, 0x200) != (u32)CELL_ESRCH) return 6;
+        memory.gpr[11] = 352; memory.gpr[3] = 0x31010; lv2_syscall(&memory);
+        if (memory.gpr[3] || vm_read32(0x31014) != available - 0x10000) return 7;
+        if (named(key + 1, 0x10000, 0x8200) || vm_read32(0x31000) == id) return 8;
+        if (named(0xFFFF000000000000ull, 0x10000, 0x200)) return 9;
+        const u32 first_anonymous = vm_read32(0x31000);
+        if (named(0xFFFF000000000000ull, 0x10000, 0x200) || vm_read32(0x31000) == first_anonymous) return 10;
+        if (named(key + 2, 0, 0x8200) != (u32)CELL_EALIGN ||
+            named(key + 2, 1, 0x8200) != (u32)CELL_EALIGN ||
+            named(key + 2, 0x10000, 0xA200) != (u32)CELL_EINVAL) return 11;
+        vm_shutdown(); puts("Verified named mapper creation modes, missing names, geometry errors, quotas and independent anonymous objects"); return 0;
+    }
     if (argc == 2 && (!strncmp(argv[1], "rsx_memory", 10) || !strncmp(argv[1], "rsx_context", 11))) {
         if (vm_init() || vm_commit(0x30000, 0x10000)) return 1;
         g_ppu_main_stack_addr = 0x30000; g_ppu_main_stack_size = 0x10000;
