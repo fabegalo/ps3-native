@@ -50,6 +50,7 @@ void ps3_indirect_call(ppu_context*);
 void lv2_syscall(ppu_context*);
 void ppu_sysprx_register(void);
 void lv2_init_syscalls(void);
+int ppu_process_set_paramsfo(const void*, uint32_t);
 void sys_memory_set_image_query(uint64_t (*)(uint64_t, uint64_t));
 uint32_t ps3_process_spawn_callback(unsigned);
 extern uint32_t g_ppu_main_stack_addr, g_ppu_main_stack_size;
@@ -214,6 +215,116 @@ static void call(ppu_context& ctx, const char* name, uint64_t a0) {
     ps3_hle_call(ps3_compute_nid(name), &ctx);
 }
 int main(int argc, char** argv) {
+    if (argc == 2 && !strcmp(argv[1], "event_ipc")) {
+        if (vm_init() || vm_commit(0x30000, 0x10000)) return 1;
+        g_ppu_main_stack_addr = 0x30000; g_ppu_main_stack_size = 0x10000;
+        lv2_init_syscalls(); ppu_context c{};
+        auto call = [&](u32 number, u64 a, u64 b = 0, u64 d = 0, u64 e = 0) {
+            c.gpr[11] = number; c.gpr[3] = a; c.gpr[4] = b; c.gpr[5] = d; c.gpr[6] = e;
+            lv2_syscall(&c); return (u32)c.gpr[3];
+        };
+        const u64 key = 0x123456789ABCDEF0ull, source = 0x1122334455667788ull;
+        vm_write32(0x31010, 1); vm_write32(0x31014, 1); vm_write64(0x31018, 0);
+        if (call(128, 0x31000, 0x31010, key, 2)) return 2;
+        const u32 queue = vm_read32(0x31000);
+        vm_write32(0x31000, 0xA5A5A5A5);
+        if (call(134, 0x31000, 2, source) != (u32)CELL_EINVAL || vm_read32(0x31000) != 0xA5A5A5A5 ||
+            call(134, 0x31000, 3, source)) return 3;
+        const u32 port = vm_read32(0x31000);
+        if (call(140, port, 0) != (u32)CELL_EINVAL || call(140, port, key + 1) != (u32)CELL_ESRCH ||
+            call(136, port, queue) != (u32)CELL_EINVAL || call(140, port, key) ||
+            call(140, port, key) != (u32)CELL_EISCONN || call(135, port) != (u32)CELL_EISCONN) return 4;
+        if (call(138, port, 0x1111222233334444ull, 0x5555666677778888ull, 0x9999AAAABBBBCCCCull) ||
+            call(130, queue, 0, 1000) || c.gpr[4] != source || c.gpr[5] != 0x1111222233334444ull ||
+            c.gpr[6] != 0x5555666677778888ull || c.gpr[7] != 0x9999AAAABBBBCCCCull) return 5;
+        if (call(129, queue, 0) || call(138, port) != (u32)CELL_ENOTCONN ||
+            call(128, 0x31000, 0x31010, key, 2) || call(138, port) != (u32)CELL_ENOTCONN ||
+            call(140, port, key)) return 6;
+        const u32 replacement = vm_read32(0x31000);
+        if (call(137, port) || call(137, port) != (u32)CELL_ENOTCONN || call(135, port) ||
+            call(135, port) != (u32)CELL_ESRCH || call(129, replacement, 0)) return 7;
+        vm_shutdown(); puts("IPC ports: keyed connection, payload, type errors and no stale routing after queue replacement verified");
+        return 0;
+    }
+    if (argc == 2 && !strcmp(argv[1], "process_paramsfo")) {
+        if (vm_init() || vm_commit(0x30000, 0x10000)) return 1;
+        g_ppu_main_stack_addr = 0x30000; g_ppu_main_stack_size = 0x10000;
+        lv2_init_syscalls();
+        auto query = [](u64 address) {
+            ppu_context c{}; c.gpr[11] = 30; c.gpr[3] = address;
+            lv2_syscall(&c); return (u32)c.gpr[3];
+        };
+        memset(vm_base + 0x31000, 0xA5, 80);
+        if (query(0x31008) != (u32)CELL_ENOENT || query(UINT64_MAX) != (u32)CELL_ENOENT) return 2;
+        for (unsigned i = 0; i < 80; ++i) if (vm_base[0x31000 + i] != 0xA5) return 3;
+        u8 data[64]; for (unsigned i = 0; i < 64; ++i) data[i] = (u8)(i ^ 0x5A);
+        if (ppu_process_set_paramsfo(data, 63) || ppu_process_set_paramsfo(nullptr, 64) ||
+            !ppu_process_set_paramsfo(data, 64)) return 4;
+        if (query(UINT64_MAX) != (u32)CELL_EFAULT || query(0x40000) != (u32)CELL_EFAULT || query(0x31008)) return 5;
+        if (memcmp(vm_base + 0x31008, data, 64)) return 6;
+        for (unsigned i = 0; i < 8; ++i)
+            if (vm_base[0x31000 + i] != 0xA5 || vm_base[0x31048 + i] != 0xA5) return 7;
+        data[0] = 0xFF;
+        if (!ppu_process_set_paramsfo(data, 64) || query(UINT64_MAX) != (u32)CELL_ENOENT ||
+            !ppu_process_set_paramsfo(nullptr, 0) || query(0x31008) != (u32)CELL_ENOENT) return 8;
+        vm_shutdown(); puts("Opaque process PARAMSFO: absent data, original bytes, bounds and absence-before-pointer validation verified");
+        return 0;
+    }
+    if (argc == 2 && !strcmp(argv[1], "kernel_lwmutex")) {
+        if (vm_init() || vm_commit(0x30000, 0x10000)) return 1;
+        g_ppu_main_stack_addr = 0x30000; g_ppu_main_stack_size = 0x10000;
+        lv2_init_syscalls();
+        auto call = [](ppu_context& c, u32 number, u32 id, u64 value = 0) {
+            c.gpr[11] = number; c.gpr[3] = id; c.gpr[4] = value;
+            lv2_syscall(&c); return (u32)c.gpr[3];
+        };
+        ppu_context owner{}; owner.thread_id = 1;
+        for (unsigned protocol : {1u,2u}) {
+            memset(vm_base + 0x31100, 0xA5, 24);
+            owner.gpr[5] = 0x31100; owner.gpr[6] = 0x80000001; owner.gpr[7] = 0x6C776D7574657800ull;
+            if (call(owner, 95, 0x31000, protocol)) return 2;
+            const u32 id = vm_read32(0x31000);
+            for (unsigned byte = 0; byte < 24; ++byte)
+                if (vm_base[0x31100 + byte] != 0xA5) return 3;
+            if (!id || call(owner, 103, id) != (u32)CELL_ESRCH || call(owner, 99, id) != (u32)CELL_EBUSY) return 4;
+            const auto before = std::chrono::steady_clock::now();
+            if (call(owner, 97, id, 30) != (u32)CELL_ETIMEDOUT ||
+                std::chrono::steady_clock::now() - before < std::chrono::microseconds(30)) return 5;
+            if (call(owner, 98, id) || call(owner, 98, id) || call(owner, 99, id) ||
+                call(owner, 99, id) != (u32)CELL_EBUSY) return 6;
+            if (call(owner, 117, id) || call(owner, 99, id) != (u32)CELL_EBUSY ||
+                call(owner, 97, id) != (u32)CELL_EBUSY) return 7;
+            if (call(owner, 117, id) || call(owner, 98, id) || call(owner, 97, id)) return 8;
+            for (unsigned i = 0; i < 4; ++i) {
+                g_ppu_threads[i].state = PPU_THREAD_STATE_RUNNING;
+                g_ppu_threads[i].ctx.thread_id = i + 1;
+                g_ppu_threads[i].priority = i == 2 ? 100 : 1000;
+            }
+            std::atomic<unsigned> count{0}; unsigned order[3]{}; std::thread workers[3];
+            for (unsigned i = 0; i < 3; ++i) {
+                workers[i] = std::thread([&, i] {
+                    ppu_context c{}; c.thread_id = i + 2;
+                    if (call(c, 97, id)) std::abort();
+                    order[count.fetch_add(1)] = i;
+                    if (call(c, 98, id)) std::abort();
+                });
+                const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(2);
+                while (__atomic_load_n(&g_sys_mutexes[id - 1].waiters, __ATOMIC_SEQ_CST) != int(i + 1)) {
+                    if (std::chrono::steady_clock::now() > deadline) std::abort();
+                    std::this_thread::yield();
+                }
+            }
+            if (call(owner, 96, id) != (u32)CELL_EBUSY || call(owner, 98, id)) std::abort();
+            for (auto& worker : workers) worker.join();
+            if (count != 3 || order[0] != (protocol == 1 ? 0u : 1u) ||
+                order[1] != (protocol == 1 ? 1u : 0u) || order[2] != 2) return 9;
+            if (call(owner, 99, id) || call(owner, 96, id) || call(owner, 99, id) != (u32)CELL_ESRCH) return 10;
+        }
+        vm_write32(0x31000, 0xCAFEBABE);
+        if (call(owner, 95, 0x31000, 3) != (u32)CELL_EINVAL || vm_read32(0x31000) != 0xCAFEBABE) return 11;
+        vm_shutdown(); puts("Kernel lwmutex: original control untouched, signal tokens, timeouts, FIFO/priority and lifetime verified");
+        return 0;
+    }
     if (argc == 2 && !strncmp(argv[1], "mutex_queue", 11)) {
         if (vm_init() || vm_commit(0x30000, 0x10000)) return 1;
         g_ppu_main_stack_addr = 0x30000; g_ppu_main_stack_size = 0x10000;

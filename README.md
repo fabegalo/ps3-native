@@ -28,7 +28,7 @@ Built on [ps3recomp](https://github.com/sp00nznet/ps3recomp) by **Ned Heller / s
 | PPU / SPU AOT | Project-owned synthetic programs compiled and executed; SPU DMA verified | Generic commercial game execution |
 | RSX graphics | Upstream D3D12 pixel/depth regression validated on a local GPU | Playable titles or broad RSX coverage |
 | Import / preparation | Read-only inventory, PPU AOT, hash-bound diagnostic native startup | Complete generic module loading and playable title launch |
-| Original firmware | PUP identity inspection; upstream firmware LLE research | Original VSH/XMB boot, Guide-like system navigation, or game return |
+| Original firmware | Original VSH 4.93 entry executed by AOT in a bounded local diagnostic | Complete VSH/XMB boot, system navigation, or game return |
 | Platforms | Windows x64 locally validated; Windows, Linux and macOS CI configured | Runtime certification across all planned targets |
 
 ## Build and check
@@ -220,9 +220,24 @@ compiled and resident locally. The latest original-library startup waits for the
 named IPC area initialized by VSH; the bounded 30-second run did not reach a menu.
 LV2 named mapper operations now honor create/open modes, geometry, quotas and
 missing-object errors, without substituting a fabricated system page. VSH and the
-game both load at `0x10000`; the current global guest address space cannot keep
-both resident. Original process/context integration remains pending.
+game both load at `0x10000`. Process-owned VM/AOT tables and real shared-memory
+aliases pass synthetic isolation tests in the same runtime; HLE, LV2/SPU/RSX and
+original PRX ownership are not yet integrated for these isolated processes and
+stop explicitly. Simultaneous original VSH/game execution remains pending.
 Original game frames remain unverified.
+
+A separate bounded diagnostic compiled all 12,116 functions of the original
+VSH 4.93 ELF and entered its original startup with its ELF priority, stack and
+TLS, and `/dev_flash/vsh/module/vsh.self` as argv[0]. Raw lightweight-mutex
+sleep/wake channels, opaque process parameters and named IPC event ports now
+pass shared regressions; the real VSH proceeds through those operations and
+stops at LV2 `_sys_prx_register_module` (484, LR `0x0061786C`). Its original
+tables contain 28 export libraries and 24 import libraries. Registration,
+linking and the original unresolved-import handler are not implemented; no
+success is substituted. No XMB menu or original VSH frame has been shown.
+With the existing local VSH-bound build, reproduce the same stop using
+`python src/ps3native/cli.py run .local/work/boot/firmware/system-game/vsh.elf --build-dir build`.
+The public `system` command remains blocked.
 TTY output preserves binary bytes and real write counts. Read-only game-data
 checks validate paths, SFO category and output ranges; empty directories are not
 installed content. Writes are confined to the active installation; links,

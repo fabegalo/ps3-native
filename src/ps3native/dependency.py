@@ -7,6 +7,8 @@ import subprocess
 
 
 def source_hash(path):
+    if not path.exists():
+        return None
     return hashlib.sha256(path.read_bytes().replace(b'\r\n', b'\n')).hexdigest()
 
 
@@ -34,7 +36,7 @@ def dependency(root, apply=False):
             if source_hash(sdk / name) != states['after']:
                 raise ValueError(f'Locked upstream adaptation missing/changed: {name}')
             expected.add(name)
-    changed = {line[3:] for line in git('status', '--porcelain').splitlines()}
+    changed = {line[3:] for line in git('status', '--porcelain', '--untracked-files=all').splitlines()}
     if changed != expected:
         raise ValueError(f'Unrecorded upstream modifications: {changed ^ expected}')
     return sdk, lock

@@ -18,6 +18,9 @@ class DependencyTests(unittest.TestCase):
             pristine = Path(tmp)
             for patch in lock['patches']:
                 for name, hashes in patch['files'].items():
+                    if hashes['before'] is None:
+                        self.assertIsNone(source_hash(pristine / name))
+                        continue
                     source = subprocess.check_output(['git', '-C', str(sdk), 'show', lock['commit'] + ':' + name])
                     target = pristine / name
                     target.parent.mkdir(parents=True, exist_ok=True)

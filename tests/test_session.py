@@ -14,7 +14,7 @@ class SessionTests(unittest.TestCase):
             root = Path(tmp)
             generation, build = root / 'aot', root / 'build'
             generation.mkdir(); build.mkdir()
-            for name in ('src/native_guard.cpp', 'src/module_hooks.cpp', 'src/native_stop.cpp', 'src/native_storage.cpp', 'src/native_storage.h', 'src/native_lle.cpp', 'src/native_lle.h', 'src/ps3native/firmware.py', 'cmake/NativeModule.cmake', 'CMakeLists.txt', 'src/ps3native/codegen.py'):
+            for name in ('src/native_guard.cpp', 'src/module_hooks.cpp', 'src/native_stop.cpp', 'src/native_storage.cpp', 'src/native_storage.h', 'src/native_lle.cpp', 'src/native_lle.h', 'src/ps3native/firmware.py', 'src/ps3native/session.py', 'cmake/NativeModule.cmake', 'CMakeLists.txt', 'src/ps3native/codegen.py'):
                 path = root / name
                 path.parent.mkdir(parents=True, exist_ok=True)
                 path.write_text('own contract input')
@@ -31,7 +31,7 @@ class SessionTests(unittest.TestCase):
                     run(root, {**original, 'id': 'different-input'}, build)
                 launch.return_value.poll.return_value = 0
                 launch.return_value.wait.return_value = 0
-                with patch.dict('os.environ', {'PS3_ENTER_BUTTON': 'invalid', 'SPU_FALLBACK': '1', 'PAD_SCRIPT': 'own-untrusted-input', 'D3D12_VSYNC': '0'}):
+                with patch.dict('os.environ', {'PS3_ENTER_BUTTON': 'invalid', 'SPU_FALLBACK': '1', 'PAD_SCRIPT': 'own-untrusted-input', 'D3D12_VSYNC': '0', 'PS3_BOOT_PATH': '/untrusted'}):
                     for button in (None, 'cross', 'circle'):
                         run(root, original, build, enter_button=button)
                         env = launch.call_args.kwargs['env']
@@ -39,6 +39,13 @@ class SessionTests(unittest.TestCase):
                         self.assertNotIn('SPU_FALLBACK', env)
                         self.assertNotIn('PAD_SCRIPT', env)
                         self.assertNotIn('D3D12_VSYNC', env)
+                        self.assertNotIn('PS3_BOOT_PATH', env)
+                for invalid in ('relative', '/dev_flash/../file', '/dev_flash\\file', '/x\0y', '/' + 'x' * 1024):
+                    with self.assertRaisesRegex(ValueError, 'boot path'):
+                        bind(root, original, elf, generation, build, boot_path=invalid)
+                bind(root, original, elf, generation, build, boot_path='/dev_flash/vsh/module/vsh.self')
+                run(root, original, build)
+                self.assertEqual(launch.call_args.kwargs['env']['PS3_BOOT_PATH'], '/dev_flash/vsh/module/vsh.self')
                 launch.reset_mock()
                 with self.assertRaisesRegex(ValueError, 'cross or circle'):
                     run(root, original, build, enter_button='invalid')

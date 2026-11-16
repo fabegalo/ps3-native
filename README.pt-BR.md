@@ -28,7 +28,7 @@ Baseado no [ps3recomp](https://github.com/sp00nznet/ps3recomp), de **Ned Heller 
 | PPU / SPU AOT | Programas sintéticos próprios compilados e executados; DMA SPU conferida | Execução genérica de jogos comerciais |
 | Gráficos RSX | Regressão upstream D3D12 de pixels/profundidade validada em GPU local | Títulos jogáveis ou ampla cobertura RSX |
 | Importação / preparação | Inventário somente leitura de jogos e PUP; geração AOT limitada de ELF PPU | Binding completo de módulos e execução nativa genérica |
-| Firmware original | Inspeção de identidade PUP e pesquisa LLE do upstream | Boot VSH/XMB original, navegação e retorno dos jogos |
+| Firmware original | Entrada original do VSH 4.93 executada por AOT em diagnóstico local limitado | Boot VSH/XMB completo, navegação e retorno dos jogos |
 | Plataformas | Windows x64 validado localmente; CI Windows, Linux e macOS configurada | Certificação de execução nos demais alvos |
 
 ## Compilar e verificar
@@ -224,9 +224,26 @@ compilados e residentes localmente. A inicialização mais recente das bibliotec
 originais aguarda a área IPC nomeada que o VSH inicializa; a execução limitada de
 30 segundos não alcançou um menu. O mapper LV2 respeita modos de criação/abertura,
 tamanho, páginas, quotas e erros de objetos ausentes, sem fabricar uma página de
-sistema. VSH e jogo carregam em `0x10000`; o espaço guest global atual não pode
-manter ambos residentes. A integração dos processos/contextos originais permanece pendente.
+sistema. VSH e jogo carregam em `0x10000`. Memória e tabelas AOT por processo,
+com aliases reais de memória compartilhada, passam nos testes sintéticos do
+mesmo runtime. HLE, LV2/SPU/RSX e PRX originais ainda não têm sua responsabilidade
+integrada nesses processos isolados e param explicitamente. A execução simultânea
+de VSH e jogo originais permanece pendente.
 Frames originais continuam sem verificação.
+
+Outro diagnóstico limitado compilou todas as 12.116 funções do ELF original
+VSH 4.93 e entrou em sua inicialização original, com prioridade, pilha e TLS do
+ELF e `/dev_flash/vsh/module/vsh.self` em argv[0]. Canais de espera/sinalização
+dos mutexes leves do kernel, parâmetros opacos do processo e portas de eventos
+IPC nomeadas passam nas regressões compartilhadas. O VSH real passa por essas
+operações e para em `_sys_prx_register_module` do LV2 (484, LR `0x0061786C`).
+Suas tabelas originais contêm 28 bibliotecas exportadas e 24 importadas.
+Registro, vínculo e tratador original de imports não resolvidos ainda não estão
+implementados; nenhum sucesso substituto foi usado. Nenhum menu XMB ou frame
+original do VSH foi mostrado. Com o build local já vinculado ao VSH, a parada
+é reproduzível por
+`python src/ps3native/cli.py run .local/work/boot/firmware/system-game/vsh.elf --build-dir build`.
+O comando público `system` permanece bloqueado.
 O TTY preserva bytes binários e quantidades reais. A consulta somente de leitura
 valida caminhos, categoria SFO e buffers; diretórios vazios não são instalações.
 Escritas ficam restritas à instalação ativa; links, substituição de metadados

@@ -9,6 +9,7 @@
 #include "cellGcmSys.h"
 #include "ps3emu/guest_call.h"
 #include "native_lle.h"
+#include "guest_process.h"
 extern "C" ps3_guest_caller_fn g_ps3_guest_caller;
 extern "C" int ps3_native_context_ready(uint32_t);
 extern "C" int ps3_hle_has(uint32_t);
@@ -22,6 +23,7 @@ extern "C" int cellAudioGuestRangeBacked(uint32_t, uint32_t);
 extern "C" int sys_rsx_guest_range_backed(uint32_t, uint32_t);
 extern "C" uint32_t g_ppu_main_stack_addr, g_ppu_main_stack_size;
 static bool guest_backed(uint32_t address, uint32_t size) {
+    if (guest_process_current()) return guest_process_range_backed(address, size) != 0;
     const uint64_t end = (uint64_t)address + size;
     return end <= 0x100000000ull &&
         (sys_memory_range_backed(address, size) || ps3_sysprx_heap_range_backed(address, size) ||
@@ -82,6 +84,10 @@ static void filesystem_path(ppu_context* ctx) {
     }
 }
 extern "C" void ps3_native_hle_gate(uint32_t nid, ppu_context* ctx) {
+    if (guest_process_current()) {
+        std::fprintf(stderr, "[native-blocked] isolated process HLE ownership is not integrated\n");
+        std::fflush(stderr); ps3_native_stop();
+    }
     if (ps3_native_lle_library("cellGcmSys")) {
         const char* symbol = ps3_hle_symbol_name(nid);
         if (symbol && (!std::strncmp(symbol, "cellGcm", 7) || !std::strncmp(symbol, "_cellGcm", 8))) {
@@ -289,9 +295,14 @@ extern "C" void ps3_native_hle_gate(uint32_t nid, ppu_context* ctx) {
     ps3_native_stop();
 }
 extern "C" void ps3_native_syscall_gate(ppu_context* ctx) {
+    if (guest_process_current()) {
+        std::fprintf(stderr, "[native-blocked] isolated process LV2/SPU/RSX ownership is not integrated\n");
+        std::fflush(stderr); ps3_native_stop();
+    }
     const auto number = ctx->gpr[11];
     if (number == 1) return;
     if (number == 25) return;
+    if (number == 30) return;
     if (number == 675 || number == 668 || number == 670 || number == 672 || number == 674 || number == 677) return;
     // Reservation capability is classified by the upstream LV2 address/rights contract.
     if (number == 14) return;
@@ -299,6 +310,7 @@ extern "C" void ps3_native_syscall_gate(ppu_context* ctx) {
         guest_backed((uint32_t)ctx->gpr[4], 32) &&
         vm_read32((uint32_t)ctx->gpr[4] + 4) == 0x200) return;
     if (number == 91) return;
+    if ((number >= 95 && number <= 99) || number == 117) return;
     if (number >= 100 && number <= 104) return;
     if (number == 105 || number == 106) return;
     if ((number >= 120 && number <= 125) || number == 127 || number == 148) return;
@@ -319,7 +331,9 @@ extern "C" void ps3_native_syscall_gate(ppu_context* ctx) {
     if (number == 128 && guest_backed((uint32_t)ctx->gpr[3], 4) &&
         guest_backed((uint32_t)ctx->gpr[4], 16)) return;
     if (number == 134 && guest_backed((uint32_t)ctx->gpr[3], 4) &&
-        ctx->gpr[4] == 1) return;
+        ctx->gpr[3] <= UINT32_MAX) return;
+    if (number == 140) return;
+    if (number == 129 || number == 135 || number == 137) return;
     if (number == 136) return;
     if (number == 332 && ctx->gpr[6] <= UINT32_MAX && guest_backed((uint32_t)ctx->gpr[6], 4)) return;
     if (number == 330) {

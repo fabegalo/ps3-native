@@ -13,7 +13,16 @@ from ps3native.preparation import spu_artifacts
 from ps3native.firmware import firmware_artifacts
 
 
-def bind(root, original, elf, generation, build):
+def _boot_path(value):
+    if value is not None and (not isinstance(value, str) or not value.startswith('/') or
+            len(value.encode('utf-8')) > 1023 or any(c in value for c in ('\0', '\\', ':')) or
+            '..' in value.split('/')):
+        raise ValueError('Invalid guest boot path')
+    return value
+
+
+def bind(root, original, elf, generation, build, *, boot_path=None):
+    boot_path = _boot_path(boot_path)
     _, lock = dependency(root)
     exe = build / ('ps3-native-module.exe' if os.name == 'nt' else 'ps3-native-module')
     if not exe.is_file():
@@ -32,12 +41,12 @@ def bind(root, original, elf, generation, build):
             firmware_files.update(firmware_artifacts(root, Path(directory)))
     receipt = {'schema': 2, 'diagnostic_only': True, 'original_id': original['id'],
                'original_source': original['source'], 'elf': str(elf.resolve()), 'elf_sha256': digest(elf),
-               'binary': str(exe.resolve()), 'binary_sha256': digest(exe),
+               'binary': str(exe.resolve()), 'binary_sha256': digest(exe), 'boot_path': boot_path,
                'upstream': lock, 'cmake_cache_sha256': digest(build / 'CMakeCache.txt'),
                'generation': {**{str(p.resolve()): digest(p) for p in generation.glob('ppu_recomp*.*')}, **spu_files, **firmware_files},
                'guard_sha256': digest(root / 'src/native_guard.cpp'),
                'own_sources': {str(p): digest(root / p) for p in
-                               ('src/module_hooks.cpp', 'src/native_stop.cpp', 'src/native_storage.cpp', 'src/native_storage.h', 'src/native_lle.cpp', 'src/native_lle.h', 'src/ps3native/firmware.py', 'cmake/NativeModule.cmake', 'CMakeLists.txt', 'src/ps3native/codegen.py')}}
+                               ('src/module_hooks.cpp', 'src/native_stop.cpp', 'src/native_storage.cpp', 'src/native_storage.h', 'src/native_lle.cpp', 'src/native_lle.h', 'src/ps3native/firmware.py', 'src/ps3native/session.py', 'cmake/NativeModule.cmake', 'CMakeLists.txt', 'src/ps3native/codegen.py')}}
     target = build / 'module/receipt.json'
     target.parent.mkdir(parents=True, exist_ok=True)
     temporary = target.with_suffix('.pending')
@@ -68,6 +77,8 @@ def run(root, original, build, seconds=20, *, enter_button=None):
     # Diagnostic overrides in the upstream must not silently change guest behavior.
     env = {k: v for k, v in env.items() if not k.upper().startswith(('YDKJ_', 'PPU_', 'SPU_', 'SPURS_', 'PS3_', 'PAD_', 'D3D12_', 'LBP_', 'GH3_', 'FS_', 'RSX_', 'GCM_', 'PSNR_', 'A2O_', 'SYS_HEAP_', 'TTY_'))}
     if enter_button is not None: env['PS3_ENTER_BUTTON'] = enter_button
+    boot_path = _boot_path(receipt.get('boot_path'))
+    if boot_path is not None: env['PS3_BOOT_PATH'] = boot_path
     source = Path(original['source'])
     vfs = source.parent if source.name == 'PS3_GAME' or source.is_file() else source
     env.update(PS3_VFS_ROOT=str(vfs), PS3_HDD0_ROOT=str(state / 'dev_hdd0'),

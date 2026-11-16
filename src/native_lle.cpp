@@ -1,5 +1,6 @@
 #include "ppu_recomp.h"
 #include "native_lle.h"
+#include "guest_process.h"
 #include "vm.h"
 #include <atomic>
 #include <cstdio>
@@ -20,6 +21,12 @@ struct Resident { const NativeLleModule* module = nullptr; std::atomic<int> star
 // shortcut: 64 resident prepared modules; expand on measured firmware requirements.
 static std::array<Resident, 64> loaded;
 static std::atomic<size_t> loaded_count{0};
+static void require_root_process() {
+    if (guest_process_current()) {
+        std::fprintf(stderr, "[native-blocked] isolated process PRX ownership is not integrated\n");
+        std::fflush(stderr); ps3_native_stop();
+    }
+}
 static uint32_t be32(const uint8_t* p) {
     return (uint32_t)p[0] << 24 | (uint32_t)p[1] << 16 | (uint32_t)p[2] << 8 | p[3];
 }
@@ -34,6 +41,7 @@ static const NativeLleExport* find_export(const NativeLleModule* m, uint32_t nid
     return lo < m->export_count && m->exports[lo].nid == nid ? m->exports + lo : nullptr;
 }
 extern "C" int ps3_native_lle_load(const NativeLleModule* m) {
+    require_root_process();
     const size_t count = loaded_count.load(std::memory_order_acquire);
     for (size_t i = 0; i < count; ++i) if (loaded[i].module == m) return 1;
     if (count == loaded.size()) return 0;
@@ -92,6 +100,7 @@ extern "C" int ps3_native_lle_named(const char* name) {
     return 0;
 }
 extern "C" int ps3_native_lle_start(const char* library, ppu_context* ctx) {
+    require_root_process();
     for (size_t i = 0; library && ctx && i < loaded_count.load(std::memory_order_acquire); ++i) {
         auto& entry = loaded[i]; const auto* m = entry.module;
         if (std::strcmp(library, m->library)) continue;
@@ -130,6 +139,7 @@ extern "C" int ps3_native_lle_start(const char* library, ppu_context* ctx) {
     return 0;
 }
 extern "C" int ps3_native_lle_dispatch(uint32_t nid, ppu_context* ctx) {
+    require_root_process();
     const NativeLleModule* m = nullptr; const NativeLleExport* e = nullptr;
     for (size_t i = 0; i < loaded_count.load(std::memory_order_acquire); ++i) {
         if (const auto* found = find_export(loaded[i].module, nid)) {
