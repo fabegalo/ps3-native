@@ -126,6 +126,13 @@ extern "C" void ps3_native_hle_gate(uint32_t nid, ppu_context* ctx) {
             std::fflush(stderr); ps3_native_stop();
         }
     }
+    if (ps3_native_lle_library("sys_lv2dbg")) {
+        const char* symbol = ps3_hle_symbol_name(nid);
+        if (symbol && !std::strncmp(symbol, "sys_dbg_", 8)) {
+            std::fprintf(stderr, "[native-blocked] original LV2DBG owner has no prepared export nid=0x%08X\n", nid);
+            std::fflush(stderr); ps3_native_stop();
+        }
+    }
     if (nid == ps3_compute_nid("cellGcmGetTimeStamp") && ctx->gpr[3] < 2048) return;
     if (nid == ps3_compute_nid("_sys_strlen") && guest_string_size((uint32_t)ctx->gpr[3])) return;
     if (nid == ps3_compute_nid("cellGcmSetFlipMode") && ctx->gpr[3] != CELL_GCM_DISPLAY_VSYNC) {
@@ -269,6 +276,8 @@ extern "C" void ps3_native_hle_gate(uint32_t nid, ppu_context* ctx) {
         } else if ((uint16_t)ctx->gpr[3] == CELL_SYSMODULE_ADEC_AT3 || (uint16_t)ctx->gpr[3] == CELL_SYSMODULE_ADEC_ATX) {
             ready = ps3_native_lle_library("cellAdec") && ps3_native_lle_library(
                 (uint16_t)ctx->gpr[3] == CELL_SYSMODULE_ADEC_AT3 ? "cellAtrac3dec" : "cellAtracXdec");
+        } else if ((uint16_t)ctx->gpr[3] == CELL_SYSMODULE_LV2DBG) {
+            ready = ps3_native_lle_library("sys_lv2dbg");
         } else if ((uint16_t)ctx->gpr[3] == CELL_SYSMODULE_VDEC_MPEG2) {
             ready = ps3_native_lle_library("libvdec") && ps3_native_lle_library("libsmvd2");
         } else if ((uint16_t)ctx->gpr[3] == CELL_SYSMODULE_VDEC_AL) {
@@ -354,6 +363,7 @@ extern "C" void ps3_native_syscall_gate(ppu_context* ctx) {
     if (number == 30) return;
     if (number == 484 || number == 486) return;
     if (number == 988) return;
+    if (number == 956) return;
     if (number == 380) return;
     if (number == 324 || number == 325 || number == 343 || number == 350) return;
     if (number == 817) return;

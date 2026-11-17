@@ -279,8 +279,11 @@ and passed HTTP module `0x0001` using original `libhttp` (HTTP and HTTP Util sha
 one image) and `libssl` AOT bindings. The original ATRAC3plus client, common ADEC,
 ATRAC3 and ATRAC3plus providers then completed their module-start paths. Shared
 PRX data linkage now resolves optional ADDR32 data references and opaque exports;
-code fixups, nonzero addends and TLS remain unsupported. The latest real boot
-stops at LV2 debug module `0x002E` after about 1.1 seconds. No network/TLS exchange,
+code fixups, nonzero addends and TLS remain unsupported. The original CEX
+`sys_lv2dbg` also completed initialization, selected using opaque process flags
+and the real HDD boot flag. Its syscall 956 returns the retail 4.93 kernel's
+verified `ENOSYS`, without accessing arguments. The latest real boot stops at
+system music module `0xF028` after about 1.2 seconds. No network/TLS exchange,
 decoded audio, menu, frame or gameplay has been verified.
 
 A bounded child-start diagnostic also compiled all 12,884 functions of the

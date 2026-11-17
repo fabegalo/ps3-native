@@ -8,7 +8,7 @@
     "patches": [
       {
         "path": "patches/ps3recomp/0001-strict-aot-execution.patch",
-        "sha256": "904eb51dc336f417402c83c8e676996bc94533d16d7018cc91e3caa0d5ecd8d9",
+        "sha256": "7107f175eb9f9a8cb1f6030069e17ee1dc31dd585a6b4d801c934966382943d6",
         "source_hash_normalization": "LF",
         "files": {
           "runtime/ppu/ppu_hle.cpp": {
@@ -105,7 +105,7 @@
           },
           "runtime/syscalls/lv2_register.c": {
             "before": "a390011acdfd30c44ecb63c05b516e847adb96104f17b4e2af15e64da4fd1b38",
-            "after": "6cb1f0f9956d089dd44a3aa4c58ff2b6a325285c6354c668e4c0d8b917284c34"
+            "after": "0cedc7edb56f193db5a36996f950ceb2d5c4beb06fc7054b88aa635b03d22ce2"
           },
           "runtime/syscalls/sys_event.c": {
             "before": "5e44684dfca647dd8ce5cc70ecdfb394b17711ef09902520c5a482ced1da6f89",

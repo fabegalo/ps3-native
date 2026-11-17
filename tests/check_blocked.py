@@ -2,6 +2,24 @@ import subprocess
 import sys
 import os
 from pathlib import Path
+import tempfile
+
+result = subprocess.run([sys.argv[3], sys.argv[4], 'lv2dbg_missing_export'], capture_output=True, timeout=15)
+if result.returncode != 86 or b'original LV2DBG owner has no prepared export' not in result.stderr:
+    raise AssertionError(('LV2DBG ownership', result.returncode, result.stderr[-2000:]))
+
+with tempfile.TemporaryDirectory() as tmp:
+    bootflag = Path(tmp) / 'data' / 'bootflag.dat'
+    bootflag.parent.mkdir()
+    for data, expected in ((None, 1), (b'', 0), (b'\x10', 0), (b'\0\x10', 1),
+                           (b'\x10\0' + b'\xff' * 6, 0), (b'\0\x90' + b'\0' * 6, 1)):
+        if data is not None:
+            bootflag.write_bytes(data)
+        result = subprocess.run([sys.argv[1], 'lv2dbg_selector'], capture_output=True, timeout=15,
+                                env=dict(os.environ, PS3_HDD0_ROOT=tmp))
+        if result.returncode or f'[lv2dbg-cex] {expected}'.encode() not in result.stdout:
+            raise AssertionError(('LV2DBG original selection and ABI preservation', data, result.returncode,
+                                  result.stdout, result.stderr[-2000:]))
 
 for mode in ('atrac_missing_export', 'adec_missing_export'):
     result = subprocess.run([sys.argv[3], sys.argv[4], mode], capture_output=True, timeout=15)

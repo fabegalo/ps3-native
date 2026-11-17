@@ -6997,12 +6997,26 @@
  }
  
  /* sys_process_is_spu_lock_line_reservation_address (14)
-@@ -2539,6 +3108,12 @@
+@@ -2532,6 +3101,12 @@
+     return CELL_OK;
+ }
+ 
++/* Retail 4.93 syscall 956 resolves to 0x26D2A0: ENOSYS before argument access. */
++static int64_t debug_register_exception_handler_cex(ppu_context* ctx) {
++    (void)ctx;
++    return (int32_t)CELL_ENOSYS;
++}
++
+ void lv2_register_all_syscalls(lv2_syscall_table* tbl)
+ {
+     /* Initialize the table with unimplemented stubs first */
+@@ -2539,6 +3114,13 @@
  
      /* Process control */
      lv2_syscall_register(tbl, SYS_PROCESS_GETPID, sys_process_getpid_handler);
 +    lv2_syscall_register(tbl, 30, process_get_paramsfo);
 +    lv2_syscall_register(tbl, 988, process_debug_cleanup);
++    lv2_syscall_register(tbl, 956, debug_register_exception_handler_cex);
 +    lv2_syscall_register(tbl, 380, system_manager_params);
 +    lv2_syscall_register(tbl, SYS_PRX_REGISTER_MODULE, prx_register_module);
 +    lv2_syscall_register(tbl, 486, prx_register_library);
@@ -7010,7 +7024,7 @@
      lv2_syscall_register(tbl, SYS_PROCESS_EXIT3,  sys_process_exit_handler);
      /* SYS_PROCESS_EXIT (22 on real lv2 / RPCS3) was never registered: a guest
       * issuing it fell through to the catch-all stub, which told the guest its
-@@ -2590,7 +3165,9 @@
+@@ -2590,7 +3172,9 @@
      /* Some SDK-era CRTs (Tokyo Jungle, Sonic/Gunstar hubs, 4 Elements HD) issue
       * sys_tty_write under the alternate number 988 (0x3DC) instead of 403; an
       * unimplemented return derails the CRT init table-walk into abort(). Alias it. */
@@ -7020,7 +7034,7 @@
  
      /* sys_ss_get_open_psid (console PSN/NP identity) — LBP 1.30 reads it during
       * boot; the unimplemented stub left the out-param as garbage. */
-@@ -2630,7 +3207,10 @@
+@@ -2630,7 +3214,10 @@
      lv2_syscall_register(tbl, SYS_SPU_THREAD_GET_EXIT_STATUS, sys_spu_thread_get_exit_status_handler);
      lv2_syscall_register(tbl, SYS_SPU_THREAD_CONNECT_EVENT,   sys_spu_thread_connect_event_handler);
      { extern void (*g_spu_out_mbox_hook)(uint32_t,uint32_t,int,uint32_t);
@@ -7032,7 +7046,7 @@
      { extern int (*g_spu_user_event_hook)(spu_context*, uint32_t);
        g_spu_user_event_hook = spu_deliver_user_event; }
      lv2_syscall_register(tbl, SYS_SPU_THREAD_DISCONNECT_EVENT,sys_spu_thread_stub);
-@@ -2677,7 +3257,11 @@
+@@ -2677,7 +3264,11 @@
  
  #define LV2_HLE_BRIDGE(fn_name, handler)                                       static void fn_name(ppu_context* ctx) { (void)handler(ctx); }
  

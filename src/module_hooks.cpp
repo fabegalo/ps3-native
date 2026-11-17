@@ -30,6 +30,8 @@ extern "C" __attribute__((weak)) const NativeLleModule* ps3_native_firmware_extr
 extern "C" s32 sys_ppu_thread_once(u32, u32);
 extern "C" s32 sys_process_is_stack(u32);
 extern "C" s32 sys_process_get_paramsfo(void*);
+extern "C" int32_t ppu_process_get_paramsfo(uint64_t);
+extern "C" int64_t ps3_native_fs_dispatch(uint32_t, ppu_context*);
 extern "C" int cellGameReleaseCheck(void);
 extern "C" s32 _sys_spu_printf_initialize(u32, u32, u32, u32);
 extern "C" s32 _sys_spu_printf_finalize(void);
@@ -51,6 +53,37 @@ extern "C" s32 cellAudioOutConfigure(u32, void*, void*, u32);
 extern "C" __attribute__((weak)) int ps3_native_audio_stereo_probe(void) { return cellAudioOutputProbe(); }
 // Standalone CPU harnesses have no presentation backend.
 extern "C" __attribute__((weak)) int ppu_host_video_state(void) { return 0; }
+extern "C" int ps3_native_lv2dbg_cex(ppu_context* ctx) {
+    // Firmware 4.93 libsysmodule 0x450: opaque process flags precede bootflag.dat.
+    const u64 sp = ctx->gpr[1];
+    if (sp > UINT32_MAX || sp < 512 || !ps3_native_guest_range_backed((u32)sp - 512, 512)) {
+        std::fprintf(stderr, "[native-blocked] LV2DBG selector requires a backed guest stack\n");
+        std::fflush(stderr); ps3_native_stop();
+    }
+    const u32 scratch = (u32)sp - 512;
+    struct Restore {
+        u32 address; u8 bytes[512];
+        ~Restore() { ppu_write_coherent(address, bytes, sizeof bytes); }
+    } restore{scratch, {}};
+    std::memcpy(restore.bytes, vm_base + scratch, sizeof restore.bytes);
+    const u8 zero[64]{};
+    ppu_write_coherent(scratch, zero, sizeof zero);
+    if (!ppu_process_get_paramsfo(scratch) && (vm_read64(scratch + 0x18) & 1))
+        return !(vm_read64(scratch + 0x10) & 1);
+    constexpr char path[] = "/dev_hdd0/data/bootflag.dat";
+    ppu_write_coherent(scratch + 64, path, sizeof path);
+    ppu_context io = *ctx;
+    io.gpr[3] = scratch + 64; io.gpr[4] = 0; io.gpr[5] = scratch + 96;
+    io.gpr[6] = io.gpr[7] = io.gpr[8] = 0;
+    if ((s32)ps3_native_fs_dispatch(801, &io) < 0) return 1;
+    const u32 fd = vm_read32(scratch + 96);
+    ppu_write_coherent(scratch, zero, 8);
+    io.gpr[3] = fd; io.gpr[4] = scratch; io.gpr[5] = 8; io.gpr[6] = scratch + 104;
+    ps3_native_fs_dispatch(802, &io);
+    io.gpr[3] = fd; ps3_native_fs_dispatch(804, &io);
+    // The original ignores read status/count; unread bytes retain the initial zeroes.
+    return (vm_read8(scratch + 1) & 0x10) != 0;
+}
 namespace {
 void module_by_name(ppu_context* ctx) {
     if (ctx->gpr[4] || ctx->gpr[5]) { ctx->gpr[3] = (u64)(s64)(s32)0x80010002; return; }
@@ -168,6 +201,16 @@ void thread_once(ppu_context* ctx) {
 }
 void load_module(ppu_context* ctx) {
     const auto id = (uint16_t)ctx->gpr[3];
+    if (id == CELL_SYSMODULE_LV2DBG) {
+        if (!ps3_native_lv2dbg_cex(ctx)) {
+            std::fprintf(stderr, "[native-blocked] LV2DBG DEX variant requested; only original CEX is prepared\n");
+            std::fflush(stderr); ps3_native_stop();
+        }
+        if (!ps3_native_lle_start("sys_lv2dbg", ctx)) {
+            std::fprintf(stderr, "[native-blocked] original LV2DBG module start unavailable or concurrent\n");
+            std::fflush(stderr); ps3_native_stop();
+        }
+    }
     const auto dependency = [&](u16 dep) {
             if (cellSysmoduleIsLoaded(dep) == CELL_OK) return;
             const ppu_context saved = *ctx;
@@ -572,7 +615,7 @@ extern "C" void ps3_load_prx_modules(void) {
             std::fprintf(stderr, "[native-blocked] extra original PRX ownership, image or AOT bindings invalid\n");
             std::fflush(stderr); ps3_native_stop();
         }
-    for (const char* library : {"libvdec", "libsmvd2", "cellAtrac", "cellAdec", "cellAtrac3dec", "cellAtracXdec"})
+    for (const char* library : {"libvdec", "libsmvd2", "cellAtrac", "cellAdec", "cellAtrac3dec", "cellAtracXdec", "sys_lv2dbg"})
         if (ps3_native_lle_library(library) && !ps3_native_lle_defer_start(library)) {
             std::fprintf(stderr, "[native-blocked] original codec module cannot defer initialization\n");
             std::fflush(stderr); ps3_native_stop();

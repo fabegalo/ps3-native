@@ -53,6 +53,7 @@ void lv2_syscall(ppu_context*);
 void ppu_sysprx_register(void);
 void lv2_init_syscalls(void);
 int ppu_process_set_paramsfo(const void*, uint32_t);
+int ps3_native_lv2dbg_cex(ppu_context*);
 void sys_memory_set_image_query(uint64_t (*)(uint64_t, uint64_t));
 uint32_t ps3_process_spawn_callback(unsigned);
 extern uint32_t g_ppu_main_stack_addr, g_ppu_main_stack_size;
@@ -462,6 +463,38 @@ int main(int argc, char** argv) {
             call(135, port) != (u32)CELL_ESRCH || call(129, replacement, 0)) return 7;
         vm_shutdown(); puts("IPC ports: keyed connection, payload, type errors and no stale routing after queue replacement verified");
         return 0;
+    }
+    if (argc == 2 && !strcmp(argv[1], "lv2dbg_selector")) {
+        if (vm_init() || vm_commit(0x30000, 0x10000)) return 1;
+        g_ppu_main_stack_addr = 0x30000; g_ppu_main_stack_size = 0x10000;
+        ppu_context c{}; c.gpr[1] = 0x3FF00; c.gpr[3] = 0x2E; c.lr = 0x12345678;
+        const ppu_context saved = c;
+        lv2_init_syscalls();
+        ppu_context debug{}; debug.gpr[11] = 956;
+        for (u64 argument : {0ull, 1ull, UINT64_MAX}) {
+            for (unsigned i = 3; i <= 10; ++i) debug.gpr[i] = argument;
+            lv2_syscall(&debug);
+            if ((u32)debug.gpr[3] != (u32)CELL_ENOSYS) return 7;
+        }
+        memset(vm_base + 0x3FD00, 0xA5, 512);
+        const auto query = [&]() {
+            const int result = ps3_native_lv2dbg_cex(&c);
+            if (memcmp(&c, &saved, sizeof c)) return -1;
+            for (unsigned i = 0; i < 512; ++i) if (vm_base[0x3FD00 + i] != 0xA5) return -2;
+            return result;
+        };
+        const int file_result = query();
+        if (file_result < 0) return 2;
+        u8 params[64]{}; params[0x1F] = 1;
+        if (!ppu_process_set_paramsfo(params, 64) || query() != 1) return 3;
+        params[0x17] = 1;
+        if (!ppu_process_set_paramsfo(params, 64) || query() != 0) return 4;
+        params[0x1F] = 0;
+        if (!ppu_process_set_paramsfo(params, 64) || query() != file_result) return 5;
+        params[0] = 0xFF;
+        if (!ppu_process_set_paramsfo(params, 64) || query() != file_result) return 6;
+        std::printf("[lv2dbg-cex] %d\n", file_result);
+        vm_shutdown(); return 0;
     }
     if (argc == 2 && !strcmp(argv[1], "process_paramsfo")) {
         const auto previous_stack = ppu_primary_stack_size();

@@ -23,6 +23,14 @@ int main(int argc, char** argv) {
     const auto* module = ps3_native_firmware_definition();
     if (ppu_register_image_region(0x0D000000, 4096)) return 11;
     if (!module || ps3_native_lle_owns(0xD00DFEED)) return 2;
+    if (argc == 3 && !std::strcmp(argv[2], "lv2dbg_missing_export")) {
+        auto owned = *module; owned.library = "sys_lv2dbg";
+        if (!ps3_native_lle_load(&owned)) return 38;
+        const char* name = "sys_dbg_get_thread_list";
+        const auto nid = ps3_compute_nid(name);
+        ps3_hle_register(nid, name, (void*)extra_export);
+        ppu_context ctx{}; ps3_hle_call(nid, &ctx); return 39;
+    }
     if (argc == 3 && (!std::strcmp(argv[2], "atrac_missing_export") || !std::strcmp(argv[2], "adec_missing_export"))) {
         const bool atrac = !std::strcmp(argv[2], "atrac_missing_export");
         auto owned = *module; owned.library = atrac ? "cellAtrac" : "cellAdec";

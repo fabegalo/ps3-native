@@ -288,8 +288,11 @@ SPU e passou pelo módulo HTTP `0x0001` usando os vínculos AOT originais de
 ADEC comum e os provedores ATRAC3/ATRAC3plus originais concluíram sua inicialização.
 O vínculo compartilhado de dados PRX resolve referências opcionais ADDR32 e
 exports opacos; alterações de código, addends diferentes de zero e TLS continuam
-sem suporte. O boot real mais recente para no módulo de depuração LV2 `0x002E`,
-após cerca de 1,1 segundo. Rede/TLS em uso, áudio decodificado, menu, frame e gameplay
+sem suporte. A `sys_lv2dbg` CEX original também concluiu sua inicialização,
+selecionada pelos parâmetros opacos do processo e pelo arquivo real de boot no HDD.
+Seu syscall 956 retorna o `ENOSYS` verificado no kernel retail 4.93, sem acessar
+argumentos. O boot real mais recente para no módulo de música do sistema `0xF028`,
+após cerca de 1,2 segundo. Rede/TLS em uso, áudio decodificado, menu, frame e gameplay
 ainda não foram verificados.
 
 Um diagnóstico limitado de entrada do processo filho também compilou todas as
