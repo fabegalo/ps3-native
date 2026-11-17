@@ -59,11 +59,41 @@ static int read_report(const char* name, uint32_t type, uint32_t expected) {
     /* A transport failure invalidates the probe; unknown types have no golden value. */
     return padding == 0 && (type != 1 || value == expected);
 }
-int main(void) {
+static int tile9_capture(const char* name, uint32_t mode) {
+    if (!complete()) return 0;
+    volatile unsigned char* depth = local + 0x100000;
+    uint32_t hash = 2166136261u;
+    for (unsigned i = 0; i < 0x10000; ++i) hash = (hash ^ depth[i]) * 16777619u;
+    printf("{\"probe\":\"ps3-native-tile9-v1\",\"backend\":\"ps3\",\"case\":\"%s\","
+           "\"comp\":%u,\"pitch\":512,\"width\":64,\"height\":64,\"bytes\":65536,"
+           "\"fnv1a32\":\"%08x\",\"first_4096_bytes\":\"", name, mode, hash);
+    for (unsigned i = 0; i < 4096; ++i) printf("%02x", depth[i]);
+    puts("\"}"); fflush(stdout); return 1;
+}
+static int tile9_probe(void) {
+    // Observe the same depth/stencil operations with compression off and mode 9.
+    // Raw CPU bytes are evidence; no NV40 layout is assumed to be an NV47 oracle.
+    for (unsigned mode = 0; mode <= 9; mode += 9) {
+        if (!complete()) return 0;
+        for (unsigned i = 0; i < 0x10000; ++i) local[0x100000 + i] = (unsigned char)(i * 37u + 19u);
+        __sync_synchronize();
+        if (gcmSetTileInfo(2, 0, base_offset + 0x100000, 0x10000, 512, mode, 0, 0) || gcmBindTile(2)) return 0;
+        zcull_probe_scene(emit, store, base_offset);
+        emit(0x22C, 512); emit(0x1D8C, 0xF123455A); emit(0x1D94, 3);
+        if (!tile9_capture("clear", mode)) return 0;
+        probe_draw(emit);
+        if (!tile9_capture("draw", mode) || gcmUnbindTile(2)) return 0;
+    }
+    puts("{\"probe_complete\":true,\"compression_semantics_verified\":false}");
+    return 1;
+}
+int main(int argc, char** argv) {
+    if (argc > 2 || (argc == 2 && strcmp(argv[1], "--tile9"))) return 1;
     void* io = memalign(0x100000, 0x100000);
     if (!io || rsxInit(&context, 0x10000, 0x100000, io)) return 1;
     local = rsxMemalign(0x10000, 0x200000);
     if (!local || rsxAddressToOffset((const void*)local, &base_offset)) return 1;
+    if (argc == 2) return tile9_probe() ? 0 : 2;
     printf("{\"probe\":\"ps3-native-zcull-v1\",\"backend\":\"ps3\",\"local_base\":%u,"
            "\"width\":64,\"height\":64,\"samples\":1}\n", base_offset);
     zcull_probe_scene(emit, store, base_offset);

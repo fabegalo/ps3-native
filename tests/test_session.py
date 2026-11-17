@@ -49,7 +49,7 @@ class SessionTests(unittest.TestCase):
             root = Path(tmp)
             generation, build = root / 'aot', root / 'build'
             generation.mkdir(); build.mkdir()
-            for name in ('src/native_guard.cpp', 'src/module_hooks.cpp', 'src/native_stop.cpp', 'src/native_storage.cpp', 'src/native_storage.h', 'src/native_system_manager.cpp', 'src/native_system_manager.h', 'src/native_lle.cpp', 'src/native_lle.h', 'src/ps3native/firmware.py', 'src/ps3native/session.py', 'cmake/NativeModule.cmake', 'CMakeLists.txt', 'src/ps3native/codegen.py'):
+            for name in ('src/native_guard.cpp', 'src/module_hooks.cpp', 'src/native_stop.cpp', 'src/native_storage.cpp', 'src/native_storage.h', 'src/native_system_manager.cpp', 'src/native_system_manager.h', 'src/native_config.cpp', 'src/native_input.cpp', 'src/native_lle.cpp', 'src/native_lle.h', 'src/ps3native/firmware.py', 'src/ps3native/session.py', 'cmake/NativeModule.cmake', 'CMakeLists.txt', 'src/ps3native/codegen.py'):
                 path = root / name
                 path.parent.mkdir(parents=True, exist_ok=True)
                 path.write_text('own contract input')

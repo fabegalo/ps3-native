@@ -282,9 +282,18 @@ PRX data linkage now resolves optional ADDR32 data references and opaque exports
 code fixups, nonzero addends and TLS remain unsupported. The original CEX
 `sys_lv2dbg` also completed initialization, selected using opaque process flags
 and the real HDD boot flag. Its syscall 956 returns the retail 4.93 kernel's
-verified `ENOSYS`, without accessing arguments. The latest real boot stops at
-system music module `0xF028` after about 1.2 seconds. No network/TLS exchange,
-decoded audio, menu, frame or gameplay has been verified.
+verified `ENOSYS`, without accessing arguments. Audited original clients for
+music, RESC, user/NP, AV chat, PAMF/SAIL, fibers, GEM, camera and input now pass
+the requested boot module sequence. The real EBOOT prints `Modules loaded` and
+`SPURS initialized`, opens the D3D12 backend and executes initial RSX commands
+with a completed semaphore fence. Shared LV2 contracts preserve opaque process
+parameters, authenticated privilege checks, config subscriptions and unclaimed
+input state. RSX mode `0x800` selects the original masked notification path.
+The latest real boot stops at tile 2, local offset `0x740000`, size `0x3A0000`,
+pitch `0x1400`, compression 9 (separate stencil): its compression
+semantics are not yet validated or implemented. The tile is rejected before
+binding, rather than silently disabling compression. No network/TLS exchange,
+decoded audio, menu, rendered game frame or gameplay has been verified.
 
 A bounded child-start diagnostic also compiled all 12,884 functions of the
 original `GOW1.self`. Its boot path, priority 1001 and 32 KiB stack match the
@@ -379,6 +388,14 @@ No PSL1GHT toolchain or real PS3 was available here, so that ELF is **not built 
 hardware-validated**. `python tests/compare_zcull_probe.py native.log ps3.log`
 compares case values without comparing clock epochs; exit 2 denotes missing hardware
 or counter gaps. Matching this finite probe alone does not certify NV47 fidelity.
+
+The same optional ELF accepts `--tile9` to observe depth/stencil clear and draw
+with compression 0/9. It records a fixed input pattern, a 64 KiB hash and the
+first 4096 CPU-visible bytes after completed GPU labels; these observations have
+no invented golden output and are not consumed by the ZCULL counter comparator.
+The [envytools NV40 decoder](https://github.com/envytools/envytools/blob/master/nvhw/comp.c)
+is an MIT technical reference for separate stencil, not evidence that its byte
+layout matches RSX/NV47. This additional hardware probe is also unbuilt/unrun.
 
 No selector transition or gameplay is verified. Original and derived
 proprietary files remain outside Git.

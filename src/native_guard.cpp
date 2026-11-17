@@ -133,6 +133,42 @@ extern "C" void ps3_native_hle_gate(uint32_t nid, ppu_context* ctx) {
             std::fflush(stderr); ps3_native_stop();
         }
     }
+    if (ps3_native_lle_library("sys_io")) {
+        const char* symbol = ps3_hle_symbol_name(nid);
+        if (symbol && (!std::strncmp(symbol, "cellPad", 7) || !std::strncmp(symbol, "cellKb", 6) ||
+                       !std::strncmp(symbol, "cellMouse", 9))) {
+            std::fprintf(stderr, "[native-blocked] original input owner has no prepared export nid=0x%08X\n", nid);
+            std::fflush(stderr); ps3_native_stop();
+        }
+    }
+    if (ps3_native_lle_library("cellMusicUtility")) {
+        const char* symbol = ps3_hle_symbol_name(nid);
+        if (symbol && !std::strncmp(symbol, "cellMusic", 9)) {
+            std::fprintf(stderr, "[native-blocked] original music owner has no prepared export nid=0x%08X\n", nid);
+            std::fflush(stderr); ps3_native_stop();
+        }
+    }
+    static const struct { const char* library; const char* prefix; } clients[] = {
+        {"cellResc", "cellResc"}, {"cellUserInfo", "cellUserInfo"},
+        {"cellSearchUtility", "cellSearch"}, {"cellSysutilAvc2", "cellSysutilAvc2"},
+        {"cellPamf", "cellPamf"}, {"cellSail", "cellSail"},
+        {"cellFiber", "cellFiber"}, {"libgem", "cellGem"}, {"cellCamera", "cellCamera"}
+    };
+    for (const auto& client : clients) {
+        const char* symbol = ps3_hle_symbol_name(nid);
+        if (ps3_native_lle_library(client.library) && symbol &&
+            !std::strncmp(symbol, client.prefix, std::strlen(client.prefix))) {
+            std::fprintf(stderr, "[native-blocked] original client owner has no prepared export library=%s nid=0x%08X\n", client.library, nid);
+            std::fflush(stderr); ps3_native_stop();
+        }
+    }
+    if (ps3_native_lle_library("sceNp")) {
+        const char* symbol = ps3_hle_symbol_name(nid);
+        if (symbol && !std::strncmp(symbol, "sceNp", 5)) {
+            std::fprintf(stderr, "[native-blocked] original NP owner has no prepared export nid=0x%08X\n", nid);
+            std::fflush(stderr); ps3_native_stop();
+        }
+    }
     if (nid == ps3_compute_nid("cellGcmGetTimeStamp") && ctx->gpr[3] < 2048) return;
     if (nid == ps3_compute_nid("_sys_strlen") && guest_string_size((uint32_t)ctx->gpr[3])) return;
     if (nid == ps3_compute_nid("cellGcmSetFlipMode") && ctx->gpr[3] != CELL_GCM_DISPLAY_VSYNC) {
@@ -201,7 +237,7 @@ extern "C" void ps3_native_hle_gate(uint32_t nid, ppu_context* ctx) {
                                     "sys_process_is_stack",
                                     "sys_process_get_paramsfo",
                                     "sys_lwcond_create", "sys_lwcond_destroy", "sys_lwcond_signal", "sys_lwcond_signal_all", "sys_lwcond_wait",
-                                    "_sys_memset", "_sys_memcpy",
+                                    "_sys_memset", "_sys_memcpy", "_sys_malloc",
                                     "_sys_spu_printf_attach_group", "_sys_spu_printf_detach_group",
                                     "_sys_spu_printf_attach_thread", "_sys_spu_printf_detach_thread",
                                     "_sys_spu_printf_initialize", "_sys_spu_printf_finalize",
@@ -276,6 +312,8 @@ extern "C" void ps3_native_hle_gate(uint32_t nid, ppu_context* ctx) {
         } else if ((uint16_t)ctx->gpr[3] == CELL_SYSMODULE_ADEC_AT3 || (uint16_t)ctx->gpr[3] == CELL_SYSMODULE_ADEC_ATX) {
             ready = ps3_native_lle_library("cellAdec") && ps3_native_lle_library(
                 (uint16_t)ctx->gpr[3] == CELL_SYSMODULE_ADEC_AT3 ? "cellAtrac3dec" : "cellAtracXdec");
+        } else if (const char* library = ps3_native_sysmodule_library((u16)ctx->gpr[3]); library && ps3_native_lle_library(library)) {
+            ready = ps3_native_lle_library(library);
         } else if ((uint16_t)ctx->gpr[3] == CELL_SYSMODULE_LV2DBG) {
             ready = ps3_native_lle_library("sys_lv2dbg");
         } else if ((uint16_t)ctx->gpr[3] == CELL_SYSMODULE_VDEC_MPEG2) {
@@ -364,6 +402,11 @@ extern "C" void ps3_native_syscall_gate(ppu_context* ctx) {
     if (number == 484 || number == 486) return;
     if (number == 988) return;
     if (number == 956) return;
+    if (number == 871) return;
+    if (number == 516 || number == 517) return;
+    if (number == 519 || number == 520) return;
+    if (number == 510 || number == 512 || number == 514) return;
+    if (number == 621) return;
     if (number == 380) return;
     if (number == 324 || number == 325 || number == 343 || number == 350) return;
     if (number == 817) return;

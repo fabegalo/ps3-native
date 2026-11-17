@@ -14,6 +14,7 @@
 #include "sys_ppu_thread.h"
 #include "sys_cond.h"
 extern "C" {
+uint64_t sys_event_queue_generation(uint32_t);
 int ppu_process_set_control(const void*, uint32_t);
 #include "thread/spu_recomp.h"
 }
@@ -220,6 +221,95 @@ static void call(ppu_context& ctx, const char* name, uint64_t a0) {
     ps3_hle_call(ps3_compute_nid(name), &ctx);
 }
 int main(int argc, char** argv) {
+    if (argc == 2 && !strcmp(argv[1], "input_query_unverified")) {
+        lv2_init_syscalls(); ppu_context c{};
+        c.gpr[11] = 514; c.gpr[3] = 13; c.gpr[4] = UINT64_MAX; c.gpr[5] = 1;
+        lv2_syscall(&c); return 1;
+    }
+    if (argc == 2 && (!strcmp(argv[1], "input_wrapper") || !strcmp(argv[1], "input_wrapper_unverified"))) {
+        if (vm_init() || vm_commit(0x30000, 0x10000)) return 5;
+        g_ppu_main_stack_addr = 0x30000; g_ppu_main_stack_size = 0x10000;
+        lv2_init_syscalls(); ppu_context c{};
+        for (unsigned type = 0; type < 5; ++type) {
+            memset(vm_base + 0x31000, 0xA5, 3); vm_write8(0x31001, uint8_t(type));
+            c.gpr[11] = 514; c.gpr[3] = 14; c.gpr[4] = 0x31001; c.gpr[5] = 1;
+            lv2_syscall(&c);
+            if ((u32)c.gpr[3] != (type >= 1 && type <= 3 ? 0 : (u32)CELL_EINVAL) ||
+                vm_read8(0x31000) != 0xA5 || vm_read8(0x31001) != type || vm_read8(0x31002) != 0xA5) return 6;
+        }
+        c.gpr[3] = 14; c.gpr[4] = UINT64_MAX; lv2_syscall(&c);
+        if ((u32)c.gpr[3] != (u32)CELL_EFAULT) return 7;
+        c.gpr[11] = 510; c.gpr[3] = c.gpr[4] = c.gpr[5] = UINT64_MAX;
+        lv2_syscall(&c); if (c.gpr[3] != 2) return 3;
+        lv2_syscall(&c); if (c.gpr[3] != 2) return 4;
+        c.gpr[11] = 621; c.gpr[3] = !strcmp(argv[1], "input_wrapper") ? 10 : 1;
+        c.gpr[4] = c.gpr[5] = UINT64_MAX;
+        lv2_syscall(&c); if (c.gpr[3]) return 1;
+        c.gpr[3] = 10; lv2_syscall(&c);
+        if ((u32)c.gpr[3] != (u32)CELL_EINVAL) return 2;
+        puts("Input wrapper initialization owns real synchronization resources, rejects repeated initialization and writes no guest pointer");
+        return 0;
+    }
+    if (argc == 2 && !strncmp(argv[1], "config_", 7)) {
+        if (vm_init() || vm_commit(0x30000, 0x10000)) return 1;
+        g_ppu_main_stack_addr = 0x30000; g_ppu_main_stack_size = 0x10000;
+        lv2_init_syscalls(); ppu_context c{};
+        const auto invoke = [&](u32 number, u64 a = 0, u64 b = 0, u64 d = 0, u64 e = 0) {
+            c.gpr[11] = number; c.gpr[3] = a; c.gpr[4] = b; c.gpr[5] = d; c.gpr[6] = e;
+            lv2_syscall(&c); return (u32)c.gpr[3];
+        };
+        vm_write32(0x31010, 1); vm_write32(0x31014, 1);
+        if (invoke(516, 0, UINT64_MAX) != (u32)CELL_ESRCH || invoke(128, 0x31000, 0x31010, 0, 32)) return 2;
+        const u32 queue = vm_read32(0x31000); const u64 epoch = sys_event_queue_generation(queue);
+        vm_write32(0x3103F, 0xA5A5A5A5); vm_write32(0x31047, 0xA5A5A5A5);
+        if (!epoch || invoke(516, queue, UINT64_MAX) != (u32)CELL_EFAULT || invoke(516, queue, 0x31043)) return 3;
+        const u32 first = vm_read32(0x31043);
+        if (!first || vm_read32(0x3103F) != 0xA5A5A5A5 || vm_read32(0x31047) != 0xA5A5A5A5 ||
+            invoke(516, queue, 0x31050)) return 4;
+        const u32 second = vm_read32(0x31050);
+        const auto listen = [&](u32 config, u64 service, u64 size = 0, u32 mode = 1) {
+            c.gpr[7] = size; c.gpr[8] = mode; c.gpr[9] = 0x31058;
+            return invoke(519, config, service, 1, 0);
+        };
+        if (strcmp(argv[1], "config_session")) {
+            const bool producer = !strcmp(argv[1], "config_producer_unverified");
+            listen(first, producer ? 0x11 : UINT64_C(0x8000000000000002),
+                   !strcmp(argv[1], "config_filter_unverified") ? 4 : 0,
+                   !strcmp(argv[1], "config_mode_unverified") ? 2 : 1);
+            return 7;
+        }
+        if (listen(first, UINT64_C(0x8000000000000002))) return 8;
+        const u32 listener = vm_read32(0x31058);
+        if (!listener || invoke(520, second, listener) != (u32)CELL_ESRCH ||
+            invoke(130, queue, 0, 1) != (u32)CELL_ETIMEDOUT || invoke(520, first, listener) ||
+            invoke(520, first, listener) != (u32)CELL_ESRCH ||
+            listen(first, UINT64_C(0x8000000000000002), 0, 0)) return 9;
+        if (!second || second == first || invoke(517, UINT32_MAX) != (u32)CELL_ESRCH ||
+            invoke(129, queue, 0) || sys_event_queue_generation(queue) ||
+            invoke(516, queue, 0x31050) != (u32)CELL_ESRCH ||
+            invoke(128, 0x31000, 0x31010, 0, 32)) return 5;
+        if (vm_read32(0x31000) != queue || sys_event_queue_generation(queue) == epoch ||
+            invoke(517, first) || invoke(517, first) != (u32)CELL_ESRCH ||
+            invoke(517, second) || invoke(129, queue, 0)) return 6;
+        vm_shutdown(); puts("Config sessions: queue identities, bounds, owned listeners, no fabricated events, close and queue replacement verified");
+        return 0;
+    }
+    if (argc == 2 && !strcmp(argv[1], "prx_malloc")) {
+        if (vm_init() || vm_commit(0x30000, 0x10000)) return 1;
+        g_ppu_main_stack_addr = 0x30000; g_ppu_main_stack_size = 0x10000;
+        ppu_context c{}; c.gpr[1] = 0x3FF00;
+        call(c, "_sys_malloc", 0xE90); const u32 first = (u32)c.gpr[3];
+        call(c, "_sys_malloc", 31); const u32 second = (u32)c.gpr[3];
+        if (!first || !second || first == second || (first & 15) || (second & 15) ||
+            !ps3_native_guest_range_backed(first, 0xE90) || !ps3_native_guest_range_backed(second, 31)) return 2;
+        vm_write8(first, 0x31); vm_write8(first + 0xE8F, 0x73);
+        vm_write8(second, 0x22); vm_write8(second + 30, 0x44);
+        call(c, "_sys_malloc", UINT32_MAX);
+        if (c.gpr[3] || vm_read8(first) != 0x31 || vm_read8(first + 0xE8F) != 0x73 ||
+            vm_read8(second) != 0x22 || vm_read8(second + 30) != 0x44) return 3;
+        vm_shutdown(); puts("PRX malloc returns distinct aligned guest allocations and preserves them after exhaustion");
+        return 0;
+    }
     if (argc >= 2 && !strcmp(argv[1], "sm_params")) {
         if (vm_init() || vm_commit(0x30000, 0x10000)) return 1;
         g_ppu_main_stack_addr = 0x30000; g_ppu_main_stack_size = 0x10000;
@@ -288,6 +378,11 @@ int main(int argc, char** argv) {
     }
     if (argc == 2 && !strcmp(argv[1], "process_debug")) {
         lv2_init_syscalls(); ppu_context ctx{};
+        ctx.gpr[11] = 1; lv2_syscall(&ctx); const u32 pid = (u32)ctx.gpr[3];
+        const auto privilege = [&]() {
+            ctx.gpr[11] = 512; ctx.gpr[3] = pid; ctx.gpr[4] = UINT64_MAX;
+            lv2_syscall(&ctx); return (u32)ctx.gpr[3];
+        };
         auto cleanup = [&](u64 mode, u64 reserved = 0) {
             ctx.gpr[11] = 988; ctx.gpr[3] = mode; ctx.gpr[4] = reserved;
             lv2_syscall(&ctx); return (u32)ctx.gpr[3];
@@ -297,13 +392,22 @@ int main(int argc, char** argv) {
         if (cleanup(1, 1) != (u32)CELL_EINVAL) return 2;
         uint8_t control[32] = {};
         if (ppu_process_set_control(control, 31) || ppu_process_set_control(nullptr, 32) ||
-            !ppu_process_set_control(control, 32) || cleanup(1) != (u32)CELL_EINVAL) return 3;
+            !ppu_process_set_control(control, 32) || cleanup(1) != (u32)CELL_EINVAL || privilege()) return 3;
+        for (unsigned flags = 0; flags < 256; ++flags) {
+            if (flags & 8) continue;
+            control[0] = 0x1F;
+            control[31] = (u8)flags;
+            if (!ppu_process_set_control(control, 32)) return 9;
+            ctx.gpr[11] = 871; ctx.gpr[3] = 1; ctx.gpr[4] = ctx.gpr[5] = UINT64_MAX;
+            lv2_syscall(&ctx);
+            if ((u32)ctx.gpr[3] != (u32)CELL_ENOSYS) return 10;
+        }
         control[0] = 0x40;
-        if (!ppu_process_set_control(control, 32)) return 4;
+        if (!ppu_process_set_control(control, 32) || privilege() != 1) return 4;
         for (u32 mode : {1u, 2u, 4u, 8u, 16u}) if (cleanup(mode)) return 5;
         if (cleanup(UINT64_C(0x100000001), UINT64_C(0x100000000))) return 6;
         control[0] = 0x3F; memset(control + 1, 0xFF, 31);
-        if (!ppu_process_set_control(control, 32) || cleanup(1) != (u32)CELL_EINVAL) return 7;
+        if (!ppu_process_set_control(control, 32) || cleanup(1) != (u32)CELL_EINVAL || privilege()) return 7;
         if (!ppu_process_set_control(nullptr, 0)) return 8;
         puts("Process debug cleanup validates modes, original control attributes and empty object state");
         return 0;
@@ -311,6 +415,23 @@ int main(int argc, char** argv) {
     if (argc == 2 && !strcmp(argv[1], "process_debug_unbound")) {
         lv2_init_syscalls(); ppu_context ctx{};
         ctx.gpr[11] = 988; ctx.gpr[3] = 1; lv2_syscall(&ctx); return 1;
+    }
+    if (argc == 2 && !strncmp(argv[1], "process_io_", 11)) {
+        lv2_init_syscalls(); ppu_context ctx{}; ctx.gpr[11] = 1; lv2_syscall(&ctx);
+        if (!strcmp(argv[1], "process_io_other")) {
+            u8 control[32]{}; ppu_process_set_control(control, 32); ++ctx.gpr[3];
+        }
+        ctx.gpr[11] = 512; lv2_syscall(&ctx); return 1;
+    }
+    if (argc == 2 && !strncmp(argv[1], "access_", 7)) {
+        lv2_init_syscalls(); ppu_context ctx{};
+        uint8_t control[32]{};
+        if (!strcmp(argv[1], "access_elevated")) control[0] = 0x20;
+        if (!strcmp(argv[1], "access_delegated")) control[31] = 8;
+        if (strcmp(argv[1], "access_unbound") && !ppu_process_set_control(control, 32)) return 2;
+        ctx.gpr[11] = 871; ctx.gpr[3] = !strcmp(argv[1], "access_command") ? 2 : 1;
+        ctx.gpr[4] = ctx.gpr[5] = UINT64_MAX;
+        lv2_syscall(&ctx); return 1;
     }
     if (argc >= 2 && !strcmp(argv[1], "fs_udf_query")) {
         if (vm_init() || vm_commit(0x30000, 0x10000)) return 1;
@@ -678,16 +799,19 @@ int main(int argc, char** argv) {
         cellGame_set_title_id(""); call(info, "sys_process_get_paramsfo", 0x31000);
         if ((u32)info.gpr[3] != (u32)CELL_ENOENT || vm_read32(0x31000) != 0xA5A5A5A5) return 2;
         cellGame_set_title_id("TEST00001");
+        call(info, "sys_process_get_paramsfo", 0x31000);
+        if ((u32)info.gpr[3] != (u32)CELL_ENOENT || vm_read32(0x31000) != 0xA5A5A5A5) return 7;
+        u8 opaque[64]{}; std::memcpy(opaque + 1, "TEST00001", 9); opaque[63] = 0x5A;
+        if (!ppu_process_set_paramsfo(opaque, sizeof opaque)) return 8;
         for (u64 invalid : {0ull, 0x3FFE0ull, 0x100031000ull}) {
             call(info, "sys_process_get_paramsfo", invalid);
             if ((u32)info.gpr[3] != (u32)CELL_EFAULT) return 3;
         }
         vm_write32(0x30FFC, 0xA5A5A5A5); vm_write32(0x31040, 0xA5A5A5A5);
         call(info, "sys_process_get_paramsfo", 0x31000);
-        if (info.gpr[3] || vm_read8(0x31000) || memcmp(vm_base + 0x31001, "TEST00001", 9) ||
+        if (info.gpr[3] || memcmp(vm_base + 0x31000, opaque, sizeof opaque) ||
             vm_read32(0x30FFC) != 0xA5A5A5A5 || vm_read32(0x31040) != 0xA5A5A5A5) return 4;
-        for (u32 i = 10; i < 64; ++i) if (vm_read8(0x31000 + i)) return 5;
-        vm_shutdown(); std::puts("Verified process SFO identity, 64-byte ABI and failed-call preservation"); return 0;
+        vm_shutdown(); std::puts("Verified opaque process parameters, shared LV2/import state and failed-call preservation"); return 0;
     }
     if (argc == 2 && !strncmp(argv[1], "mapper_named", 12)) {
         if (vm_init() || vm_commit(0x30000, 0x10000)) return 1;
@@ -769,7 +893,8 @@ int main(int argc, char** argv) {
                 context(0x31100, handle + 1, 0) != (u32)CELL_EINVAL ||
                 vm_read32(0x31100) != 0xA5A5A5A5) return 9;
             if (!strcmp(argv[1], "rsx_context_flags")) { context(0x31100, handle, 0x10); return 2; }
-            if (context(0x31100, handle, 0x20) || !vm_read32(0x31100)) return 10;
+            const u64 mode = !strcmp(argv[1], "rsx_context_masked") ? 0x820 : 0x20;
+            if (context(0x31100, handle, mode) || !vm_read32(0x31100)) return 10;
             if (vm_read32(VM_RSX_DEVICE_BASE + 0x30) != 1) return 33;
             if (!strcmp(argv[1], "rsx_context_multiple")) { context(0x31100, handle, 0); return 2; }
             const u32 driver = VM_RSX_CONTEXT_BASE + 0x100000, reports = driver + 0x100000;
@@ -778,7 +903,8 @@ int main(int argc, char** argv) {
                 vm_read64(0x31130) != reports || !ps3_native_guest_range_backed(VM_RSX_CONTEXT_BASE, VM_RSX_CONTEXT_SIZE) ||
                 ps3_native_guest_range_backed(VM_RSX_CONTEXT_BASE, VM_RSX_CONTEXT_SIZE + 1) ||
                 vm_read32(driver) != 0x211 || vm_read32(driver + 8) != 0x200000 ||
-                vm_read32(driver + 0x2C) != 0x1000 || vm_read32(driver + 0x34) != 0x1400 || vm_read32(driver + 0x54) != 0x20 ||
+                vm_read32(driver + 0x2C) != 0x1000 || vm_read32(driver + 0x34) != 0x1400 || vm_read32(driver + 0x54) != mode ||
+                vm_read32(driver + 0x12C0) != ((mode & 0x800) ? 0 : UINT32_MAX) ||
                 !queue ||
                 cellGcm_control_guest_addr() != VM_RSX_CONTEXT_BASE + 0x40 ||
                 vm_read64(reports + 0x1400) != UINT64_MAX || vm_read32(reports + 0x1408) ||
@@ -794,6 +920,12 @@ int main(int argc, char** argv) {
             if (vm_read32(reports + 0x20) != 0x12345678 ||
                 vm_read32(VM_HLE_INJECT_BASE + 0x20) != 0xA5A5A5A5 || synthetic_semaphore_early || synthetic_submits != 1) return 13;
             synthetic_semaphore_target = 0; synthetic_submits = 0; rsx_set_backend(nullptr);
+            if (mode & 0x800) {
+                rsx_raise_user_cmd(0x55667788);
+                memory.gpr[11] = 130; memory.gpr[3] = queue; memory.gpr[4] = 0x31200; memory.gpr[5] = 1000;
+                lv2_syscall(&memory);
+                if ((u32)memory.gpr[3] != (u32)CELL_ETIMEDOUT) return 34;
+            }
             vm_write32(driver + 0x12C0, 0x80);
             rsx_raise_user_cmd(0x12345678);
             memory.gpr[11] = 130; memory.gpr[3] = queue; memory.gpr[4] = 0x31200; memory.gpr[5] = 1000;
@@ -853,7 +985,7 @@ int main(int argc, char** argv) {
             if (attribute(id, 0x300, 15, tile_range, tile_format) != (u32)-17 ||
                 attribute(id, 0x300, 0, tile_range, tile_format | 0x800) != (u32)-17 ||
                 !cellGcmGetTileInfo(0)->bound || cellGcmGetTileInfo(0)->size != 0x100000) return 24;
-            if (!strcmp(argv[1], "rsx_context_tile_compressed")) { attribute(id, 0x300, 0, tile_range, tile_format | (7ull << 26)); return 2; }
+            if (!strcmp(argv[1], "rsx_context_tile_compressed")) { attribute(id, 0x300, 0, tile_range, tile_format | (9ull << 26)); return 2; }
             if (attribute(id, 0x300, 0, 0, 0) || cellGcmGetTileInfo(0)->bound) return 25;
             const u64 main_tile_range = (0x80000002ull << 32) | 0x800F0000;
             rsx_tile main_tile{};

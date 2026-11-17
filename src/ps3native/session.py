@@ -108,7 +108,7 @@ def bind(root, original, elf, generation, build, *, boot_path=None, spawn_attrib
                'generation': {**{str(p.resolve()): digest(p) for p in generation.glob('ppu_recomp*.*')}, **spu_files, **firmware_files},
                'guard_sha256': digest(root / 'src/native_guard.cpp'),
                'own_sources': {str(p): digest(root / p) for p in
-                               ('src/module_hooks.cpp', 'src/native_stop.cpp', 'src/native_storage.cpp', 'src/native_storage.h', 'src/native_system_manager.cpp', 'src/native_system_manager.h', 'src/native_lle.cpp', 'src/native_lle.h', 'src/ps3native/firmware.py', 'src/ps3native/session.py', 'cmake/NativeModule.cmake', 'CMakeLists.txt', 'src/ps3native/codegen.py')}}
+                               ('src/module_hooks.cpp', 'src/native_stop.cpp', 'src/native_storage.cpp', 'src/native_storage.h', 'src/native_system_manager.cpp', 'src/native_system_manager.h', 'src/native_config.cpp', 'src/native_input.cpp', 'src/native_lle.cpp', 'src/native_lle.h', 'src/ps3native/firmware.py', 'src/ps3native/session.py', 'cmake/NativeModule.cmake', 'CMakeLists.txt', 'src/ps3native/codegen.py')}}
     target = build / 'module/receipt.json'
     target.parent.mkdir(parents=True, exist_ok=True)
     temporary = target.with_suffix('.pending')

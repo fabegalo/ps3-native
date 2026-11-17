@@ -31,6 +31,7 @@ extern "C" int ps3_native_lle_dispatch(uint32_t, ppu_context*);
 extern "C" int ps3_native_lle_owns(uint32_t);
 extern "C" int ps3_native_lle_library(const char*);
 extern "C" int ps3_native_lle_named(const char*);
+extern "C" const char* ps3_native_sysmodule_library(uint16_t);
 extern "C" int ps3_native_lle_start(const char*, ppu_context*);
 extern "C" int ps3_native_lle_defer_start(const char*);
 extern "C" void ps3_native_lle_start_all(ppu_context*);

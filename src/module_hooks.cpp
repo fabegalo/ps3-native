@@ -30,7 +30,6 @@ extern "C" __attribute__((weak)) const NativeLleModule* ps3_native_firmware_extr
 extern "C" s32 sys_ppu_thread_once(u32, u32);
 extern "C" s32 sys_process_is_stack(u32);
 extern "C" s32 sys_process_get_paramsfo(void*);
-extern "C" int32_t ppu_process_get_paramsfo(uint64_t);
 extern "C" int64_t ps3_native_fs_dispatch(uint32_t, ppu_context*);
 extern "C" int cellGameReleaseCheck(void);
 extern "C" s32 _sys_spu_printf_initialize(u32, u32, u32, u32);
@@ -38,6 +37,7 @@ extern "C" s32 _sys_spu_printf_finalize(void);
 extern "C" u32 ps3_spu_printf_callback(u32);
 extern "C" void* _sys_memset(void*, s32, u32);
 extern "C" void* _sys_memcpy(void*, const void*, u32);
+extern "C" void* _sys_malloc(u32);
 extern "C" s32 _sys_strncmp(const char*, const char*, u32);
 extern "C" int cellAudioOutputProbe(void);
 extern "C" s32 cellAudioInit(void);
@@ -53,6 +53,26 @@ extern "C" s32 cellAudioOutConfigure(u32, void*, void*, u32);
 extern "C" __attribute__((weak)) int ps3_native_audio_stereo_probe(void) { return cellAudioOutputProbe(); }
 // Standalone CPU harnesses have no presentation backend.
 extern "C" __attribute__((weak)) int ppu_host_video_state(void) { return 0; }
+extern "C" const char* ps3_native_sysmodule_library(uint16_t id) {
+    switch (id) {
+    case 0xF028: case CELL_SYSMODULE_SYSUTIL_MUSIC2: return "cellMusicUtility";
+    case CELL_SYSMODULE_RESC: return "cellResc";
+    case CELL_SYSMODULE_SYSUTIL_USERINFO: return "cellUserInfo";
+    case CELL_SYSMODULE_SYSUTIL_NP: return "sceNp";
+    case CELL_SYSMODULE_SYSUTIL_NP2: return "sceNp2";
+    case CELL_SYSMODULE_SYSUTIL_NP_TUS: return "sceNpTus";
+    case 0xF02F: return "cellSearchUtility";
+    case 0xF030: return "cellSysutilAvc2";
+    case CELL_SYSMODULE_PAMF: return "cellPamf";
+    case CELL_SYSMODULE_SAIL: return "cellSail";
+    case CELL_SYSMODULE_SYSUTIL_NP_COMMERCE2: return "sceNpCommerce2";
+    case CELL_SYSMODULE_FIBER: return "cellFiber";
+    case CELL_SYSMODULE_GEM: return "libgem";
+    case CELL_SYSMODULE_CAMERA: return "cellCamera";
+    case CELL_SYSMODULE_IO: return "sys_io";
+    default: return nullptr;
+    }
+}
 extern "C" int ps3_native_lv2dbg_cex(ppu_context* ctx) {
     // Firmware 4.93 libsysmodule 0x450: opaque process flags precede bootflag.dat.
     const u64 sp = ctx->gpr[1];
@@ -68,7 +88,7 @@ extern "C" int ps3_native_lv2dbg_cex(ppu_context* ctx) {
     std::memcpy(restore.bytes, vm_base + scratch, sizeof restore.bytes);
     const u8 zero[64]{};
     ppu_write_coherent(scratch, zero, sizeof zero);
-    if (!ppu_process_get_paramsfo(scratch) && (vm_read64(scratch + 0x18) & 1))
+    if (!sys_process_get_paramsfo((void*)(uintptr_t)scratch) && (vm_read64(scratch + 0x18) & 1))
         return !(vm_read64(scratch + 0x10) & 1);
     constexpr char path[] = "/dev_hdd0/data/bootflag.dat";
     ppu_write_coherent(scratch + 64, path, sizeof path);
@@ -85,6 +105,9 @@ extern "C" int ps3_native_lv2dbg_cex(ppu_context* ctx) {
     return (vm_read8(scratch + 1) & 0x10) != 0;
 }
 namespace {
+void heap_allocate(ppu_context* ctx) {
+    ctx->gpr[3] = (u32)(uintptr_t)_sys_malloc((u32)ctx->gpr[3]);
+}
 void module_by_name(ppu_context* ctx) {
     if (ctx->gpr[4] || ctx->gpr[5]) { ctx->gpr[3] = (u64)(s64)(s32)0x80010002; return; }
     char name[29]{};
@@ -223,6 +246,17 @@ void load_module(ppu_context* ctx) {
                 std::fflush(stderr); ps3_native_stop();
             }
     };
+    if (const char* client = ps3_native_sysmodule_library(id); client && ps3_native_lle_library(client)) {
+        if (id == CELL_SYSMODULE_SYSUTIL_NP2) dependency(CELL_SYSMODULE_SYSUTIL_NP);
+        if (id == CELL_SYSMODULE_SYSUTIL_NP_TUS) dependency(CELL_SYSMODULE_SYSUTIL_NP2);
+        if (id == CELL_SYSMODULE_SYSUTIL_NP_COMMERCE2) {
+            dependency(CELL_SYSMODULE_SYSUTIL_NP2); dependency(CELL_SYSMODULE_HTTPS);
+        }
+        if (!ps3_native_lle_start(client, ctx)) {
+            std::fprintf(stderr, "[native-blocked] original client start unavailable or concurrent library=%s\n", client);
+            std::fflush(stderr); ps3_native_stop();
+        }
+    }
     if (id >= CELL_SYSMODULE_HTTP && id <= CELL_SYSMODULE_HTTPS) {
         if (id == CELL_SYSMODULE_HTTP || id == CELL_SYSMODULE_SSL) {
             dependency(CELL_SYSMODULE_NET); dependency(CELL_SYSMODULE_RTC);
@@ -527,6 +561,7 @@ struct RegisterAdapters {
         ps3_hle_register_ctx(ps3_compute_nid("sys_prx_get_module_id_by_name"), "sys_prx_get_module_id_by_name", module_by_name);
         ps3_hle_register_ctx(ps3_compute_nid("_sys_memset"), "_sys_memset", memory_set);
         ps3_hle_register_ctx(ps3_compute_nid("_sys_memcpy"), "_sys_memcpy", memory_copy);
+        ps3_hle_register_ctx(ps3_compute_nid("_sys_malloc"), "_sys_malloc", heap_allocate);
         ps3_hle_register_ctx(ps3_compute_nid("_sys_strcpy"), "_sys_strcpy", string_copy);
         ps3_hle_register_ctx(ps3_compute_nid("_sys_strlen"), "_sys_strlen", string_length);
         ps3_hle_register_ctx(ps3_compute_nid("_sys_strcat"), "_sys_strcat", string_append);
@@ -615,7 +650,7 @@ extern "C" void ps3_load_prx_modules(void) {
             std::fprintf(stderr, "[native-blocked] extra original PRX ownership, image or AOT bindings invalid\n");
             std::fflush(stderr); ps3_native_stop();
         }
-    for (const char* library : {"libvdec", "libsmvd2", "cellAtrac", "cellAdec", "cellAtrac3dec", "cellAtracXdec", "sys_lv2dbg"})
+    for (const char* library : {"libvdec", "libsmvd2", "cellAtrac", "cellAdec", "cellAtrac3dec", "cellAtracXdec", "sys_lv2dbg", "cellResc", "cellUserInfo", "cellSearchUtility", "cellSail", "cellFiber", "libgem", "cellCamera"})
         if (ps3_native_lle_library(library) && !ps3_native_lle_defer_start(library)) {
             std::fprintf(stderr, "[native-blocked] original codec module cannot defer initialization\n");
             std::fflush(stderr); ps3_native_stop();

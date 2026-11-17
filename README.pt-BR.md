@@ -291,9 +291,19 @@ exports opacos; alterações de código, addends diferentes de zero e TLS contin
 sem suporte. A `sys_lv2dbg` CEX original também concluiu sua inicialização,
 selecionada pelos parâmetros opacos do processo e pelo arquivo real de boot no HDD.
 Seu syscall 956 retorna o `ENOSYS` verificado no kernel retail 4.93, sem acessar
-argumentos. O boot real mais recente para no módulo de música do sistema `0xF028`,
-após cerca de 1,2 segundo. Rede/TLS em uso, áudio decodificado, menu, frame e gameplay
-ainda não foram verificados.
+argumentos. Os clientes originais auditados de música, RESC, usuário/NP,
+AV chat, PAMF/SAIL, fibers, GEM, câmera e entrada agora passam pela sequência de
+módulos solicitada no boot. O EBOOT real imprime `Modules loaded` e
+`SPURS initialized`, abre o backend D3D12 e executa os primeiros comandos RSX,
+com conclusão de fence de semáforo. Os contratos compartilhados do LV2 preservam
+parâmetros opacos do processo, verificações de privilégios autenticados,
+assinaturas de configuração e o estado de entrada sem proprietário. O modo RSX
+`0x800` seleciona o caminho original de notificações mascaradas. O boot real
+mais recente para no tile 2, VRAM `0x740000`, tamanho `0x3A0000`, pitch `0x1400`,
+compressão 9 (stencil separado): sua semântica de compressão
+ainda não foi validada nem implementada. O vínculo é recusado antes de alterar
+o tile, sem desativar a compressão silenciosamente. Rede/TLS em uso, áudio
+decodificado, menu, quadro renderizado do jogo e gameplay ainda não foram verificados.
 
 Um diagnóstico limitado de entrada do processo filho também compilou todas as
 12.884 funções do `GOW1.self` original. Caminho de boot, prioridade 1001 e pilha
@@ -391,6 +401,14 @@ real não estavam disponíveis aqui: esse ELF **não foi compilado nem validado 
 console**. `python tests/compare_zcull_probe.py native.log ps3.log` compara valores
 por caso, sem igualar épocas dos relógios; saída 2 significa medição ausente ou
 lacunas nos contadores. Coincidir nessa sonda finita não certifica fidelidade NV47.
+
+O mesmo ELF opcional aceita `--tile9` para observar clear e draw de profundidade/
+stencil com compressão 0/9. Registra um padrão de entrada fixo, hash de 64 KiB e
+os primeiros 4096 bytes visíveis à CPU após labels concluídos pela GPU; essas
+observações não têm resultado esperado inventado e não usam o comparador de ZCULL.
+O [decodificador NV40 do envytools](https://github.com/envytools/envytools/blob/master/nvhw/comp.c)
+é referência técnica MIT para stencil separado; sua equivalência ao RSX/NV47 ainda
+precisa ser verificada. Essa sonda adicional também não foi compilada/executada.
 
 Nenhuma transição para o seletor ou gameplay foi verificado.
 Originais e derivados proprietários permanecem fora do Git.

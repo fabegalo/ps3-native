@@ -23,6 +23,29 @@ int main(int argc, char** argv) {
     const auto* module = ps3_native_firmware_definition();
     if (ppu_register_image_region(0x0D000000, 4096)) return 11;
     if (!module || ps3_native_lle_owns(0xD00DFEED)) return 2;
+    if (argc == 3) {
+        static const struct { const char* mode; const char* library; const char* symbol; } clients[] = {
+            {"music_missing_export", "cellMusicUtility", "cellMusicInitialize"},
+            {"resc_missing_export", "cellResc", "cellRescInit"},
+            {"userinfo_missing_export", "cellUserInfo", "cellUserInfoGetStat"},
+            {"search_missing_export", "cellSearchUtility", "cellSearchInitialize"},
+            {"np_missing_export", "sceNp", "sceNpInit"},
+            {"avc2_missing_export", "cellSysutilAvc2", "cellSysutilAvc2Load"},
+            {"pamf_missing_export", "cellPamf", "cellPamfReaderInitialize"},
+            {"sail_missing_export", "cellSail", "cellSailPlayerInitialize"},
+            {"fiber_missing_export", "cellFiber", "cellFiberPpuInitialize"},
+            {"gem_missing_export", "libgem", "cellGemInit"},
+            {"camera_missing_export", "cellCamera", "cellCameraInit"}
+        };
+        for (const auto& test : clients) {
+            if (std::strcmp(argv[2], test.mode)) continue;
+            auto owned = *module; owned.library = test.library;
+            if (!ps3_native_lle_load(&owned)) return 40;
+            const auto nid = ps3_compute_nid(test.symbol);
+            ps3_hle_register(nid, test.symbol, (void*)extra_export);
+            ppu_context ctx{}; ps3_hle_call(nid, &ctx); return 41;
+        }
+    }
     if (argc == 3 && !std::strcmp(argv[2], "lv2dbg_missing_export")) {
         auto owned = *module; owned.library = "sys_lv2dbg";
         if (!ps3_native_lle_load(&owned)) return 38;

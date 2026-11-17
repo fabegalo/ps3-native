@@ -4,6 +4,38 @@ import os
 from pathlib import Path
 import tempfile
 
+result = subprocess.run([sys.argv[1], 'input_query_unverified'], capture_output=True, timeout=15)
+if result.returncode != 86 or b'input manager query requires audit' not in result.stderr:
+    raise AssertionError(('unsupported input query', result.returncode, result.stderr[-2000:]))
+
+result = subprocess.run([sys.argv[1], 'input_wrapper_unverified'], capture_output=True, timeout=15)
+if result.returncode != 86 or b'gamepad wrapper command requires audit' not in result.stderr:
+    raise AssertionError(('unsupported input wrapper command', result.returncode, result.stderr[-2000:]))
+
+for mode in ('process_io_unbound', 'process_io_other'):
+    result = subprocess.run([sys.argv[1], mode], capture_output=True, timeout=15)
+    if result.returncode != 86 or b'[native-blocked]' not in result.stderr:
+        raise AssertionError(('process privilege without verified metadata', mode, result.returncode, result.stderr[-2000:]))
+
+for mode in ('config_producer_unverified', 'config_filter_unverified', 'config_mode_unverified'):
+    result = subprocess.run([sys.argv[1], mode], capture_output=True, timeout=15)
+    if result.returncode != 86 or b'config listener requires verified' not in result.stderr:
+        raise AssertionError(('config unknown producer/filter/mode', mode, result.returncode, result.stderr[-2000:]))
+
+for mode in ('access_unbound', 'access_elevated', 'access_delegated', 'access_command'):
+    result = subprocess.run([sys.argv[1], mode], capture_output=True, timeout=15)
+    if result.returncode != 86 or b'[native-blocked]' not in result.stderr:
+        raise AssertionError(('access-control unimplemented grants are never denied or fabricated', mode,
+                              result.returncode, result.stderr[-2000:]))
+
+for mode in ('music_missing_export', 'resc_missing_export', 'userinfo_missing_export',
+             'search_missing_export', 'np_missing_export', 'avc2_missing_export',
+             'pamf_missing_export', 'sail_missing_export', 'fiber_missing_export', 'gem_missing_export',
+             'camera_missing_export'):
+    result = subprocess.run([sys.argv[3], sys.argv[4], mode], capture_output=True, timeout=15)
+    if result.returncode != 86 or b'owner has no prepared export' not in result.stderr:
+        raise AssertionError(('original client ownership', mode, result.returncode, result.stderr[-2000:]))
+
 result = subprocess.run([sys.argv[3], sys.argv[4], 'lv2dbg_missing_export'], capture_output=True, timeout=15)
 if result.returncode != 86 or b'original LV2DBG owner has no prepared export' not in result.stderr:
     raise AssertionError(('LV2DBG ownership', result.returncode, result.stderr[-2000:]))
