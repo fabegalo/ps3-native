@@ -166,6 +166,19 @@ void thread_once(ppu_context* ctx) {
     }
 }
 void load_module(ppu_context* ctx) {
+    const auto id = (uint16_t)ctx->gpr[3];
+    if (id == CELL_SYSMODULE_VDEC_MPEG2 || id == CELL_SYSMODULE_VDEC_AL) {
+        // The MPEG-2 module depends on the original generic VDEC client.
+        if (!ps3_native_lle_start("libvdec", ctx) ||
+            (id == CELL_SYSMODULE_VDEC_MPEG2 && !ps3_native_lle_start("libsmvd2", ctx))) {
+            std::fprintf(stderr, "[native-blocked] original video module start unavailable or concurrent\n");
+            std::fflush(stderr); ps3_native_stop();
+        }
+        if (id == CELL_SYSMODULE_VDEC_MPEG2 && cellSysmoduleLoadModule(CELL_SYSMODULE_VDEC_AL) != CELL_OK) {
+            std::fprintf(stderr, "[native-blocked] original video dependency activation failed\n");
+            std::fflush(stderr); ps3_native_stop();
+        }
+    }
     if ((uint16_t)ctx->gpr[3] == CELL_SYSMODULE_NET && ps3_native_lle_library("sys_net") && !ps3_native_lle_start("sys_net", ctx)) {
         std::fprintf(stderr, "[native-blocked] original network module start is unavailable or concurrent\n");
         std::fflush(stderr); ps3_native_stop();
@@ -517,6 +530,11 @@ extern "C" void ps3_load_prx_modules(void) {
     for (size_t i = 0; const auto* module = ps3_native_firmware_extra(i); ++i)
         if (!ps3_native_lle_load(module)) {
             std::fprintf(stderr, "[native-blocked] extra original PRX ownership, image or AOT bindings invalid\n");
+            std::fflush(stderr); ps3_native_stop();
+        }
+    for (const char* library : {"libvdec", "libsmvd2"})
+        if (ps3_native_lle_library(library) && !ps3_native_lle_defer_start(library)) {
+            std::fprintf(stderr, "[native-blocked] original video module cannot defer initialization\n");
             std::fflush(stderr); ps3_native_stop();
         }
 }

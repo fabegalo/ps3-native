@@ -236,10 +236,11 @@ VSH 4.93 e entrou em sua inicialização original, com prioridade, pilha e TLS d
 ELF e `/dev_flash/vsh/module/vsh.self` em argv[0]. Canais de espera/sinalização
 dos mutexes leves do kernel, parâmetros opacos do processo e portas de eventos
 IPC nomeadas passam nas regressões compartilhadas. O VSH real passa por essas
-operações e para em `_sys_prx_register_module` do LV2 (484, LR `0x0061786C`).
-Suas tabelas originais contêm 28 bibliotecas exportadas e 24 importadas.
-Registro, vínculo e tratador original de imports não resolvidos ainda não estão
-implementados; nenhum sucesso substituto foi usado. Nenhum menu XMB ou frame
+operações, pelo registro de PRX residentes (484/486), pelo vínculo original de
+exports/imports e pelo tratador original de imports não resolvidos. A próxima
+parada real é o syscall LV2 988 (LR `0x000104C8`): seu contrato de permissões e
+estado de depuração do processo ainda não está implementado. Nenhum sucesso ou
+erro de permissão substituto foi retornado. Nenhum menu XMB ou frame
 original do VSH foi mostrado. Com o build local já vinculado ao VSH, a parada
 é reproduzível por
 `python src/ps3native/cli.py run .local/work/boot/firmware/system-game/vsh.elf --build-dir build`.
@@ -257,6 +258,21 @@ payloads brutos verificados estão compilados localmente: 51 registros com hashe
 de entrada/ferramentas/saídas. Limites explícitos separam código original de dados
 constantes em quatro payloads; todos os dados carregados são preservados. Isso
 comprova preparação, sem certificar fluxo completo, ISA, frames ou gameplay.
+
+Um diagnóstico limitado de entrada do processo filho também compilou todas as
+12.884 funções do `GOW1.self` original. Caminho de boot, prioridade 1001 e pilha
+de 32 KiB correspondem à chamada exit-spawn do seletor original; isso ainda não
+implementa o ciclo de vida do processo pai. O filho real inicializa SPURS/FIOS,
+abre `GOW1/exec/gow1.psarc` e inicia os módulos originais `libvdec`/`libsmvd2`
+por AOT quando solicita sua carga. A saída do decodificador não foi verificada.
+O cliente `sys_fs` original usa o armazenamento HLE existente por despacho LV2
+direto, evitando recursão no vínculo de imports. Contêineres de memória e o
+controle UDF somente de leitura `C0000006` têm regressões compartilhadas; o
+resultado ENOTSUP embutido deste último foi verificado no firmware 4.93, enquanto
+outros mounts/comandos param. O cliente original de troféus chega ao NID interno
+`0x886D0747` da `cellSysutil`. Com a `cellSysutil` original vinculada, seu
+inicializador aguarda o produtor IPC do VSH original e o diagnóstico expira em
+30 segundos antes da entrada do jogo. Nenhum menu ou gameplay foi mostrado.
 
 O novo **God of War Collection (BCUS98229, 02.00)** tem catálogo somente de leitura
 e quatro ELF PPU extraídos localmente e validados estruturalmente. O EBOOT inicial

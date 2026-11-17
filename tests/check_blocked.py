@@ -3,6 +3,12 @@ import sys
 import os
 from pathlib import Path
 
+for mode, expected in (('opcode', b'filesystem control requires audit'),
+                       ('mount', b'filesystem control C0000006 mount requires audit')):
+    result = subprocess.run([sys.argv[1], 'fs_udf_query', mode], capture_output=True, timeout=15)
+    if result.returncode != 86 or expected not in result.stderr:
+        raise AssertionError(('filesystem control', mode, result.returncode, result.stderr[-2000:]))
+
 for mode in ('hle', 'ppu', 'indirect', 'indirect_null', 'ppu_null_read', 'storage_budget', 'syscall', 'unaudited_syscall', 'mapper_named_pointer', 'rsx_memory_query', 'rsx_memory_attributes', 'rsx_context_flags', 'rsx_context_multiple', 'rsx_context_iomap_flags', 'rsx_context_iomap_overlap', 'rsx_context_attribute', 'rsx_context_fifo_pending', 'rsx_context_device_attribute', 'rsx_context_alternate_timing', 'rsx_context_sync_mode', 'rsx_context_tile_compressed', 'rsx_context_zcull_backend', 'rsx_context_zcull_overlap', 'rsx_context_semaphore_backend', 'rsx_context_semaphore_dma', 'rsx_context_device_release', 'rsx_context_main_surface', 'rsx_context_reference_backend', 'rsx_context_queue_backend', 'rsx_context_queue_metadata', 'rsx_context_scanout_backend', 'strncmp_invalid', 'video_clock_reverse', 'video_clock_edge', 'audio_probe', 'audio_option', 'mutex_shared', 'mutex_adaptive', 'mutex_queue_inherit', 'rw_contended', 'tty_channel', 'language_other', 'spu', 'fs_not_ready',
              'spu_indirect', 'spu_missing', 'spu_missing_async', 'spu_missing_job', 'sysutil_no_dispatcher',
              'provider_not_registered', 'gcm_unaudited', 'gcm_debug_level', 'tile_compressed', 'io_unbacked',

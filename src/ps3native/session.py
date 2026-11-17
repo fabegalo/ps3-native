@@ -21,8 +21,17 @@ def _boot_path(value):
     return value
 
 
-def bind(root, original, elf, generation, build, *, boot_path=None):
+def _spawn_attributes(value):
+    if value is not None and (not isinstance(value, dict) or set(value) != {'priority', 'flags'} or
+            type(value['priority']) is not int or not 0 <= value['priority'] <= 3071 or
+            type(value['flags']) is not int or value['flags'] not in range(0, 0x80, 0x10)):
+        raise ValueError('Invalid guest spawn attributes')
+    return value
+
+
+def bind(root, original, elf, generation, build, *, boot_path=None, spawn_attributes=None):
     boot_path = _boot_path(boot_path)
+    spawn_attributes = _spawn_attributes(spawn_attributes)
     _, lock = dependency(root)
     exe = build / ('ps3-native-module.exe' if os.name == 'nt' else 'ps3-native-module')
     if not exe.is_file():
@@ -42,6 +51,7 @@ def bind(root, original, elf, generation, build, *, boot_path=None):
     receipt = {'schema': 2, 'diagnostic_only': True, 'original_id': original['id'],
                'original_source': original['source'], 'elf': str(elf.resolve()), 'elf_sha256': digest(elf),
                'binary': str(exe.resolve()), 'binary_sha256': digest(exe), 'boot_path': boot_path,
+               'spawn_attributes': spawn_attributes,
                'upstream': lock, 'cmake_cache_sha256': digest(build / 'CMakeCache.txt'),
                'generation': {**{str(p.resolve()): digest(p) for p in generation.glob('ppu_recomp*.*')}, **spu_files, **firmware_files},
                'guard_sha256': digest(root / 'src/native_guard.cpp'),
@@ -79,6 +89,10 @@ def run(root, original, build, seconds=20, *, enter_button=None):
     if enter_button is not None: env['PS3_ENTER_BUTTON'] = enter_button
     boot_path = _boot_path(receipt.get('boot_path'))
     if boot_path is not None: env['PS3_BOOT_PATH'] = boot_path
+    spawn = _spawn_attributes(receipt.get('spawn_attributes'))
+    if spawn is not None:
+        env['PS3_BOOT_PRIORITY'] = str(spawn['priority'])
+        env['PS3_BOOT_SPAWN_FLAGS'] = str(spawn['flags'])
     source = Path(original['source'])
     vfs = source.parent if source.name == 'PS3_GAME' or source.is_file() else source
     env.update(PS3_VFS_ROOT=str(vfs), PS3_HDD0_ROOT=str(state / 'dev_hdd0'),

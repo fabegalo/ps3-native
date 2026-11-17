@@ -46,6 +46,14 @@ class SessionTests(unittest.TestCase):
                 bind(root, original, elf, generation, build, boot_path='/dev_flash/vsh/module/vsh.self')
                 run(root, original, build)
                 self.assertEqual(launch.call_args.kwargs['env']['PS3_BOOT_PATH'], '/dev_flash/vsh/module/vsh.self')
+                for invalid in ({'priority': True, 'flags': 16}, {'priority': 3072, 'flags': 16},
+                                {'priority': 1001, 'flags': 17}, {'priority': 1001}, []):
+                    with self.assertRaisesRegex(ValueError, 'spawn attributes'):
+                        bind(root, original, elf, generation, build, spawn_attributes=invalid)
+                bind(root, original, elf, generation, build, spawn_attributes={'priority': 1001, 'flags': 16})
+                run(root, original, build)
+                self.assertEqual(launch.call_args.kwargs['env']['PS3_BOOT_PRIORITY'], '1001')
+                self.assertEqual(launch.call_args.kwargs['env']['PS3_BOOT_SPAWN_FLAGS'], '16')
                 launch.reset_mock()
                 with self.assertRaisesRegex(ValueError, 'cross or circle'):
                     run(root, original, build, enter_button='invalid')

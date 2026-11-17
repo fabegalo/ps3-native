@@ -83,6 +83,13 @@ static void filesystem_path(ppu_context* ctx) {
         std::fflush(stderr); ps3_native_stop();
     }
 }
+extern "C" void ps3_native_fs_path_gate(ppu_context* ctx) {
+    if (guest_process_current()) {
+        std::fprintf(stderr, "[native-blocked] isolated process filesystem ownership is not integrated\n");
+        std::fflush(stderr); ps3_native_stop();
+    }
+    filesystem_path(ctx);
+}
 extern "C" void ps3_native_hle_gate(uint32_t nid, ppu_context* ctx) {
     if (guest_process_current()) {
         std::fprintf(stderr, "[native-blocked] isolated process HLE ownership is not integrated\n");
@@ -92,6 +99,13 @@ extern "C" void ps3_native_hle_gate(uint32_t nid, ppu_context* ctx) {
         const char* symbol = ps3_hle_symbol_name(nid);
         if (symbol && (!std::strncmp(symbol, "cellGcm", 7) || !std::strncmp(symbol, "_cellGcm", 8))) {
             std::fprintf(stderr, "[native-blocked] original GCM owner has no prepared export nid=0x%08X\n", nid);
+            std::fflush(stderr); ps3_native_stop();
+        }
+    }
+    if (ps3_native_lle_library("sys_fs")) {
+        const char* symbol = ps3_hle_symbol_name(nid);
+        if (symbol && (!std::strncmp(symbol, "cellFs", 6) || !std::strncmp(symbol, "_cellFs", 7))) {
+            std::fprintf(stderr, "[native-blocked] original sys_fs owner has no prepared export nid=0x%08X\n", nid);
             std::fflush(stderr); ps3_native_stop();
         }
     }
@@ -224,6 +238,10 @@ extern "C" void ps3_native_hle_gate(uint32_t nid, ppu_context* ctx) {
                     ps3_native_context_ready(ps3_compute_nid("cellSysutilCheckCallback"));
         } else if ((uint16_t)ctx->gpr[3] == CELL_SYSMODULE_RTC) {
             ready = ps3_native_context_ready(ps3_compute_nid("cellRtcGetCurrentTick"));
+        } else if ((uint16_t)ctx->gpr[3] == CELL_SYSMODULE_VDEC_MPEG2) {
+            ready = ps3_native_lle_library("libvdec") && ps3_native_lle_library("libsmvd2");
+        } else if ((uint16_t)ctx->gpr[3] == CELL_SYSMODULE_VDEC_AL) {
+            ready = ps3_native_lle_library("libvdec");
         } else if ((uint16_t)ctx->gpr[3] == CELL_SYSMODULE_NET && ps3_native_lle_library("sys_net")) {
             ready = ps3_native_lle_owns(ps3_compute_nid("sys_net_initialize_network_ex"));
         } else {
@@ -303,6 +321,9 @@ extern "C" void ps3_native_syscall_gate(ppu_context* ctx) {
     if (number == 1) return;
     if (number == 25) return;
     if (number == 30) return;
+    if (number == 484 || number == 486) return;
+    if (number == 324 || number == 325 || number == 343 || number == 350) return;
+    if (number == 817) return;
     if (number == 675 || number == 668 || number == 670 || number == 672 || number == 674 || number == 677) return;
     // Reservation capability is classified by the upstream LV2 address/rights contract.
     if (number == 14) return;

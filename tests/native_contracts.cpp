@@ -67,6 +67,8 @@ void ppu_gcm_pump(void);
 int cellGcmOffsetIsDisplay(u32);
 extern PPU_THREAD_LOCAL ppu_context* g_active_ctx;
 void ppu_register_function(uint64_t, void (*)(ppu_context*));
+int ppu_process_set_spawn_attributes(uint32_t, uint64_t);
+uint32_t ppu_primary_stack_size(void);
 uint64_t ppu_guest_call(uint32_t, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t);
 uint64_t ppu_guest_call_ct(uint32_t, uint32_t, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t);
 void ppu_install_thread_trampoline(void);
@@ -215,6 +217,127 @@ static void call(ppu_context& ctx, const char* name, uint64_t a0) {
     ps3_hle_call(ps3_compute_nid(name), &ctx);
 }
 int main(int argc, char** argv) {
+    if (argc >= 2 && !strcmp(argv[1], "fs_udf_query")) {
+        if (vm_init() || vm_commit(0x30000, 0x10000)) return 1;
+        g_ppu_main_stack_addr = 0x30000; g_ppu_main_stack_size = 0x10000;
+        lv2_init_syscalls(); ppu_context c{};
+        const char* path = argc == 3 && !strcmp(argv[2], "mount") ? "/dev_hdd0/own" : "/dev_bdvd/PS3_GAME/own";
+        memcpy(vm_base + 0x31200, path, strlen(path) + 1);
+        memset(vm_base + 0x31000, 0xA5, 0x28);
+        vm_write32(0x31004, 0x20); vm_write32(0x31008, 0x10); vm_write32(0x3100C, 0x18);
+        vm_write32(0x31010, (u32)strlen(path)); vm_write32(0x31014, 0x31200); vm_write32(0x31018, 0);
+        auto query = [&](u64 argument) {
+            c.gpr[11] = 817; c.gpr[3] = UINT64_MAX;
+            c.gpr[4] = argc == 3 && !strcmp(argv[2], "opcode") ? 0xC0000099u : 0xFFFFFFFFC0000006ull;
+            c.gpr[5] = argument; c.gpr[6] = 0x20; lv2_syscall(&c); return (u32)c.gpr[3];
+        };
+        if (query(UINT64_MAX) != (u32)CELL_EFAULT || query(0x31004) ||
+            vm_read32(0x3101C) != 0x80010037u || vm_read32(0x31020) ||
+            vm_read32(0x31000) != 0xA5A5A5A5 || vm_read32(0x31024) != 0xA5A5A5A5 ||
+            vm_read32(0x31004) != 0x20 || vm_read32(0x31014) != 0x31200) return 2;
+        vm_write32(0x31014, 0x3FFFF);
+        vm_write32(0x3101C, 0xA5A5A5A5);
+        if (query(0x31004) != (u32)CELL_EFAULT || vm_read32(0x3101C) != 0xA5A5A5A5) return 3;
+        vm_shutdown(); puts("Original UDF filesystem control result, endian layout, pointer bounds and untouched fields verified");
+        return 0;
+    }
+    if (argc == 2 && !strcmp(argv[1], "memory_container")) {
+        if (vm_init() || vm_commit(0x30000, 0x10000)) return 1;
+        g_ppu_main_stack_addr = 0x30000; g_ppu_main_stack_size = 0x10000;
+        lv2_init_syscalls(); ppu_context c{};
+        auto call = [&](u32 number, u64 a, u64 b = 0, u64 d = 0, u64 e = 0) {
+            c.gpr[11] = number; c.gpr[3] = a; c.gpr[4] = b; c.gpr[5] = d; c.gpr[6] = e;
+            lv2_syscall(&c); return (u32)c.gpr[3];
+        };
+        if (call(352, 0x31000)) return 2;
+        const u32 total = vm_read32(0x31000), available = vm_read32(0x31004);
+        vm_write32(0x31010, 0xA5A5A5A5);
+        if (call(324, 0x31010, 0xFFFFF) != (u32)CELL_ENOMEM ||
+            call(324, 0x31010, 0x100000000ull) != (u32)CELL_ENOMEM ||
+            call(324, UINT64_MAX, 0x100000) != (u32)CELL_EFAULT || vm_read32(0x31010) != 0xA5A5A5A5) return 3;
+        if (call(324, 0x31010, 0x180000)) return 4;
+        const u32 first = vm_read32(0x31010);
+        if (call(352, 0x31000) || vm_read32(0x31000) != total - 0x100000 ||
+            vm_read32(0x31004) != available - 0x100000 || call(343, 0x31020, first) ||
+            vm_read32(0x31020) != 0x100000 || vm_read32(0x31024) != 0x100000) return 5;
+        if (call(350, 0x100001, first, 0x400, 0x31030) != (u32)CELL_EALIGN ||
+            call(350, 0x100000, first, 0x100000400ull, 0x31030) != (u32)CELL_EINVAL ||
+            call(350, 0x100000, first, 0x400, UINT64_MAX) != (u32)CELL_EFAULT ||
+            call(350, 0x100000, first, 0x400, 0x31030)) return 6;
+        const u32 allocation = vm_read32(0x31030);
+        vm_write32(allocation, 0x11223344);
+        if ((allocation & 0xFFFFF) || vm_read32(allocation) != 0x11223344 ||
+            call(343, 0x31020, first) || vm_read32(0x31024) ||
+            call(350, 0x10000, first, 0x200, 0x31034) != (u32)CELL_ENOMEM ||
+            call(325, first) != (u32)CELL_EBUSY) return 7;
+        if (call(352, 0x31000) || vm_read32(0x31004) != available - 0x100000 ||
+            call(324, 0x31014, available - 0x100000)) return 8;
+        const u32 second = vm_read32(0x31014);
+        if (call(352, 0x31000) || vm_read32(0x31004) ||
+            call(348, 0x10000, 0x200, 0x31038) != (u32)CELL_ENOMEM ||
+            call(324, 0x31018, 0x100000) != (u32)CELL_ENOMEM ||
+            call(332, 0x12345678, 0x10000, 0x8200, 0x31038) != (u32)CELL_ENOMEM ||
+            call(350, 0x10000, second, 0x200, 0x31034)) return 9;
+        const u32 second_allocation = vm_read32(0x31034);
+        if (call(349, allocation) || call(325, first) ||
+            call(350, 0x10000, first, 0x200, 0x31038) != (u32)CELL_ESRCH ||
+            call(343, 0x31020, first) != (u32)CELL_ESRCH ||
+            call(343, UINT64_MAX, second) != (u32)CELL_EFAULT ||
+            call(349, second_allocation) || call(325, second) || call(352, 0x31000) ||
+            vm_read32(0x31000) != total || vm_read32(0x31004) != available) return 10;
+        if (call(324, 0x31010, 0x100000) || vm_read32(0x31010) == first ||
+            call(325, first) != (u32)CELL_ESRCH || call(325, vm_read32(0x31010))) return 11;
+        vm_shutdown(); puts("LV2 containers: reservation, quotas, page alignment, busy destroy, real backing, bounds and stale handles verified");
+        return 0;
+    }
+    if (argc == 2 && !strcmp(argv[1], "prx_registration")) {
+        if (vm_init() || vm_commit(0x30000, 0x10000)) return 1;
+        g_ppu_main_stack_addr = 0x30000; g_ppu_main_stack_size = 0x10000;
+        lv2_init_syscalls(); ppu_context c{};
+        auto call = [&](u32 number, u64 a, u64 b = 0) {
+            c.gpr[11] = number; c.gpr[3] = a; c.gpr[4] = b;
+            lv2_syscall(&c); return (u32)c.gpr[3];
+        };
+        memcpy(vm_base + 0x31100, "ownElf", 7); memcpy(vm_base + 0x31120, "ownLib", 7);
+        vm_write64(0x31000, 0x30); vm_write64(0x31008, 1);
+        vm_write32(0x31020, 0x31200); vm_write32(0x31024, 0x2C);
+        vm_write8(0x31200, 0x2C); vm_write16(0x31202, 1); vm_write16(0x31204, 9);
+        vm_write16(0x31206, 2); vm_write32(0x31210, 0x31120);
+        vm_write32(0x31214, 0x31500); vm_write32(0x31218, 0x31600);
+        vm_write32(0x31500, 0x11223344); vm_write32(0x31504, 0x55667788);
+        vm_write32(0x31600, 0x41424344); vm_write32(0x31604, 0x45464748);
+        ppu_register_function(0x12380, +[](ppu_context* ctx) { ctx->gpr[3] = 0xDEAD; });
+        ppu_register_function(0x12400, +[](ppu_context* ctx) { ctx->gpr[3] = 42; });
+        vm_write32(0x31700, 0x12380); vm_write32(0x31704, 0x30000);
+        vm_write32(0x31710, 0x12400); vm_write32(0x31714, 0x30000);
+        if (call(484, 0x31100, 0) != (u32)CELL_EINVAL ||
+            call(484, 0x31100, UINT64_MAX) != (u32)CELL_EFAULT) return 2;
+        vm_write64(0x31000, 0x31);
+        if (call(484, 0x31100, 0x31000) != (u32)CELL_EINVAL) return 3;
+        vm_write64(0x31000, 0x30);
+        if (call(484, 0x31100, 0x31000) || call(484, 0x31100, 0x31000) != 0x80011910u ||
+            vm_read32(0x31600) != 0x41424344) return 4;
+        vm_write64(0x31008, 2); vm_write32(0x31020, 0); vm_write32(0x31024, 0);
+        vm_write32(0x31028, 0x31700); vm_write32(0x31218, 0x3FFFC);
+        if (call(484, 0x31100, 0x31000) != (u32)CELL_EFAULT || vm_read32(0x31600) != 0x41424344) return 5;
+        vm_write32(0x31218, 0x31600);
+        if (call(484, 0x31100, 0x31000) || vm_read32(0x31600) != 0x31700 || vm_read32(0x31604) != 0x31700) return 6;
+        c.ctr = vm_read32(vm_read32(0x31600)); c.gpr[2] = vm_read32(vm_read32(0x31600) + 4); ps3_indirect_call(&c); if (c.gpr[3] != 0xDEAD) return 7;
+        vm_write8(0x31300, 0x1C); vm_write16(0x31302, 1); vm_write16(0x31304, 9);
+        vm_write16(0x31306, 1); vm_write16(0x31308, 1); vm_write32(0x31310, 0x31120);
+        vm_write32(0x31314, 0x31520); vm_write32(0x31318, 0x31540);
+        vm_write32(0x31520, 0x11223344); vm_write32(0x31524, 0xAABBCCDD);
+        vm_write32(0x31318, 0x3FFFC);
+        if (call(486, 0x40000) != (u32)CELL_EFAULT ||
+            call(486, 0x31300) || vm_read32(0x31600) != 0x31700) return 8;
+        vm_write32(0x31318, 0x31540); vm_write32(0x31540, 0x31710);
+        vm_write32(0x31544, 0x31800);
+        if (call(486, 0x31300) || vm_read32(0x31600) != 0x31710 || vm_read32(0x31604) != 0x31700) return 9;
+        c.ctr = vm_read32(vm_read32(0x31600)); c.gpr[2] = vm_read32(vm_read32(0x31600) + 4); ps3_indirect_call(&c); if (c.gpr[3] != 42) return 10;
+        if (call(486, 0x31300) || vm_read32(0x31600) != 0x31710 || vm_read32(0x31604) != 0x31700) return 11;
+        vm_shutdown(); puts("Original PRX tables: pending weak imports, real error OPD, late AOT binding, opaque variable exports and invalid bounds verified");
+        return 0;
+    }
     if (argc == 2 && !strcmp(argv[1], "event_ipc")) {
         if (vm_init() || vm_commit(0x30000, 0x10000)) return 1;
         g_ppu_main_stack_addr = 0x30000; g_ppu_main_stack_size = 0x10000;
@@ -247,6 +370,12 @@ int main(int argc, char** argv) {
         return 0;
     }
     if (argc == 2 && !strcmp(argv[1], "process_paramsfo")) {
+        const auto previous_stack = ppu_primary_stack_size();
+        if (ppu_process_set_spawn_attributes(3072, 0x10) || ppu_process_set_spawn_attributes(1001, 1) ||
+            ppu_process_set_spawn_attributes(1001, 0x80) || ppu_primary_stack_size() != previous_stack) return 9;
+        if (!ppu_process_set_spawn_attributes(1001, 0x10) || ppu_primary_stack_size() != 0x8000 ||
+            !ppu_process_set_spawn_attributes(1001, 0) || ppu_primary_stack_size() != 0x8000 ||
+            !ppu_process_set_spawn_attributes(1001, 0x70) || ppu_primary_stack_size() != 0x100000) return 10;
         if (vm_init() || vm_commit(0x30000, 0x10000)) return 1;
         g_ppu_main_stack_addr = 0x30000; g_ppu_main_stack_size = 0x10000;
         lv2_init_syscalls();
@@ -1094,7 +1223,8 @@ int main(int argc, char** argv) {
             call(ctx, "cellAudioOutGetSoundAvailability", 0);
         }
         if (!strcmp(argv[1], "sdk_missing")) {
-            if (vm_init()) return 1;
+            if (vm_init() || vm_commit(0x30000, 0x10000)) return 1;
+            g_ppu_main_stack_addr = 0x30000; g_ppu_main_stack_size = 0x10000;
             lv2_init_syscalls();
             ctx.gpr[11] = 348; ctx.gpr[3] = 0x10000; ctx.gpr[4] = 0x200; ctx.gpr[5] = 0x30000;
             lv2_syscall(&ctx);
@@ -1149,7 +1279,8 @@ int main(int argc, char** argv) {
             ctx.gpr[4] = 0; ctx.gpr[5] = 16; call(ctx, "_sys_memset", 0x40000000);
         }
         if (!strcmp(argv[1], "memory_overlap") || !strcmp(argv[1], "string_unterminated")) {
-            if (vm_init()) return 1;
+            if (vm_init() || vm_commit(0x30000, 0x10000)) return 1;
+            g_ppu_main_stack_addr = 0x30000; g_ppu_main_stack_size = 0x10000;
             lv2_init_syscalls();
             ctx.gpr[11] = 348; ctx.gpr[3] = 0x10000; ctx.gpr[4] = 0x200; ctx.gpr[5] = 0x30000;
             lv2_syscall(&ctx);
@@ -1178,6 +1309,10 @@ int main(int argc, char** argv) {
     ctx.gpr[1] = 0xD00FFFF0;
     ppu_sysprx_register();
     lv2_init_syscalls();
+    // Own synthetic image data, independently of the actual main stack mapping.
+    sys_memory_set_image_query([](uint64_t a, uint64_t end) -> uint64_t {
+        return a < 0x40000 && end > 0x20000 ? 0x40000 : a;
+    });
     ctx.gpr[11] = 1; lv2_syscall(&ctx);
 #ifdef _WIN32
     const auto process_id = (uint32_t)_getpid();
@@ -1690,10 +1825,6 @@ int main(int argc, char** argv) {
     call(ctx, "_sys_process_at_Exitspawn", 0x23000);
     if (ps3_process_spawn_callback(0) != 0x21000 || ps3_process_spawn_callback(1) != 0x23000) return 2;
     vm_write32(0x21000, 2);
-    // Own synthetic image data, independently of the actual main stack mapping.
-    sys_memory_set_image_query([](uint64_t a, uint64_t end) -> uint64_t {
-        return a < 0x40000 && end > 0x20000 ? 0x40000 : a;
-    });
     vm_write32(0x21004, 0x20);
     ctx.gpr[4] = 0x21000;
     call(ctx, "sys_lwmutex_create", 0x20000);

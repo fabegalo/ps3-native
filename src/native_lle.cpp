@@ -17,7 +17,11 @@ extern "C" PPU_THREAD_LOCAL void (*g_trampoline_fn)(void*);
 extern "C" int ps3_native_guest_range_backed(uint32_t, uint32_t);
 extern "C" void ppu_aot_check_return(ppu_context*, uint64_t, uint64_t, uint64_t);
 
-struct Resident { const NativeLleModule* module = nullptr; std::atomic<int> started{0}; };
+struct Resident {
+    const NativeLleModule* module = nullptr;
+    std::atomic<int> started{0};
+    std::atomic<bool> deferred{false};
+};
 // shortcut: 64 resident prepared modules; expand on measured firmware requirements.
 static std::array<Resident, 64> loaded;
 static std::atomic<size_t> loaded_count{0};
@@ -138,6 +142,15 @@ extern "C" int ps3_native_lle_start(const char* library, ppu_context* ctx) {
     }
     return 0;
 }
+extern "C" int ps3_native_lle_defer_start(const char* library) {
+    require_root_process();
+    for (size_t i = 0; library && i < loaded_count.load(std::memory_order_acquire); ++i)
+        if (!std::strcmp(library, loaded[i].module->library)) {
+            if (loaded[i].started.load(std::memory_order_acquire) != 0) return 0;
+            loaded[i].deferred.store(true, std::memory_order_release); return 1;
+        }
+    return 0;
+}
 extern "C" int ps3_native_lle_dispatch(uint32_t nid, ppu_context* ctx) {
     require_root_process();
     const NativeLleModule* m = nullptr; const NativeLleExport* e = nullptr;
@@ -162,7 +175,8 @@ extern "C" int ps3_native_lle_dispatch(uint32_t nid, ppu_context* ctx) {
 }
 extern "C" void ps3_native_lle_start_all(ppu_context* ctx) {
     for (size_t i = 0; i < loaded_count.load(std::memory_order_acquire); ++i)
-        if (!ps3_native_lle_start(loaded[i].module->library, ctx)) {
+        if (!loaded[i].deferred.load(std::memory_order_acquire) &&
+            !ps3_native_lle_start(loaded[i].module->library, ctx)) {
             std::fprintf(stderr, "[native-blocked] prepared PRX startup failed\n");
             std::fflush(stderr); ps3_native_stop();
         }

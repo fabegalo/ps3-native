@@ -231,10 +231,10 @@ VSH 4.93 ELF and entered its original startup with its ELF priority, stack and
 TLS, and `/dev_flash/vsh/module/vsh.self` as argv[0]. Raw lightweight-mutex
 sleep/wake channels, opaque process parameters and named IPC event ports now
 pass shared regressions; the real VSH proceeds through those operations and
-stops at LV2 `_sys_prx_register_module` (484, LR `0x0061786C`). Its original
-tables contain 28 export libraries and 24 import libraries. Registration,
-linking and the original unresolved-import handler are not implemented; no
-success is substituted. No XMB menu or original VSH frame has been shown.
+passes resident PRX registration (484/486), original export/import binding and
+its original unresolved-import handler. The next real stop is LV2 syscall 988
+(LR `0x000104C8`), whose process-debug permission/state contract is not implemented;
+no substitute success or permission error is returned. No XMB menu or original VSH frame has been shown.
 With the existing local VSH-bound build, reproduce the same stop using
 `python src/ps3native/cli.py run .local/work/boot/firmware/system-game/vsh.elf --build-dir build`.
 The public `system` command remains blocked.
@@ -251,6 +251,20 @@ firmware payloads are compiled locally: 51 registrations with input/tool/output
 hashes. Explicit boundaries separate original code from constant data in four
 payloads; all loaded data remains intact. This is preparation coverage, not complete
 control-flow, ISA, frame or gameplay certification.
+
+A bounded child-start diagnostic also compiled all 12,884 functions of the
+original `GOW1.self`. Its boot path, priority 1001 and 32 KiB stack match the
+original selector's exit-spawn call; this does not implement the parent lifecycle.
+The real child initializes SPURS/FIOS, opens `GOW1/exec/gow1.psarc`, and starts the
+original `libvdec`/`libsmvd2` modules by AOT at its module-load request. Decoder
+output is not verified. The original `sys_fs` client now uses the existing HLE
+storage backend through direct LV2 dispatch, avoiding recursive import binding.
+Memory containers and the read-only UDF `C0000006` control have shared regressions;
+the latter's embedded ENOTSUP result is verified in firmware 4.93, while other
+mounts/control operations stop. Original trophy-client execution reaches internal
+`cellSysutil` NID `0x886D0747`. With original `cellSysutil` linked, its initializer
+waits for the original VSH IPC producer and the 30-second diagnostic expires
+before game entry. No game menu or gameplay has been shown.
 
 The added **God of War Collection (BCUS98229, 02.00)** has a read-only catalog and
 four locally decrypted, structurally validated PPU ELFs. Its initial EBOOT has
