@@ -471,7 +471,7 @@ int main(int argc, char** argv) {
         const ppu_context saved = c;
         lv2_init_syscalls();
         ppu_context debug{}; debug.gpr[11] = 956;
-        for (u64 argument : {0ull, 1ull, UINT64_MAX}) {
+        for (u64 argument : {u64(0), u64(1), u64(UINT64_MAX)}) {
             for (unsigned i = 3; i <= 10; ++i) debug.gpr[i] = argument;
             lv2_syscall(&debug);
             if ((u32)debug.gpr[3] != (u32)CELL_ENOSYS) return 7;
