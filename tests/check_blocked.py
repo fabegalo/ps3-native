@@ -3,6 +3,19 @@ import sys
 import os
 from pathlib import Path
 
+for mode in ('pending', 'reset'):
+    result = subprocess.run([sys.argv[1], 'sm_params', mode], capture_output=True, timeout=15)
+    if result.returncode != 86 or b'System Manager service 11 boot message is unavailable' not in result.stderr:
+        raise AssertionError(('missing System Manager message', mode, result.returncode, result.stderr[-2000:]))
+
+result = subprocess.run([sys.argv[1], 'mutex_named', 'open'], capture_output=True, timeout=15)
+if result.returncode != 86 or b'shared or adaptive LV2 mutex requires implementation' not in result.stderr:
+    raise AssertionError(('named mutex import', result.returncode, result.stderr[-2000:]))
+
+result = subprocess.run([sys.argv[1], 'process_debug_unbound'], capture_output=True, timeout=15)
+if result.returncode != 86 or b'requires original SELF control attributes' not in result.stderr:
+    raise AssertionError(('unbound process control', result.returncode, result.stderr[-2000:]))
+
 for mode, expected in (('opcode', b'filesystem control requires audit'),
                        ('mount', b'filesystem control C0000006 mount requires audit')):
     result = subprocess.run([sys.argv[1], 'fs_udf_query', mode], capture_output=True, timeout=15)

@@ -322,6 +322,8 @@ extern "C" void ps3_native_syscall_gate(ppu_context* ctx) {
     if (number == 25) return;
     if (number == 30) return;
     if (number == 484 || number == 486) return;
+    if (number == 988) return;
+    if (number == 380) return;
     if (number == 324 || number == 325 || number == 343 || number == 350) return;
     if (number == 817) return;
     if (number == 675 || number == 668 || number == 670 || number == 672 || number == 674 || number == 677) return;

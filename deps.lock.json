@@ -8,7 +8,7 @@
     "patches": [
       {
         "path": "patches/ps3recomp/0001-strict-aot-execution.patch",
-        "sha256": "35b3ae95967f7090f82d920348b7352e5c18a85ab60f79125be73a2eb543f1e9",
+        "sha256": "904eb51dc336f417402c83c8e676996bc94533d16d7018cc91e3caa0d5ecd8d9",
         "source_hash_normalization": "LF",
         "files": {
           "runtime/ppu/ppu_hle.cpp": {
@@ -17,7 +17,7 @@
           },
           "runtime/ppu/ppu_loader.cpp": {
             "before": "3790c09cd3f40458bd64d25fb9b5fb062fbdd0593d5eb27f1f312b3d514eb534",
-            "after": "fa4d99746b96b0b36cf97613267466d85da9a319fd0459c3e10decc757fccac3"
+            "after": "3182210a4c986fcdbb08f91717d3764fa3d276e2d76b25d69a905e02d7f222e0"
           },
           "runtime/ppu/ppu_sysprx.cpp": {
             "before": "aa768c1660855d4b077d48e4384df2509285da002e33e17d5dc7355f8789ba6d",
@@ -89,7 +89,7 @@
           },
           "templates/project/main.cpp": {
             "before": "93a5de9f191b6e2ccd49d5e4fd9e593b7affcc66fe00c8c0585991dfb12657c8",
-            "after": "d9c87149acc75f70d054e44869331980aa9b1b5b49eab43f5cc6bdc8fc15ff37"
+            "after": "ab9526df6bf699cc0d701c255cedb62e2b6136b359caddb0d09f90a7c0b973b3"
           },
           "runtime/syscalls/sys_memory.h": {
             "before": "0d06b51a16bb3447592213412a8224ce80c06c0018a8a07caa9cb9175eeecec9",
@@ -105,7 +105,7 @@
           },
           "runtime/syscalls/lv2_register.c": {
             "before": "a390011acdfd30c44ecb63c05b516e847adb96104f17b4e2af15e64da4fd1b38",
-            "after": "f72473707488ee626c40fa015694d15db196433df9dac0ef3f6a0a07a4dce16e"
+            "after": "6cb1f0f9956d089dd44a3aa4c58ff2b6a325285c6354c668e4c0d8b917284c34"
           },
           "runtime/syscalls/sys_event.c": {
             "before": "5e44684dfca647dd8ce5cc70ecdfb394b17711ef09902520c5a482ced1da6f89",
@@ -117,7 +117,7 @@
           },
           "runtime/host/host_stubs.c": {
             "before": "3dc9906d5d7d0c3c935c818e9c273fa512d2e4784485cfeb28dcbc48d3d09202",
-            "after": "1306005eb40092b5b150fbf6b6dcefaca4cfa11fd3a737173a92d9e900672dfd"
+            "after": "b692a8e3f5529ef08383dee39d0237e6e440bba4e76548a25ed502420cbec30a"
           },
           "runtime/syscalls/sys_semaphore.c": {
             "before": "2e0a554d761374cf06105dfe64f528badf451c1cb688ab5284cd19c32adca216",
@@ -197,7 +197,7 @@
           },
           "runtime/syscalls/sys_mutex.c": {
             "before": "c3febca125f1c59e5eb6a1afb2cf87e397d9d59e7df6358287818ca6a2992883",
-            "after": "7ee1352d17a1fc42025f64d0ec10fd2181df1814fa4f7666a96ad45f27a2091b"
+            "after": "8d42249949f96a79c6e6db2cddbb934bdd03e7022444adcf2fa54cf86f38ddc0"
           },
           "libs/system/cellSysutil.c": {
             "before": "9523123e138b4f579bd6c32a740debe4a26d31eb0fc459bc2718185a67402e6b",
@@ -221,7 +221,7 @@
           },
           "runtime/syscalls/sys_mutex.h": {
             "before": "0735527baef81a4f84bc2c8e9f36918c4883eb41cf603370a665f758d007caee",
-            "after": "5246d844bc7ed12910b9eb3c59dec025193b30dba4def5b626c16c4babc1cdbc"
+            "after": "9dc11f1b316177a567a357c3419e8cdffea1c3aea3a404ae8f10c7b9611fed57"
           },
           "runtime/syscalls/sys_fs.c": {
             "before": "77847cb8987d2cc769671d05891c934b0a9da9ba2a2330616b1232d833de1664",

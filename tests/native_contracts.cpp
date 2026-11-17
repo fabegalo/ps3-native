@@ -2,6 +2,7 @@
 #include "ps3emu/nid.h"
 #include "ps3emu/error_codes.h"
 #include "native_storage.h"
+#include "native_system_manager.h"
 #include "vm.h"
 #include "spu_interp.h"
 #include "spu_workload.h"
@@ -13,6 +14,7 @@
 #include "sys_ppu_thread.h"
 #include "sys_cond.h"
 extern "C" {
+int ppu_process_set_control(const void*, uint32_t);
 #include "thread/spu_recomp.h"
 }
 #include "cellSysutil.h"
@@ -217,6 +219,98 @@ static void call(ppu_context& ctx, const char* name, uint64_t a0) {
     ps3_hle_call(ps3_compute_nid(name), &ctx);
 }
 int main(int argc, char** argv) {
+    if (argc >= 2 && !strcmp(argv[1], "sm_params")) {
+        if (vm_init() || vm_commit(0x30000, 0x10000)) return 1;
+        g_ppu_main_stack_addr = 0x30000; g_ppu_main_stack_size = 0x10000;
+        lv2_init_syscalls(); ppu_context ctx{};
+        auto query = [&](u64 a = 0x31008, u64 b = 0x31028, u64 c = 0x31048, u64 d = 0x31068) {
+            ctx.gpr[11] = 380; ctx.gpr[3] = a; ctx.gpr[4] = b; ctx.gpr[5] = c; ctx.gpr[6] = d;
+            lv2_syscall(&ctx); return (u32)ctx.gpr[3];
+        };
+        uint8_t control[32] = {};
+        if (!ppu_process_set_control(control, sizeof control) || query(UINT64_MAX) != 0x80010003u) return 2;
+        control[0] = 0x40;
+        if (!ppu_process_set_control(control, sizeof control)) return 3;
+        const auto session = ps3_native_sm_begin();
+        if (!session) return 4;
+        if (argc == 3 && !strcmp(argv[2], "pending")) { query(); return 5; }
+        uint8_t packet[32] = {1,16,0,0,0,0,0,16,0,11};
+        packet[17] = 0x12; packet[18] = 0x34;
+        const uint8_t words[] = {0x89,0xAB,0xCD,0xEF,1,0x23,0x45,0x67,0x89,0xAB,0xCD,0xEF};
+        memcpy(packet + 20, words, sizeof words);
+        if (ps3_native_sm_receive_boot(session - 1, packet, 32) ||
+            ps3_native_sm_receive_boot(session, packet, 31) || !ps3_native_sm_receive_boot(session, packet, 32)) return 6;
+        packet[9] = 12;
+        if (ps3_native_sm_receive_boot(session, packet, 32)) return 7;
+        packet[9] = 11;
+        memset(vm_base + 0x31000, 0xA5, 0x80);
+        if (query() || vm_read64(0x31008) != 0x12 || vm_read64(0x31028) != 0x34 ||
+            vm_read64(0x31048) != UINT64_C(0x89ABCDEF) || vm_read64(0x31068) != UINT64_C(0x0123456789ABCDEF)) return 8;
+        for (u32 base : {0x31000u, 0x31020u, 0x31040u, 0x31060u})
+            if (vm_read64(base) != UINT64_C(0xA5A5A5A5A5A5A5A5) || vm_read64(base + 16) != UINT64_C(0xA5A5A5A5A5A5A5A5)) return 9;
+        memset(vm_base + 0x31000, 0xA5, 0x80);
+        if (query(0x31008, 0x31028, 0x31048, UINT64_MAX) != (u32)CELL_EFAULT ||
+            vm_read64(0x31008) != 0x12 || vm_read64(0x31028) != 0x34 ||
+            vm_read64(0x31048) != UINT64_C(0xA5A5A5A5A5A5A5A5)) return 10;
+        if (query(0x31008, 0x31028, UINT64_MAX, 0x31068) != (u32)CELL_EFAULT ||
+            vm_read64(0x31068) != UINT64_C(0x0123456789ABCDEF)) return 14;
+        packet[17] = 0x56;
+        if (!ps3_native_sm_receive_boot(session, packet, 32) || query() || vm_read64(0x31008) != 0x56) return 15;
+        const auto next = ps3_native_sm_begin();
+        if (!next || next == session || ps3_native_sm_receive_boot(session, packet, 32)) return 11;
+        if (argc == 3 && !strcmp(argv[2], "reset")) { query(); return 12; }
+        if (!ps3_native_sm_receive_boot(next, packet, 32) || query()) return 13;
+        vm_shutdown(); puts("Synthetic SM packet mapping: four coherent u64s, permissions, write order, session reset and stale ingress"); return 0;
+    }
+    if (argc >= 2 && !strcmp(argv[1], "mutex_named")) {
+        if (vm_init() || vm_commit(0x30000, 0x10000)) return 1;
+        g_ppu_main_stack_addr = 0x30000; g_ppu_main_stack_size = 0x10000;
+        lv2_init_syscalls(); ppu_context ctx{}; ctx.thread_id = 17;
+        auto invoke = [&](u32 number, u64 a, u64 b = 0) {
+            ctx.gpr[11] = number; ctx.gpr[3] = a; ctx.gpr[4] = b; lv2_syscall(&ctx); return (u32)ctx.gpr[3];
+        };
+        vm_write32(0x31000, 2); vm_write32(0x31004, 0x20);
+        vm_write32(0x31008, 0x100); vm_write32(0x3100C, 0x2000);
+        vm_write64(0x31010, UINT64_C(0x8123456789ABCDEF)); vm_write32(0x31018, 1);
+        vm_write32(0x31100, 0xA5A5A5A5); vm_write32(0x31108, 0xA5A5A5A5);
+        if (argc == 3) vm_write32(0x31018, 2); // Unsupported process-handle import must stop.
+        if (invoke(100, 0x31104, 0x31000)) return 2;
+        const u32 id = vm_read32(0x31104);
+        vm_write32(0x31104, 0xA5A5A5A5);
+        if (invoke(100, 0x31104, 0x31000) != (u32)CELL_EEXIST || vm_read32(0x31104) != 0xA5A5A5A5 ||
+            vm_read32(0x31100) != 0xA5A5A5A5 || vm_read32(0x31108) != 0xA5A5A5A5) return 3;
+        if (invoke(103, id) || invoke(101, id) != (u32)CELL_EBUSY || invoke(104, id) || invoke(101, id)) return 4;
+        if (invoke(100, 0x31104, 0x31000) || invoke(101, vm_read32(0x31104))) return 5;
+        vm_write64(0x31010, 0);
+        if (invoke(100, 0x31104, 0x31000) != (u32)CELL_EINVAL) return 6;
+        vm_shutdown(); puts("Exclusive named mutex preserves key uniqueness, real locking and destruction"); return 0;
+    }
+    if (argc == 2 && !strcmp(argv[1], "process_debug")) {
+        lv2_init_syscalls(); ppu_context ctx{};
+        auto cleanup = [&](u64 mode, u64 reserved = 0) {
+            ctx.gpr[11] = 988; ctx.gpr[3] = mode; ctx.gpr[4] = reserved;
+            lv2_syscall(&ctx); return (u32)ctx.gpr[3];
+        };
+        for (u32 mode : {0u, 3u, 15u, 17u, UINT32_MAX})
+            if (cleanup(mode) != (u32)CELL_EINVAL) return 1;
+        if (cleanup(1, 1) != (u32)CELL_EINVAL) return 2;
+        uint8_t control[32] = {};
+        if (ppu_process_set_control(control, 31) || ppu_process_set_control(nullptr, 32) ||
+            !ppu_process_set_control(control, 32) || cleanup(1) != (u32)CELL_EINVAL) return 3;
+        control[0] = 0x40;
+        if (!ppu_process_set_control(control, 32)) return 4;
+        for (u32 mode : {1u, 2u, 4u, 8u, 16u}) if (cleanup(mode)) return 5;
+        if (cleanup(UINT64_C(0x100000001), UINT64_C(0x100000000))) return 6;
+        control[0] = 0x3F; memset(control + 1, 0xFF, 31);
+        if (!ppu_process_set_control(control, 32) || cleanup(1) != (u32)CELL_EINVAL) return 7;
+        if (!ppu_process_set_control(nullptr, 0)) return 8;
+        puts("Process debug cleanup validates modes, original control attributes and empty object state");
+        return 0;
+    }
+    if (argc == 2 && !strcmp(argv[1], "process_debug_unbound")) {
+        lv2_init_syscalls(); ppu_context ctx{};
+        ctx.gpr[11] = 988; ctx.gpr[3] = 1; lv2_syscall(&ctx); return 1;
+    }
     if (argc >= 2 && !strcmp(argv[1], "fs_udf_query")) {
         if (vm_init() || vm_commit(0x30000, 0x10000)) return 1;
         g_ppu_main_stack_addr = 0x30000; g_ppu_main_stack_size = 0x10000;

@@ -232,9 +232,28 @@ TLS, and `/dev_flash/vsh/module/vsh.self` as argv[0]. Raw lightweight-mutex
 sleep/wake channels, opaque process parameters and named IPC event ports now
 pass shared regressions; the real VSH proceeds through those operations and
 passes resident PRX registration (484/486), original export/import binding and
-its original unresolved-import handler. The next real stop is LV2 syscall 988
-(LR `0x000104C8`), whose process-debug permission/state contract is not implemented;
-no substitute success or permission error is returned. No XMB menu or original VSH frame has been shown.
+its original unresolved-import handler. Hash-bound original SELF control attributes
+now preserve the original permission decision for debug cleanup (988); the
+unsupported upstream TTY alias is disabled in strict execution. Attribute parsing
+checks SELF/ELF header correspondence and records both hashes; it is not SELF
+signature verification. Exclusive named mutex creation now uses the existing real
+mutex, checks key uniqueness and removes the key on destruction. Import/open
+policies and adaptive mutexes remain blocked.
+The real VSH now reaches `sys_sm_get_params` (380, LR `0x000CA040`). One LV2 System
+Manager state is initialized by the host session, accepts service-11 VUART messages
+and invalidates their availability on session reset. Firmware 4.93 maps payload
+bytes 1/2, word +4 and doubleword +8 to four big-endian **u64** outputs, written in
+argument order a,b,d,c. Synthetic regressions cover permissions, pending/reset
+state, stale ingress, bounds, partial writes and canaries. No verified startup
+payload source is available locally, so real execution stops explicitly there;
+no default boot reason or fixed RPCS3 values are substituted.
+A read-only hardware reproducer is `tests/sm_params_ps3_probe.c`, optionally built
+with `make -f tests/sm_params_probe.mk` using an existing PSL1GHT installation.
+It requires an appropriately permitted process, records all four u64s and canaries,
+and does not grant privileges. Record hardware, firmware and startup conditions
+with its output. Only C/PowerPC syntax was checked here: the installed LLVM lacks
+PowerPC code generation, and neither a linked hardware probe nor hardware results
+are available. No XMB menu or original VSH frame has been shown.
 With the existing local VSH-bound build, reproduce the same stop using
 `python src/ps3native/cli.py run .local/work/boot/firmware/system-game/vsh.elf --build-dir build`.
 The public `system` command remains blocked.

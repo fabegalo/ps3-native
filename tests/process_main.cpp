@@ -11,6 +11,8 @@ uint8_t* vm_base = nullptr;
 void ppu_register_function(uint64_t, void (*)(ppu_context*));
 void ps3_indirect_call(ppu_context*);
 uint32_t ppu_function_count(void);
+int ppu_process_set_control(const void*, uint32_t);
+int32_t ppu_process_debug_cleanup(uint32_t, uint32_t);
 extern PPU_THREAD_LOCAL ppu_context* g_active_ctx;
 void ps3_native_hle_gate(uint32_t, ppu_context*);
 void ps3_native_syscall_gate(ppu_context*);
@@ -51,6 +53,9 @@ int main(int argc, char** argv) {
     vm_write32(0x10000, 41);
     ppu_register_function(0x20000, first);
     CHECK(ppu_function_count() == 1);
+    uint8_t control[32] = {0x40};
+    CHECK(ppu_process_set_control(control, sizeof control));
+    CHECK(ppu_process_debug_cleanup(1, 0) == 0);
     run(42);
     CHECK(guest_process_map_shared(shared, 0x40000000, 0, 0x10000));
     CHECK(!guest_process_map_shared(shared, 0x40000000, 0, 0x10000));
@@ -62,6 +67,9 @@ int main(int argc, char** argv) {
     guest_process_execution_leave();
     CHECK(guest_process_bind(b));
     CHECK(ppu_function_count() == 0);
+    control[0] = 0;
+    CHECK(ppu_process_set_control(control, sizeof control));
+    CHECK(uint32_t(ppu_process_debug_cleanup(1, 0)) == 0x80010002u);
     CHECK(!guest_process_range_backed(0x10000, 4));
     CHECK(guest_process_map_private(0x10000, 0x10000));
     CHECK(vm_read32(0x10000) == 0);
@@ -75,6 +83,7 @@ int main(int argc, char** argv) {
     CHECK(!guest_process_map_shared(shared, 0x50010000, 0, 0x10000));
     CHECK(guest_process_bind(a));
     run(42);
+    CHECK(ppu_process_debug_cleanup(1, 0) == 0);
     CHECK(vm_read32(0x40000000) == 0x55667788); // Closing the object handle preserves live views.
     std::thread worker_a([&] {
         CHECK(guest_process_bind(a));

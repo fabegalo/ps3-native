@@ -237,10 +237,30 @@ ELF e `/dev_flash/vsh/module/vsh.self` em argv[0]. Canais de espera/sinalizaçã
 dos mutexes leves do kernel, parâmetros opacos do processo e portas de eventos
 IPC nomeadas passam nas regressões compartilhadas. O VSH real passa por essas
 operações, pelo registro de PRX residentes (484/486), pelo vínculo original de
-exports/imports e pelo tratador original de imports não resolvidos. A próxima
-parada real é o syscall LV2 988 (LR `0x000104C8`): seu contrato de permissões e
-estado de depuração do processo ainda não está implementado. Nenhum sucesso ou
-erro de permissão substituto foi retornado. Nenhum menu XMB ou frame
+exports/imports e pelo tratador original de imports não resolvidos. Os atributos
+de controle do SELF original, vinculados por hash, preservam a decisão original
+de permissão na limpeza de depuração (988); o alias TTY do upstream fica desativado
+na execução estrita. O parser verifica a correspondência dos cabeçalhos SELF/ELF
+e registra ambos os hashes; isso não verifica a assinatura do SELF. A criação
+exclusiva de mutex nomeado usa o mutex real existente, verifica chave duplicada
+e remove a chave na destruição. Políticas de abertura/importação e mutexes
+adaptativos continuam bloqueados.
+O VSH real agora chega a `sys_sm_get_params` (380, LR `0x000CA040`). Um único estado
+de System Manager no LV2 é iniciado pela sessão host, recebe mensagens VUART do
+serviço 11 e invalida sua disponibilidade ao reiniciar a sessão. No firmware 4.93,
+os bytes 1/2, a palavra +4 e o doubleword +8 do payload produzem quatro saídas
+big-endian **u64**, escritas na ordem de argumentos a,b,d,c. Regressões sintéticas
+cobrem permissões, estado pendente/reset, mensagem de sessão antiga, limites,
+escritas parciais e sentinelas. Ainda não há uma origem verificada para o payload
+de partida local; a execução real para explicitamente nesse ponto, sem motivo
+de boot padrão ou valores fixos do RPCS3.
+O reprodutor somente de leitura `tests/sm_params_ps3_probe.c` pode ser construído
+com `make -f tests/sm_params_probe.mk`, usando uma instalação PSL1GHT existente.
+Ele exige um processo com a permissão apropriada, registra os quatro u64 e as
+sentinelas, e não concede privilégios. Os resultados precisam acompanhar hardware,
+firmware e condições de partida. Aqui foi verificada apenas a sintaxe C/PowerPC:
+o LLVM instalado não gera código PowerPC; não há probe vinculado nem resultados
+de hardware. Nenhum menu XMB ou frame
 original do VSH foi mostrado. Com o build local já vinculado ao VSH, a parada
 é reproduzível por
 `python src/ps3native/cli.py run .local/work/boot/firmware/system-game/vsh.elf --build-dir build`.
