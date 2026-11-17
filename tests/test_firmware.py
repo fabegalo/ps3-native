@@ -12,6 +12,30 @@ from lle_fixture import own_prx, own_prx_data_export, own_prx_data_import
 
 
 class FirmwareTests(unittest.TestCase):
+    def test_ds_relocation_preserves_instruction_and_rejects_misalignment(self):
+        sys.path.insert(0, str(ROOT / 'external/ps3recomp/tools'))
+        from lift_prx import Prx
+        with tempfile.TemporaryDirectory() as tmp:
+            source = Path(tmp) / 'ds.prx'
+            for instruction in (0xE8C20000, 0xE8C20001, 0xE8C20002, 0xF8C20001):
+                data = bytearray(own_prx()); data.extend(bytes(24))
+                struct.pack_into('>Q', data, 208, 0xA8)
+                struct.pack_into('>I', data, 0x188, instruction)
+                struct.pack_into('>QHBBIQ', data, 0x390, 0x8A, 0, 255, 0, 57, 0xF234)
+                source.write_bytes(data); validate_prx(source, 0x09000000)
+                image, _ = Prx(str(source)).build_image(0x09000000)
+                self.assertEqual(struct.unpack_from('>I', image, 0x88)[0], instruction | 0xF234)
+                self.assertEqual(image[0x84:0x88], data[0x184:0x188])
+            for target, addend, instruction in ((0x89, 0xF234, 0xE8C20000),
+                                                (0x8A, 0xF235, 0xE8C20000),
+                                                (0x8A, 0xF234, 0x38600000),
+                                                (0xFE, 0xF234, 0)):
+                struct.pack_into('>I', data, 0x188, instruction)
+                struct.pack_into('>QHBBIQ', data, 0x390, target, 0, 255, 0, 57, addend)
+                source.write_bytes(data)
+                with self.assertRaisesRegex(ValueError, 'ADDR16_LO_DS'): validate_prx(source, 0x09000000)
+                with self.assertRaises(SystemExit): Prx(str(source)).build_image(0x09000000)
+
     def test_original_variable_interfaces_are_not_function_descriptors(self):
         with tempfile.TemporaryDirectory() as tmp:
             base = Path(tmp); source = base / 'variables.prx'

@@ -8,7 +8,7 @@
     "patches": [
       {
         "path": "patches/ps3recomp/0001-strict-aot-execution.patch",
-        "sha256": "7107f175eb9f9a8cb1f6030069e17ee1dc31dd585a6b4d801c934966382943d6",
+        "sha256": "51502b81b30e3be175bd003873b5905fa46fabf947bfdcaf978ba4d7c6d743ee",
         "source_hash_normalization": "LF",
         "files": {
           "runtime/ppu/ppu_hle.cpp": {
@@ -265,7 +265,7 @@
           },
           "tools/ppu_lifter.py": {
             "before": "20dbf0c1913371fd7fac1628dace52e2849e5911d6c956e27d1e97408f313202",
-            "after": "3df8367b0d11ebca1f25aeb3b800cf28e4717defda538257c882bb87b67e6e56"
+            "after": "ff6d2b9ccf646e7c4b36346bb89d6cd6c9e1f14e799fd9779cd465d34cb2bfdc"
           },
           "runtime/memory/guest_process.h": {
             "before": null,
@@ -274,6 +274,10 @@
           "runtime/memory/guest_process.cpp": {
             "before": null,
             "after": "fc47a9357fdc01d9e5dded3c593a22730446c9d1106b6b0d292879fcb655c3b3"
+          },
+          "tools/lift_prx.py": {
+            "before": "39b66d5bd5c08a8720d6839f483aecc7586f18ad8c1bd3a79dbe39e827a44bc5",
+            "after": "410127f5ff5fc5d83e3aaae42799573b7a9b26e02abeb8dee7ca01131fb7e2a5"
           }
         }
       }

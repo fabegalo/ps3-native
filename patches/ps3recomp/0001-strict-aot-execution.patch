@@ -11899,7 +11899,42 @@
  
  /* Memory access helpers (provided by runtime) */
  #ifdef __cplusplus
-@@ -2084,7 +2114,8 @@
+@@ -1115,6 +1145,34 @@
+         # Instructions in [start, end), located via a cached sorted index so
+         # this is O(log N + span) rather than a full O(N) scan per call.
+         range_insns = self._range_insns(instructions, start, end)
++        # PRX executable segments also contain data. Decode only paths from this
++        # entry; separately prepared tail entries and OPDs remain independent roots.
++        by_address = {ins.addr: ins for ins in range_insns}
++        reachable, pending = set(), [start]
++        while pending:
++            address = pending.pop()
++            if address in reachable or address not in by_address:
++                continue
++            reachable.add(address)
++            word = by_address[address].raw
++            opcode, link = word >> 26, word & 1
++            following = address + 4
++            if opcode in (16, 18):
++                displacement = sign_extend(word & (0xFFFC if opcode == 16 else 0x3FFFFFC),
++                                           16 if opcode == 16 else 26)
++                destination = (displacement + (0 if word & 2 else address)) & 0xFFFFFFFF
++                if not link:
++                    pending.append(destination)
++                always = opcode == 18 or ((word >> 21) & 0x14) == 0x14
++                if link or not always:
++                    pending.append(following)
++            elif opcode == 19 and ((word >> 1) & 0x3FF) in (16, 528):
++                pending.extend(self.jump_tables.get(address, ()))
++                if link or ((word >> 21) & 0x14) != 0x14:
++                    pending.append(following)
++            else:
++                pending.append(following)
++        range_insns = [ins for ins in range_insns if ins.addr in reachable]
+ 
+         # Collect branch targets within the function for labels
+         internal_targets: set[int] = set()
+@@ -2084,7 +2142,8 @@
          # stack). LR holds the target (set by the preceding mtlr); dispatch like
          # bctrl, then CONTINUE (link = call).
          if mn == "blrl":
@@ -11909,7 +11944,7 @@
  
          if mn == "b":
              target = ops[0]
-@@ -4178,7 +4209,31 @@
+@@ -4178,7 +4237,31 @@
                        f"extern int {g};", "#endif"]
          lines.append(f"void {weak}{func.name}(ppu_context* ctx) {{")
          lines.append("    PPU_MM_SNAP")
@@ -11942,7 +11977,7 @@
              lines.append(f"    {bline}" if not bline.endswith(":") else bline)
  
          # If a function doesn't end with blr/b/bctr (a return or unconditional
-@@ -4213,6 +4268,13 @@
+@@ -4213,6 +4296,13 @@
                        f"0x{func.fallthrough_to:08X}; emitting halt", flush=True)
                  lines.append(f"        /* missing continuation 0x{func.fallthrough_to:08X}: halt */ return;")
  
@@ -12328,3 +12363,16 @@
 +        std::make_pair(reinterpret_cast<uintptr_t>(address), UINT32_MAX));
 +    return it == p.inverse.begin() ? 0 : std::prev(it)->second;
 +}
+--- a/tools/lift_prx.py
++++ b/tools/lift_prx.py
+@@ -106,6 +106,10 @@
+             elif rtype == 6:      # ADDR16_HA
+                 img[target:target + 2] = struct.pack(
+                     ">H", ((value + 0x8000) >> 16) & 0xFFFF)
++            elif rtype == 57:     # ADDR16_LO_DS: PPU ld/lwa/std displacement, preserving XO.
++                if target % 4 != 2 or value & 3 or be32(img, target - 2) >> 26 not in (58, 62):
++                    raise SystemExit("invalid or unsupported ADDR16_LO_DS instruction/alignment")
++                img[target:target + 2] = struct.pack(">H", (value & 0xFFFC) | (be16(img, target) & 3))
+             elif rtype == 44:     # REL64 (rare)
+                 img[target:target + 8] = struct.pack(">Q", value & (2**64 - 1))
+             else:

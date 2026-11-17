@@ -11,6 +11,37 @@ from ps3native.boot_subset import pointer_table_seeds, select_boot
 
 
 class CodegenTests(unittest.TestCase):
+    def test_ppu_reachability_keeps_calls_and_excludes_data_after_returns(self):
+        sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'external/ps3recomp/tools'))
+        from ppu_lifter import PPULifter
+        from ppu_disasm import decode
+        words = [0x48001001, 0x4E800020, 0x48003001, 0x38800063]
+        insns = [decode(word, 0x1000 + i * 4) for i, word in enumerate(words)]
+        lifter = PPULifter(); body = lifter.lift_function(insns, 0x1000, 0x1010)
+        self.assertIn(0x2000, lifter.call_targets)
+        self.assertNotIn(0x4008, lifter.call_targets)
+        self.assertNotIn('gpr[4]', '\n'.join(body.body_lines))
+        # An independently prepared interior entry remains executable.
+        tail = lifter.lift_function(insns, 0x100C, 0x1010)
+        self.assertIn('gpr[4]', '\n'.join(tail.body_lines))
+
+    def test_ppu_reachability_preserves_both_conditional_paths_and_indirect_cases(self):
+        sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'external/ps3recomp/tools'))
+        from ppu_lifter import PPULifter
+        from ppu_disasm import decode
+        def lift(words, cases=None):
+            lifter = PPULifter(); lifter.jump_tables = cases or {}
+            instructions = [decode(word, 0x1000 + i * 4) for i, word in enumerate(words)]
+            return '\n'.join(lifter.lift_function(instructions, 0x1000, 0x1000 + len(words) * 4).body_lines)
+        body = lift([0x4182000C, 0x38600001, 0x48000008, 0x38800002, 0x4E800020, 0x38A00003])
+        self.assertIn('gpr[3]', body); self.assertIn('gpr[4]', body); self.assertNotIn('gpr[5]', body)
+        conditional_return = lift([0x4D820020, 0x38600001, 0x4E800020])
+        self.assertIn('gpr[3]', conditional_return)
+        indirect_call = lift([0x4E800421, 0x38600001, 0x4E800020])
+        self.assertIn('gpr[3]', indirect_call)
+        indirect_tail = lift([0x4E800420, 0x38800063, 0x38600001, 0x4E800020], {0x1000: [0x1008]})
+        self.assertIn('gpr[3]', indirect_tail); self.assertNotIn('gpr[4]', indirect_tail)
+
     def test_stripped_pointer_tables_add_preparation_seeds_only(self):
         data = struct.pack('>4I', 0x10000, 0x2000, 0x20000, 0x2000)
         opds = SimpleNamespace(sh_addr=0x1000, sh_offset=0, sh_size=16, sh_flags=2, sh_type=1)

@@ -51,7 +51,7 @@ def validate_prx(source, base):
     for offset in range(relocation[0], sum(relocation), 24):
         target, _, value_segment, target_segment, kind, addend = struct.unpack_from('>QHBBIQ', data, offset)
         # The selected upstream implementation has audited absolute 32/16-bit relocations.
-        sizes = {1: 4, 4: 2, 5: 2, 6: 2}
+        sizes = {1: 4, 4: 2, 5: 2, 6: 2, 57: 2}
         if kind not in sizes or target_segment >= len(loads) or (value_segment != 255 and value_segment >= len(loads)):
             raise ValueError('Unsupported PRX relocation type or segment index')
         if target + sizes[kind] > loads[target_segment][3]:
@@ -59,6 +59,11 @@ def validate_prx(source, base):
         value = (0 if value_segment == 255 else base + loads[value_segment][1]) + addend
         if value > 0xFFFFFFFF:
             raise ValueError('PRX relocation value exceeds the guest address space')
+        if kind == 57:
+            file_offset, _, file_size, _ = loads[target_segment]
+            if (target % 4 != 2 or target + 2 > file_size or value & 3 or
+                    struct.unpack_from('>I', data, file_offset + target - 2)[0] >> 26 not in (58, 62)):
+                raise ValueError('Invalid or unsupported PRX ADDR16_LO_DS instruction/alignment')
     return loads
 
 
