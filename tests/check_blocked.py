@@ -3,6 +3,16 @@ import sys
 import os
 from pathlib import Path
 
+for mode in ('atrac_missing_export', 'adec_missing_export'):
+    result = subprocess.run([sys.argv[3], sys.argv[4], mode], capture_output=True, timeout=15)
+    if result.returncode != 86 or b'original ATRAC/ADEC owner has no prepared export' not in result.stderr:
+        raise AssertionError((mode, result.returncode, result.stderr[-2000:]))
+
+for mode in ('http_missing_export', 'ssl_missing_export'):
+    result = subprocess.run([sys.argv[3], sys.argv[4], mode], capture_output=True, timeout=15)
+    if result.returncode != 86 or b'original HTTP/SSL owner has no prepared export' not in result.stderr:
+        raise AssertionError((mode, result.returncode, result.stderr[-2000:]))
+
 for mode in ('pending', 'reset'):
     result = subprocess.run([sys.argv[1], 'sm_params', mode], capture_output=True, timeout=15)
     if result.returncode != 86 or b'System Manager service 11 boot message is unavailable' not in result.stderr:

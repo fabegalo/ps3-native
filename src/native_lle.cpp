@@ -16,6 +16,7 @@ extern "C" PPU_THREAD_LOCAL ppu_context* g_active_ctx;
 extern "C" PPU_THREAD_LOCAL void (*g_trampoline_fn)(void*);
 extern "C" int ps3_native_guest_range_backed(uint32_t, uint32_t);
 extern "C" void ppu_aot_check_return(ppu_context*, uint64_t, uint64_t, uint64_t);
+extern "C" void ppu_write_coherent(uint32_t, const void*, uint32_t);
 
 struct Resident {
     const NativeLleModule* module = nullptr;
@@ -44,15 +45,51 @@ static const NativeLleExport* find_export(const NativeLleModule* m, uint32_t nid
     }
     return lo < m->export_count && m->exports[lo].nid == nid ? m->exports + lo : nullptr;
 }
+static bool has_library(const NativeLleModule* m, const char* name) {
+    if (!std::strcmp(m->library, name)) return true;
+    for (size_t i = 0; i < m->additional_library_count; ++i)
+        if (!std::strcmp(m->additional_libraries[i], name)) return true;
+    return false;
+}
+static const NativeLleDataExport* find_data(const NativeLleModule* m, const char* library, uint32_t nid) {
+    for (size_t i = 0; i < m->data_export_count; ++i)
+        if (m->data_exports[i].nid == nid && !std::strcmp(m->data_exports[i].library, library)) return m->data_exports + i;
+    return nullptr;
+}
+static void bind_data(uint32_t slot, uint32_t value) {
+    const uint8_t bytes[] = {uint8_t(value >> 24), uint8_t(value >> 16), uint8_t(value >> 8), uint8_t(value)};
+    ppu_write_coherent(slot, bytes, sizeof bytes);
+}
 extern "C" int ps3_native_lle_load(const NativeLleModule* m) {
     require_root_process();
     const size_t count = loaded_count.load(std::memory_order_acquire);
     for (size_t i = 0; i < count; ++i) if (loaded[i].module == m) return 1;
     if (count == loaded.size()) return 0;
-    if (!m || !m->name || !m->library || !m->image || !m->functions || !m->exports ||
+    if (!m || !m->name || !m->library || !m->image || !m->functions || (m->export_count && !m->exports) ||
         !m->base || m->size < 8 || (uint64_t)m->base + m->size > 0x100000000ull ||
-        !m->function_count || m->function_count > 65536 || !m->export_count || m->export_count > 4096) return 0;
+        !m->function_count || m->function_count > 65536 || (!m->export_count && !m->data_export_count) || m->export_count > 4096) return 0;
+    if (m->additional_library_count > 32 || (m->additional_library_count && !m->additional_libraries)) return 0;
+    for (size_t i = 0; i < m->additional_library_count; ++i) {
+        const char* name = m->additional_libraries[i];
+        if (!name || !*name || std::strlen(name) > 255 || !std::strcmp(name, m->library)) return 0;
+        for (size_t j = 0; j < i; ++j) if (!std::strcmp(name, m->additional_libraries[j])) return 0;
+    }
     const uint64_t end = (uint64_t)m->base + m->size;
+    if (m->data_export_count > 4096 || m->data_import_count > 4096 ||
+        (m->data_export_count && !m->data_exports) || (m->data_import_count && !m->data_imports)) return 0;
+    for (size_t i = 0; i < m->data_export_count; ++i) {
+        const auto& e = m->data_exports[i];
+        if (!e.library || !has_library(m, e.library) || e.address < m->base || e.address >= end) return 0;
+        for (size_t j = 0; j < i; ++j)
+            if (e.nid == m->data_exports[j].nid && !std::strcmp(e.library, m->data_exports[j].library)) return 0;
+        for (size_t j = 0; j < count; ++j) if (find_data(loaded[j].module, e.library, e.nid)) return 0;
+    }
+    for (size_t i = 0; i < m->data_import_count; ++i) {
+        const auto& e = m->data_imports[i];
+        if (!e.library || !*e.library || std::strlen(e.library) > 255 || (e.slot & 3) ||
+            e.slot < m->base || uint64_t(e.slot) + 4 > end) return 0;
+        for (size_t j = 0; j < i; ++j) if (e.slot == m->data_imports[j].slot) return 0;
+    }
     for (size_t i = 0; i < m->function_count; ++i) {
         const auto& f = m->functions[i];
         if (!f.entry || (f.address & 3) || f.address < m->base || f.address >= end ||
@@ -68,8 +105,12 @@ extern "C" int ps3_native_lle_load(const NativeLleModule* m) {
         if (!prepared) return 0;
         for (size_t j = 0; j < count; ++j) if (find_export(loaded[j].module, e.nid)) return 0;
     }
-    for (size_t i = 0; i < count; ++i)
-        if (!std::strcmp(m->library, loaded[i].module->library) || !std::strncmp(m->name, loaded[i].module->name, 28)) return 0;
+    for (size_t i = 0; i < count; ++i) {
+        const auto* previous = loaded[i].module;
+        if (has_library(previous, m->library) || !std::strncmp(m->name, previous->name, 28)) return 0;
+        for (size_t j = 0; j < m->additional_library_count; ++j)
+            if (has_library(previous, m->additional_libraries[j])) return 0;
+    }
     if (m->start_opd) {
         if (m->start_opd < m->base || (uint64_t)m->start_opd + 8 > end || (m->start_opd & 3)) return 0;
         const auto code = be32(m->image + m->start_opd - m->base);
@@ -84,8 +125,24 @@ extern "C" int ps3_native_lle_load(const NativeLleModule* m) {
     loaded[count].module = m;
     loaded[count].started.store(m->start_opd ? 0 : 2, std::memory_order_relaxed);
     loaded_count.store(count + 1, std::memory_order_release);
-    std::fprintf(stderr, "[native-lle] loaded %s library=%s base=0x%08X bytes=%u exports=%zu\n",
-        m->name, m->library, m->base, m->size, m->export_count);
+    for (size_t i = 0; i < m->data_import_count; ++i) {
+        const auto& ref = m->data_imports[i];
+        uint32_t target = 0;
+        for (size_t j = 0; j <= count; ++j)
+            if (const auto* e = find_data(loaded[j].module, ref.library, ref.nid)) target = e->address;
+        // Preparation accepts only optional data imports (attributes 9), ADDR32,
+        // zero addend and writable data slots. An absent weak export links null.
+        bind_data(ref.slot, target);
+    }
+    for (size_t j = 0; j < count; ++j) {
+        const auto* previous = loaded[j].module;
+        for (size_t i = 0; i < previous->data_import_count; ++i) {
+            const auto& ref = previous->data_imports[i];
+            if (const auto* e = find_data(m, ref.library, ref.nid)) bind_data(ref.slot, e->address);
+        }
+    }
+    std::fprintf(stderr, "[native-lle] loaded %s library=%s base=0x%08X bytes=%u exports=%zu data_exports=%zu data_refs=%zu\n",
+        m->name, m->library, m->base, m->size, m->export_count, m->data_export_count, m->data_import_count);
     return 1;
 }
 extern "C" int ps3_native_lle_owns(uint32_t nid) {
@@ -95,7 +152,7 @@ extern "C" int ps3_native_lle_owns(uint32_t nid) {
 }
 extern "C" int ps3_native_lle_library(const char* library) {
     for (size_t i = 0; library && i < loaded_count.load(std::memory_order_acquire); ++i)
-        if (!std::strcmp(loaded[i].module->library, library)) return 1;
+        if (has_library(loaded[i].module, library)) return 1;
     return 0;
 }
 extern "C" int ps3_native_lle_named(const char* name) {
@@ -107,7 +164,7 @@ extern "C" int ps3_native_lle_start(const char* library, ppu_context* ctx) {
     require_root_process();
     for (size_t i = 0; library && ctx && i < loaded_count.load(std::memory_order_acquire); ++i) {
         auto& entry = loaded[i]; const auto* m = entry.module;
-        if (std::strcmp(library, m->library)) continue;
+        if (!has_library(m, library)) continue;
         if (entry.started.load(std::memory_order_acquire) == 2) return 1;
         int idle = 0;
         if (!entry.started.compare_exchange_strong(idle, 1)) return 0;
@@ -145,7 +202,7 @@ extern "C" int ps3_native_lle_start(const char* library, ppu_context* ctx) {
 extern "C" int ps3_native_lle_defer_start(const char* library) {
     require_root_process();
     for (size_t i = 0; library && i < loaded_count.load(std::memory_order_acquire); ++i)
-        if (!std::strcmp(library, loaded[i].module->library)) {
+        if (has_library(loaded[i].module, library)) {
             if (loaded[i].started.load(std::memory_order_acquire) != 0) return 0;
             loaded[i].deferred.store(true, std::memory_order_release); return 1;
         }

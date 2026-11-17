@@ -271,6 +271,18 @@ hashes. Explicit boundaries separate original code from constant data in four
 payloads; all loaded data remains intact. This is preparation coverage, not complete
 control-flow, ISA, frame or gameplay certification.
 
+A local startup test of **Angry Birds Trilogy (BLUS31054, 01.00)** compiled
+15,735 PPU functions and registered seven of nine discovered SPU programs
+(including firmware); two stripped SPU images remain unverified and stop if
+reached. The real EBOOT printed `Engine started`, initialized the SPU service,
+and passed HTTP module `0x0001` using original `libhttp` (HTTP and HTTP Util share
+one image) and `libssl` AOT bindings. The original ATRAC3plus client, common ADEC,
+ATRAC3 and ATRAC3plus providers then completed their module-start paths. Shared
+PRX data linkage now resolves optional ADDR32 data references and opaque exports;
+code fixups, nonzero addends and TLS remain unsupported. The latest real boot
+stops at LV2 debug module `0x002E` after about 1.1 seconds. No network/TLS exchange,
+decoded audio, menu, frame or gameplay has been verified.
+
 A bounded child-start diagnostic also compiled all 12,884 functions of the
 original `GOW1.self`. Its boot path, priority 1001 and 32 KiB stack match the
 original selector's exit-spawn call; this does not implement the parent lifecycle.
@@ -411,9 +423,10 @@ base/relocations and explicit NID ownership. Never distribute derived output.
 `src/ps3native/firmware.py` validates an already decrypted PRX, uses the pinned
 upstream relocation/lifter tools and emits a hash-bound AOT receipt. Pass that
 receipt directory as `PS3_NATIVE_FIRMWARE_DIR` in the existing CMake configuration.
-Only the explicitly selected library owns its exports; missing original exports
-cannot silently fall back to HLE. Modules requiring a module-start contract are
-rejected. Preparation and runtime reject image overlaps and reserved scratch/TLS
+Only explicitly selected libraries own their exports; `--additional-library`
+shares one image and lifecycle. Missing original exports cannot silently fall back
+to HLE. A module-start entry requires explicit `--module-start` preparation.
+Preparation and runtime reject image overlaps and reserved scratch/TLS
 areas. Own synthetic PRX tests verify stack/TOC/TLS preservation, cached-artifact
 tampering, export mutation and missing-export rejection. Local original extraction
 and decryption use RPCS3 only as an offline tool; guest execution uses ps3recomp.

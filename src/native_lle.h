@@ -5,6 +5,9 @@
 struct ppu_context;
 struct NativeLleFunction { uint32_t address; void (*entry)(ppu_context*); };
 struct NativeLleExport { uint32_t nid, opd; };
+struct NativeLleDataExport { const char* library; uint32_t nid, address; };
+// Optional ADDR32 references to data only; preparation rejects code fixups, addends and TLS.
+struct NativeLleDataImport { const char* library; uint32_t nid, slot; };
 struct NativeLleModule {
     const char* name;
     const char* library;
@@ -15,6 +18,12 @@ struct NativeLleModule {
     const NativeLleExport* exports;
     size_t export_count;
     uint32_t start_opd = 0;
+    const char* const* additional_libraries = nullptr;
+    size_t additional_library_count = 0;
+    const NativeLleDataExport* data_exports = nullptr;
+    size_t data_export_count = 0;
+    const NativeLleDataImport* data_imports = nullptr;
+    size_t data_import_count = 0;
 };
 // Startup only; loaded modules remain resident until the session process ends.
 extern "C" int ps3_native_lle_load(const NativeLleModule*);

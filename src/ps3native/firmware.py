@@ -62,6 +62,85 @@ def validate_prx(source, base):
     return loads
 
 
+def data_interfaces(source, loads, image, base):
+    """Prepare optional ADDR32 variable references; executable fixups remain unsupported."""
+    data = source.read_bytes()
+    phoff = struct.unpack_from('>Q', data, 32)[0]
+    count = struct.unpack_from('>H', data, 56)[0]
+    headers = [struct.unpack_from('>IIQQQQQQ', data, phoff + i * 56) for i in range(count)]
+    info = next(p[4] for p in headers if p[0] == 1)
+    writable = [(base + p[3], base + p[3] + p[6]) for p in headers if p[0] == 1 and p[1] & 2]
+    def offset(address, size):
+        if not any(base + va <= address and address + size <= base + va + fs for _, va, fs, _ in loads):
+            raise ValueError('PRX data-interface metadata exceeds file-backed loads')
+        return address - base
+    def u32(address):
+        return struct.unpack_from('>I', image, offset(address, 4))[0]
+    def name(address):
+        value = bytearray()
+        for i in range(256):
+            byte = image[offset(address + i, 1)]
+            if not byte:
+                text = value.decode('ascii')
+                if not re.fullmatch(r'[A-Za-z_][A-Za-z_0-9]*', text):
+                    raise ValueError('Invalid PRX data-interface library name')
+                return text
+            value.append(byte)
+        raise ValueError('Unterminated PRX data-interface library name')
+    exported, imported = [], []
+    for is_import, field, width in ((False, 0x24, 0x1C), (True, 0x2C, 0x2C)):
+        first, last = struct.unpack_from('>II', data, info + field)
+        cursor, end = base + first, base + last
+        if cursor > end:
+            raise ValueError('Reversed PRX library table')
+        while cursor < end:
+            o = offset(cursor, width)
+            if image[o] != width or cursor + width > end:
+                raise ValueError('Unsupported PRX data-interface table layout')
+            attributes, funcs, variables, tls = struct.unpack_from('>HHHH', image, o + 4)
+            if variables > 4096:
+                raise ValueError('PRX variable table exceeds the preparation limit')
+            if tls:
+                raise ValueError('PRX TLS variable linkage is not prepared')
+            library_address = u32(cursor + 0x10)
+            if variables and library_address:
+                library = name(library_address)
+                if is_import:
+                    if attributes != 9:
+                        raise ValueError('Only optional PRX variable imports are prepared')
+                    nids, refs = u32(cursor + 0x1C), u32(cursor + 0x20)
+                    for i in range(variables):
+                        nid, ref = u32(nids + i * 4), u32(refs + i * 4)
+                        for _ in range(1024):
+                            kind, slot, addend = struct.unpack_from('>III', image, offset(ref, 12))
+                            if not kind:
+                                break
+                            if kind != 1 or addend or slot & 3 or not any(a <= slot and slot + 4 <= b for a, b in writable) or base + loads[0][1] <= slot < base + loads[0][1] + loads[0][3]:
+                                raise ValueError('PRX variable reference requires an unprepared fixup')
+                            imported.append((library, nid, slot)); ref += 12
+                            if len(imported) > 4096:
+                                raise ValueError('PRX variable references exceed the preparation limit')
+                        else:
+                            raise ValueError('Unterminated PRX variable references')
+                else:
+                    if attributes not in (1, 9):
+                        raise ValueError('Unsupported PRX variable export attributes')
+                    nids, addresses = u32(cursor + 0x14), u32(cursor + 0x18)
+                    for i in range(variables):
+                        nid, address = u32(nids + (funcs + i) * 4), u32(addresses + (funcs + i) * 4)
+                        if not any(base + va <= address < base + va + ms for _, va, _, ms in loads):
+                            raise ValueError('PRX variable export exceeds loaded memory')
+                        exported.append((library, nid, address))
+                        if len(exported) > 4096:
+                            raise ValueError('PRX variable exports exceed the preparation limit')
+            cursor += width
+    if len(exported) > 4096 or len(imported) > 4096 or len({p[2] for p in imported}) != len(imported):
+        raise ValueError('Invalid or duplicate PRX variable references')
+    if len({(p[0], p[1]) for p in exported}) != len(exported):
+        raise ValueError('Duplicate PRX variable exports')
+    return sorted(exported), sorted(imported)
+
+
 def firmware_artifacts(root, directory):
     directory = directory.resolve()
     receipt_path = directory / 'receipt.json'
@@ -92,11 +171,14 @@ def firmware_artifacts(root, directory):
     return artifacts
 
 
-def prepare_prx(root, source, cache, base, library, firmware=None, module_start=False):
+def prepare_prx(root, source, cache, base, library, firmware=None, module_start=False, additional_libraries=()):
     source, cache = source.resolve(), cache.resolve()
     if source.is_relative_to(cache):
         raise ValueError('Original PRX must remain outside its preparation cache')
-    if not re.fullmatch(r'[A-Za-z_][A-Za-z_0-9]*', library):
+    if not isinstance(additional_libraries, (tuple, list)):
+        raise ValueError('Additional original PRX libraries must be a sequence')
+    libraries = (library, *additional_libraries)
+    if any(not isinstance(name, str) or not re.fullmatch(r'[A-Za-z_][A-Za-z_0-9]*', name) for name in libraries) or len(libraries) > 33 or len(set(libraries)) != len(libraries):
         raise ValueError('Invalid original PRX library name')
     sdk, lock = dependency(root)
     tools = sdk / 'tools'
@@ -110,6 +192,8 @@ def prepare_prx(root, source, cache, base, library, firmware=None, module_start=
            'upstream_commit': lock['commit'], 'adapter_sha256': digest(Path(__file__)),
            'guards_sha256': digest(Path(__file__).with_name('codegen.py')),
            'tools': {name: digest(tools / name) for name in ('lift_prx.py', 'ppu_lifter.py', 'ppu_disasm.py')}}
+    if additional_libraries:
+        key['additional_libraries'] = list(additional_libraries)
     cache.mkdir(parents=True, exist_ok=True)
     destination = cache / hashlib.sha256(json.dumps(key, sort_keys=True).encode()).hexdigest()
     if destination.exists():
@@ -129,7 +213,10 @@ def prepare_prx(root, source, cache, base, library, firmware=None, module_start=
         stem = source.stem
         exports = json.loads((relocated / f'{stem}_exports.json').read_text())
         imports = json.loads((relocated / f'{stem}_imports.json').read_text())
-        if library not in exports['exports'] or ('!syslib' in exports['exports'] and not module_start):
+        image = (relocated / f'{stem}_image.bin').read_bytes()
+        variable_exports, variable_imports = data_interfaces(source, loads, image, base)
+        data_libraries = {p[0] for p in variable_exports}
+        if any(name not in exports['exports'] and name not in data_libraries for name in libraries) or ('!syslib' in exports['exports'] and not module_start):
             raise ValueError('Selected PRX library is missing or requires an unimplemented module-start contract')
         start_opd = 0
         if '!syslib' in exports['exports']:
@@ -137,8 +224,10 @@ def prepare_prx(root, source, cache, base, library, firmware=None, module_start=
             if not start:
                 raise ValueError('PRX lifecycle metadata has no supported module-start entry')
             start_opd = int(start, 16)
-        image = (relocated / f'{stem}_image.bin').read_bytes()
-        selected = sorted((int(nid, 16), int(opd, 16)) for nid, opd in exports['exports'][library].items())
+        variable_exports = [p for p in variable_exports if p[0] in libraries]
+        selected = sorted((int(nid, 16), int(opd, 16)) for name in libraries for nid, opd in exports['exports'].get(name, {}).items())
+        if len({nid for nid, _ in selected}) != len(selected):
+            raise ValueError('Original PRX selected libraries have colliding NIDs')
         import_nids = {int(nid, 16) for entries in imports.values() for nid in entries}
         if import_nids & {nid for nid, _ in selected}:
             raise ValueError('PRX import/export NID ownership collision')
@@ -182,11 +271,25 @@ def prepare_prx(root, source, cache, base, library, firmware=None, module_start=
         bundle.extend(','.join(f'0x{byte:02X}' for byte in image[i:i + 32]) + ',' for i in range(0, len(image), 32))
         bundle += ['};', 'static const NativeLleFunction functions[] = {']
         bundle.extend(f'{{0x{address:08X}u, {name}}},' for address, name in functions)
-        bundle += ['};', 'static const NativeLleExport exports[] = {']
-        bundle.extend(f'{{0x{nid:08X}u, 0x{opd:08X}u}},' for nid, opd in selected)
-        bundle += ['};', 'static const NativeLleModule original_module = {',
+        bundle += ['};']
+        if selected:
+            bundle += ['static const NativeLleExport exports[] = {']
+            bundle.extend(f'{{0x{nid:08X}u, 0x{opd:08X}u}},' for nid, opd in selected)
+            bundle += ['};']
+        for name, kind, values in [('data_exports', 'NativeLleDataExport', variable_exports), ('data_imports', 'NativeLleDataImport', variable_imports)]:
+            if values:
+                bundle += [f'static const {kind} {name}[] = {{']
+                bundle.extend(f'{{{json.dumps(lib)}, 0x{nid:08X}u, 0x{address:08X}u}},' for lib, nid, address in values)
+                bundle += ['};']
+        if additional_libraries:
+            bundle += ['static const char* const additional_libraries[] = {' + ','.join(json.dumps(name) for name in additional_libraries) + '};']
+        extra = ', additional_libraries, sizeof(additional_libraries)/sizeof(additional_libraries[0])' if additional_libraries else ', nullptr, 0'
+        for name, values in [('data_exports', variable_exports), ('data_imports', variable_imports)]:
+            extra += f', {name}, sizeof({name})/sizeof({name}[0])' if values else ', nullptr, 0'
+        function_exports = 'exports, sizeof(exports)/sizeof(exports[0])' if selected else 'nullptr, 0'
+        bundle += ['static const NativeLleModule original_module = {',
                    f'{json.dumps(exports["module"])}, {json.dumps(library)}, 0x{base:08X}u, sizeof(image), image,',
-                   f'functions, sizeof(functions)/sizeof(functions[0]), exports, sizeof(exports)/sizeof(exports[0]), 0x{start_opd:08X}u', '};',
+                   f'functions, sizeof(functions)/sizeof(functions[0]), {function_exports}, 0x{start_opd:08X}u{extra}', '};',
                    'extern "C" const NativeLleModule* ps3_native_firmware_definition(void) { return &original_module; }', '']
         (stage / 'bundle.cpp').write_text('\n'.join(bundle), encoding='utf-8', newline='\n')
         if any(digest(Path(name)) != expected for name, expected in inputs.items()):
@@ -195,6 +298,8 @@ def prepare_prx(root, source, cache, base, library, firmware=None, module_start=
         receipt = {'schema': 1, 'stage': 'original-prx-aot-generated', 'key': key, 'inputs': inputs,
                    'outputs': outputs, 'module': exports['module'], 'library': library,
                    'functions': len(functions), 'exports': len(selected), 'gameplay_verified': False}
+        receipt['data_exports'] = len(variable_exports)
+        receipt['data_imports'] = len(variable_imports)
         (stage / 'receipt.json').write_text(json.dumps(receipt, indent=2) + '\n', encoding='utf-8')
         stage.rename(destination)
         return destination
@@ -209,7 +314,8 @@ if __name__ == '__main__':
     parser.add_argument('--cache', required=True, type=Path)
     parser.add_argument('--base', required=True, type=lambda value: int(value, 0))
     parser.add_argument('--library', required=True)
+    parser.add_argument('--additional-library', action='append', default=[])
     parser.add_argument('--module-start', action='store_true')
     parser.add_argument('--firmware', type=Path)
     args = parser.parse_args()
-    print(prepare_prx(Path(__file__).resolve().parents[2], args.source, args.cache, args.base, args.library, args.firmware, args.module_start))
+    print(prepare_prx(Path(__file__).resolve().parents[2], args.source, args.cache, args.base, args.library, args.firmware, args.module_start, args.additional_library))

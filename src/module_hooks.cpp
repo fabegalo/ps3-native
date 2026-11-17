@@ -19,6 +19,7 @@
 #include "native_storage.h"
 extern "C" s32 _cellSpursAttributeInitialize(CellSpursAttribute*, u32, u32, s32, s32, s32, u8);
 extern "C" void ps3_hle_register_ctx(uint32_t, const char*, void (*)(ppu_context*));
+extern "C" void ps3_hle_call(uint32_t, ppu_context*);
 extern "C" [[noreturn]] void ps3_native_stop(void);
 extern "C" int sys_memory_range_backed(uint32_t, uint32_t);
 extern "C" int ps3_native_guest_range_backed(uint32_t, uint32_t);
@@ -167,6 +168,45 @@ void thread_once(ppu_context* ctx) {
 }
 void load_module(ppu_context* ctx) {
     const auto id = (uint16_t)ctx->gpr[3];
+    const auto dependency = [&](u16 dep) {
+            if (cellSysmoduleIsLoaded(dep) == CELL_OK) return;
+            const ppu_context saved = *ctx;
+            ctx->gpr[3] = dep;
+            ps3_hle_call(ps3_compute_nid("cellSysmoduleLoadModule"), ctx);
+            const auto result = (u32)ctx->gpr[3];
+            *ctx = saved;
+            if (result) {
+                std::fprintf(stderr, "[native-blocked] original module dependency activation failed id=0x%04X result=0x%08X\n", dep, result);
+                std::fflush(stderr); ps3_native_stop();
+            }
+    };
+    if (id >= CELL_SYSMODULE_HTTP && id <= CELL_SYSMODULE_HTTPS) {
+        if (id == CELL_SYSMODULE_HTTP || id == CELL_SYSMODULE_SSL) {
+            dependency(CELL_SYSMODULE_NET); dependency(CELL_SYSMODULE_RTC);
+            if (id == CELL_SYSMODULE_SSL) dependency(CELL_SYSMODULE_FS);
+        } else if (id == CELL_SYSMODULE_HTTP_UTIL) dependency(CELL_SYSMODULE_HTTP);
+        else { dependency(CELL_SYSMODULE_SSL); dependency(CELL_SYSMODULE_HTTP); }
+        const char* library = id == CELL_SYSMODULE_SSL ? "cellSsl" : "cellHttp";
+        if (!ps3_native_lle_start(library, ctx)) {
+            std::fprintf(stderr, "[native-blocked] original HTTP/SSL module start unavailable or concurrent\n");
+            std::fflush(stderr); ps3_native_stop();
+        }
+    }
+    if (id == CELL_SYSMODULE_ATRAC3PLUS || id == CELL_SYSMODULE_ADEC_AT3 ||
+        id == CELL_SYSMODULE_ADEC_ATX || id == CELL_SYSMODULE_ADEC_AL) {
+        const char* library = "cellAdec";
+        if (id == CELL_SYSMODULE_ATRAC3PLUS) {
+            dependency(CELL_SYSMODULE_ADEC_AT3); dependency(CELL_SYSMODULE_ADEC_ATX);
+            library = "cellAtrac";
+        } else if (id != CELL_SYSMODULE_ADEC_AL) {
+            dependency(CELL_SYSMODULE_ADEC_AL);
+            library = id == CELL_SYSMODULE_ADEC_AT3 ? "cellAtrac3dec" : "cellAtracXdec";
+        }
+        if (!ps3_native_lle_start(library, ctx)) {
+            std::fprintf(stderr, "[native-blocked] original ATRAC module start unavailable or concurrent library=%s\n", library);
+            std::fflush(stderr); ps3_native_stop();
+        }
+    }
     if (id == CELL_SYSMODULE_VDEC_MPEG2 || id == CELL_SYSMODULE_VDEC_AL) {
         // The MPEG-2 module depends on the original generic VDEC client.
         if (!ps3_native_lle_start("libvdec", ctx) ||
@@ -532,9 +572,9 @@ extern "C" void ps3_load_prx_modules(void) {
             std::fprintf(stderr, "[native-blocked] extra original PRX ownership, image or AOT bindings invalid\n");
             std::fflush(stderr); ps3_native_stop();
         }
-    for (const char* library : {"libvdec", "libsmvd2"})
+    for (const char* library : {"libvdec", "libsmvd2", "cellAtrac", "cellAdec", "cellAtrac3dec", "cellAtracXdec"})
         if (ps3_native_lle_library(library) && !ps3_native_lle_defer_start(library)) {
-            std::fprintf(stderr, "[native-blocked] original video module cannot defer initialization\n");
+            std::fprintf(stderr, "[native-blocked] original codec module cannot defer initialization\n");
             std::fflush(stderr); ps3_native_stop();
         }
 }

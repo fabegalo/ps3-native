@@ -109,6 +109,23 @@ extern "C" void ps3_native_hle_gate(uint32_t nid, ppu_context* ctx) {
             std::fflush(stderr); ps3_native_stop();
         }
     }
+    if (ps3_native_lle_library("cellHttp") || ps3_native_lle_library("cellSsl")) {
+        const char* symbol = ps3_hle_symbol_name(nid);
+        if (symbol && ((ps3_native_lle_library("cellHttp") &&
+                      (!std::strncmp(symbol, "cellHttp", 8) || !std::strncmp(symbol, "cellHttps", 9))) ||
+                      (ps3_native_lle_library("cellSsl") && !std::strncmp(symbol, "cellSsl", 7)))) {
+            std::fprintf(stderr, "[native-blocked] original HTTP/SSL owner has no prepared export nid=0x%08X\n", nid);
+            std::fflush(stderr); ps3_native_stop();
+        }
+    }
+    if (ps3_native_lle_library("cellAtrac") || ps3_native_lle_library("cellAdec")) {
+        const char* symbol = ps3_hle_symbol_name(nid);
+        if (symbol && ((ps3_native_lle_library("cellAtrac") && !std::strncmp(symbol, "cellAtrac", 9)) ||
+                       (ps3_native_lle_library("cellAdec") && !std::strncmp(symbol, "cellAdec", 8)))) {
+            std::fprintf(stderr, "[native-blocked] original ATRAC/ADEC owner has no prepared export nid=0x%08X\n", nid);
+            std::fflush(stderr); ps3_native_stop();
+        }
+    }
     if (nid == ps3_compute_nid("cellGcmGetTimeStamp") && ctx->gpr[3] < 2048) return;
     if (nid == ps3_compute_nid("_sys_strlen") && guest_string_size((uint32_t)ctx->gpr[3])) return;
     if (nid == ps3_compute_nid("cellGcmSetFlipMode") && ctx->gpr[3] != CELL_GCM_DISPLAY_VSYNC) {
@@ -238,6 +255,20 @@ extern "C" void ps3_native_hle_gate(uint32_t nid, ppu_context* ctx) {
                     ps3_native_context_ready(ps3_compute_nid("cellSysutilCheckCallback"));
         } else if ((uint16_t)ctx->gpr[3] == CELL_SYSMODULE_RTC) {
             ready = ps3_native_context_ready(ps3_compute_nid("cellRtcGetCurrentTick"));
+        } else if ((uint16_t)ctx->gpr[3] == CELL_SYSMODULE_HTTP || (uint16_t)ctx->gpr[3] == CELL_SYSMODULE_HTTP_UTIL) {
+            ready = ps3_native_lle_library("cellHttp") && ps3_native_lle_library("cellHttpUtil");
+        } else if ((uint16_t)ctx->gpr[3] == CELL_SYSMODULE_SSL) {
+            ready = ps3_native_lle_library("cellSsl");
+        } else if ((uint16_t)ctx->gpr[3] == CELL_SYSMODULE_HTTPS) {
+            ready = ps3_native_lle_library("cellHttp") && ps3_native_lle_library("cellHttpUtil") && ps3_native_lle_library("cellSsl");
+        } else if ((uint16_t)ctx->gpr[3] == CELL_SYSMODULE_ATRAC3PLUS) {
+            ready = ps3_native_lle_library("cellAtrac") && ps3_native_lle_library("cellAdec") &&
+                    ps3_native_lle_library("cellAtrac3dec") && ps3_native_lle_library("cellAtracXdec");
+        } else if ((uint16_t)ctx->gpr[3] == CELL_SYSMODULE_ADEC_AL) {
+            ready = ps3_native_lle_library("cellAdec");
+        } else if ((uint16_t)ctx->gpr[3] == CELL_SYSMODULE_ADEC_AT3 || (uint16_t)ctx->gpr[3] == CELL_SYSMODULE_ADEC_ATX) {
+            ready = ps3_native_lle_library("cellAdec") && ps3_native_lle_library(
+                (uint16_t)ctx->gpr[3] == CELL_SYSMODULE_ADEC_AT3 ? "cellAtrac3dec" : "cellAtracXdec");
         } else if ((uint16_t)ctx->gpr[3] == CELL_SYSMODULE_VDEC_MPEG2) {
             ready = ps3_native_lle_library("libvdec") && ps3_native_lle_library("libsmvd2");
         } else if ((uint16_t)ctx->gpr[3] == CELL_SYSMODULE_VDEC_AL) {

@@ -279,6 +279,19 @@ de entrada/ferramentas/saídas. Limites explícitos separam código original de 
 constantes em quatro payloads; todos os dados carregados são preservados. Isso
 comprova preparação, sem certificar fluxo completo, ISA, frames ou gameplay.
 
+Um teste local de inicialização de **Angry Birds Trilogy (BLUS31054, 01.00)**
+compilou 15.735 funções PPU e registrou sete dos nove programas SPU descobertos,
+incluindo firmware. Duas imagens SPU sem seções permanecem sem validação e param
+se forem alcançadas. O EBOOT real imprimiu `Engine started`, inicializou o serviço
+SPU e passou pelo módulo HTTP `0x0001` usando os vínculos AOT originais de
+`libhttp` (HTTP e HTTP Util na mesma imagem) e `libssl`. O cliente ATRAC3plus,
+ADEC comum e os provedores ATRAC3/ATRAC3plus originais concluíram sua inicialização.
+O vínculo compartilhado de dados PRX resolve referências opcionais ADDR32 e
+exports opacos; alterações de código, addends diferentes de zero e TLS continuam
+sem suporte. O boot real mais recente para no módulo de depuração LV2 `0x002E`,
+após cerca de 1,1 segundo. Rede/TLS em uso, áudio decodificado, menu, frame e gameplay
+ainda não foram verificados.
+
 Um diagnóstico limitado de entrada do processo filho também compilou todas as
 12.884 funções do `GOW1.self` original. Caminho de boot, prioridade 1001 e pilha
 de 32 KiB correspondem à chamada exit-spawn do seletor original; isso ainda não
@@ -421,9 +434,10 @@ firmware, base/relocações e propriedade explícita de NIDs. Não redistribuí-
 `src/ps3native/firmware.py` valida um PRX já descriptografado, usa as ferramentas
 upstream fixadas de relocação/lifting e gera um recibo AOT vinculado por hashes.
 Informe a pasta desse recibo em `PS3_NATIVE_FIRMWARE_DIR` na configuração CMake
-existente. Apenas a biblioteca escolhida fornece os exports; exports originais
-ausentes não caem silenciosamente no HLE. Módulos que exigem inicialização por
-module-start são rejeitados. Preparação e runtime rejeitam sobreposições e áreas
+existente. Apenas as bibliotecas escolhidas fornecem exports; `--additional-library`
+compartilha uma única imagem e ciclo de vida. Exports originais ausentes não caem
+silenciosamente no HLE. Uma entrada module-start exige preparação explícita com
+`--module-start`. Preparação e runtime rejeitam sobreposições e áreas
 reservadas de scratch/TLS. Uma fixture PRX própria verifica stack/TOC/TLS, cache,
 adulteração de exports e rejeição de fallback. A extração/descriptografia local
 usa RPCS3 somente como ferramenta offline; a execução guest usa ps3recomp.
